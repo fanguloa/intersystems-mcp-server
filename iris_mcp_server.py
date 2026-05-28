@@ -26,6 +26,36 @@ class AtelierClient:
         auth_str = f"{username}:{password}"
         self.auth_header = f"Basic {base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')}"
 
+    def is_write_allowed(self):
+        """
+        Verifies if writing is permitted on this connection.
+        Protects Live/Production environments from accidental write or modify commands.
+        """
+        # 1. Check override environment variable
+        allow_prod = os.environ.get("IRIS_ALLOW_PROD", "0") in ["1", "true", "TRUE"]
+        if allow_prod:
+            return True, "Permitido por la variable de entorno IRIS_ALLOW_PROD=1"
+
+        # 2. Check namespace heuristics
+        ns_upper = self.namespace.upper()
+        if any(prod_word in ns_upper for prod_word in ["PROD", "PRODUCTION", "LIVE", "PRD"]):
+            return False, f"Bloqueado: El namespace '{self.namespace}' parece ser un sistema de producción"
+
+        # 3. Dynamic query to check SystemMode global state in %SYS
+        try:
+            # Query ^%SYS("SystemMode") to detect if instance is configured as "Live"
+            query = "SELECT Value FROM %Library.Global_Get('%SYS', '^%SYS(\"SystemMode\")')"
+            rows = self.run_query(query)
+            if rows and len(rows) > 0:
+                mode = str(rows[0].get("Value", "")).strip()
+                if mode == "Live":
+                    return False, "Bloqueado: El servidor está configurado en modo real ('Live') en ^%SYS(\"SystemMode\")"
+        except Exception as e:
+            log_debug(f"Could not check ^%SYS(\"SystemMode\") global (expected if non-SYS user): {e}")
+
+        return True, "Permitido"
+
+
     def _send_request(self, endpoint, method='GET', payload=None, query_params=""):
         url = f"{self.base_url}{endpoint}"
         if query_params:
@@ -368,8 +398,34 @@ class IRISMCPServer:
             server_id = arguments.get("server_id")
             client = self.get_client(server_id, namespace_override=arguments.get("namespace"))
             
+            # Enforce safety write protections for Live/Production environments
+            if name in ["iris_save_class", "iris_delete_class", "iris_compile_class"]:
+                allowed, reason = client.is_write_allowed()
+                if not allowed:
+                    return {
+                        "isError": True,
+                        "content": [{
+                            "type": "text", 
+                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Operación denegada en el servidor '{server_id}' ({client.namespace}): {reason}.\n\nPara forzar la escritura en ambientes protegidos, configura la variable de entorno `IRIS_ALLOW_PROD=1`."
+                        }]
+                    }
+            
             if name == "iris_query_sql":
-                query = arguments.get("query")
+                query = arguments.get("query", "")
+                query_upper = query.upper()
+                import re
+                is_write_op = bool(re.search(r'\b(UPDATE|INSERT|DELETE|DROP|ALTER|CREATE)\b', query_upper))
+                if is_write_op:
+                    allowed, reason = client.is_write_allowed()
+                    if not allowed:
+                        return {
+                            "isError": True,
+                            "content": [{
+                                "type": "text", 
+                                "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Consulta SQL de modificación denegada en el servidor '{server_id}' ({client.namespace}): {reason}.\n\nPara forzar consultas de escritura en ambientes protegidos, configura la variable de entorno `IRIS_ALLOW_PROD=1`."
+                            }]
+                        }
+                        
                 params = arguments.get("parameters", [])
                 results = client.run_query(query, params)
                 
