@@ -191,6 +191,87 @@ class AtelierClient:
             except Exception as de:
                 log_debug(f"Failed to delete temporary document {doc_name}: {de}")
 
+    def get_ccr_status(self, class_name):
+        if not class_name.endswith(".cls"):
+            class_name += ".cls"
+        code = (
+            'Set scClass = ##class(%Studio.SourceControl.Interface).SourceControlClassGet()\n'
+            'If scClass = "" {\n'
+            '    Write "{""has_sc"": false}", !\n'
+            '    Quit\n'
+            '}\n'
+            'Set scInst = $ClassMethod(scClass, "%New", "")\n'
+            'If \'$IsObject(scInst) {\n'
+            '    Write "{""has_sc"": true, ""instantiated"": false}", !\n'
+            '    Quit\n'
+            '}\n'
+            'Set inSC = 0, editable = 0, isCheckedOut = 0, user = ""\n'
+            f'Set sc = scInst.GetStatus("{class_name}", .inSC, .editable, .isCheckedOut, .user)\n'
+            'Write "{""has_sc"": true, ""instantiated"": true, ""in_sc"": ", inSC, ", ""editable"": ", editable, ", ""checked_out"": ", isCheckedOut, ", ""user"": """, user, """}", !\n'
+        )
+        output = self.execute_code(code)
+        if isinstance(output, dict):
+            return output
+        try:
+            return json.loads(output.strip())
+        except Exception:
+            raise Exception(f"Failed to parse CCR status output: {output}")
+
+    def ccr_checkout(self, class_name, ccr_desc):
+        if not class_name.endswith(".cls"):
+            class_name += ".cls"
+        ccr_desc_escaped = ccr_desc.replace('"', '\\"')
+        code = f"""
+        Set scClass = ##class(%Studio.SourceControl.Interface).SourceControlClassGet()
+        If scClass = "" {{
+            Write "Error: No active source control class configured in this namespace", !
+            Quit
+        }}
+        Set scInst = $ClassMethod(scClass, "%New", "")
+        If '$IsObject(scInst) {{
+            Write "Error: Failed to instantiate source control class: ", scClass, !
+            Quit
+        }}
+        Set sc = scInst.CheckOut("{class_name}", "{ccr_desc_escaped}")
+        If $$$ISOK(sc) {{
+            Write "SUCCESS", !
+        }} Else {{
+            Write "Error: ", $System.Status.GetErrorText(sc), !
+        }}
+        """
+        output = self.execute_code(code)
+        output_str = output.strip()
+        if output_str == "SUCCESS":
+            return True, "Checkout completado con éxito."
+        return False, output_str
+
+    def ccr_undocheckout(self, class_name):
+        if not class_name.endswith(".cls"):
+            class_name += ".cls"
+        code = f"""
+        Set scClass = ##class(%Studio.SourceControl.Interface).SourceControlClassGet()
+        If scClass = "" {{
+            Write "Error: No active source control class configured in this namespace", !
+            Quit
+        }}
+        Set scInst = $ClassMethod(scClass, "%New", "")
+        If '$IsObject(scInst) {{
+            Write "Error: Failed to instantiate source control class: ", scClass, !
+            Quit
+        }}
+        Set sc = scInst.UndoCheckout("{class_name}")
+        If $$$ISOK(sc) {{
+            Write "SUCCESS", !
+        }} Else {{
+            Write "Error: ", $System.Status.GetErrorText(sc), !
+        }}
+        """
+        output = self.execute_code(code)
+        output_str = output.strip()
+        if output_str == "SUCCESS":
+            return True, "UndoCheckout completado con éxito."
+        return False, output_str
+
 
 
 
@@ -461,6 +542,76 @@ class IRISMCPServer:
                     },
                     "required": ["server_id", "code"]
                 }
+            },
+            {
+                "name": "iris_ccr_status",
+                "description": "Obtiene el estado de control de cambios (CCR/Perforce) de una clase en el servidor (ej: si está en Checkout, Editable o quién la tiene bloqueada).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "ID del servidor configurado."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace opcional (ej: 'BASE-ACHS')."
+                        },
+                        "class_name": {
+                            "type": "string",
+                            "description": "Nombre completo de la clase con o sin extensión (ej: 'Custom.ACHS.Integration.REST.BO.PAPerson')."
+                        }
+                    },
+                    "required": ["server_id", "class_name"]
+                }
+            },
+            {
+                "name": "iris_ccr_checkout",
+                "description": "Realiza un Checkout (bloqueo/habilitación de edición) de una clase bajo un CCR ID o descripción en el servidor con control de cambios activo.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "ID del servidor configurado."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace opcional."
+                        },
+                        "class_name": {
+                            "type": "string",
+                            "description": "Nombre completo de la clase con o sin extensión."
+                        },
+                        "ccr_id": {
+                            "type": "string",
+                            "description": "Identificador o descripción del CCR (ej: 'CCR-12345')."
+                        }
+                    },
+                    "required": ["server_id", "class_name", "ccr_id"]
+                }
+            },
+            {
+                "name": "iris_ccr_undocheckout",
+                "description": "Deshace un Checkout de una clase en el servidor, liberando el bloqueo y revirtiendo cualquier cambio no confirmado.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "ID del servidor configurado."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace opcional."
+                        },
+                        "class_name": {
+                            "type": "string",
+                            "description": "Nombre completo de la clase con o sin extensión."
+                        }
+                    },
+                    "required": ["server_id", "class_name"]
+                }
             }
         ]
         return {"tools": tools}
@@ -496,7 +647,7 @@ class IRISMCPServer:
             client = self.get_client(server_id, namespace_override=arguments.get("namespace"))
             
             # Enforce safety write protections for Live/Production environments
-            if name in ["iris_save_class", "iris_delete_class", "iris_compile_class", "iris_execute_objectscript"]:
+            if name in ["iris_save_class", "iris_delete_class", "iris_compile_class", "iris_execute_objectscript", "iris_ccr_checkout", "iris_ccr_undocheckout"]:
                 allowed, reason = client.is_write_allowed()
                 if not allowed:
                     return {
@@ -671,6 +822,49 @@ class IRISMCPServer:
                 code = arguments.get("code")
                 res = client.execute_code(code)
                 return {"content": [{"type": "text", "text": res}]}
+
+            elif name == "iris_ccr_status":
+                class_name = arguments.get("class_name")
+                status = client.get_ccr_status(class_name)
+                
+                output = f"### Estado de Control de Cambios (CCR) de `{class_name}` en {server_id}\n\n"
+                if not status.get("has_sc"):
+                    output += "❌ No hay control de código de fuentes configurado en este namespace."
+                elif not status.get("instantiated"):
+                    output += "❌ El control de código de fuentes está activo pero falló la instanciación de la extensión."
+                else:
+                    output += f"- **Pertenece a SC / CCR**: {'Sí' if status.get('in_sc') else 'No'}\n"
+                    output += f"- **Habilitado para Edición**: {'Sí' if status.get('editable') else 'No'}\n"
+                    output += f"- **En Estado Checkout**: {'Sí' if status.get('checked_out') else 'No'}\n"
+                    if status.get("user"):
+                        output += f"- **Usuario que tiene Checkout**: `{status.get('user')}`\n"
+                return {"content": [{"type": "text", "text": output}]}
+                
+            elif name == "iris_ccr_checkout":
+                class_name = arguments.get("class_name")
+                ccr_id = arguments.get("ccr_id")
+                success, msg = client.ccr_checkout(class_name, ccr_id)
+                
+                output = f"### Solicitud de Checkout en {server_id}\n"
+                output += f"- **Clase**: `{class_name}`\n"
+                output += f"- **CCR / Descripción**: `{ccr_id}`\n"
+                if success:
+                    output += f"\n✅ **Éxito**: {msg}"
+                else:
+                    output += f"\n❌ **Fallo**: {msg}"
+                return {"content": [{"type": "text", "text": output}]}
+                
+            elif name == "iris_ccr_undocheckout":
+                class_name = arguments.get("class_name")
+                success, msg = client.ccr_undocheckout(class_name)
+                
+                output = f"### Solicitud de UndoCheckout en {server_id}\n"
+                output += f"- **Clase**: `{class_name}`\n"
+                if success:
+                    output += f"\n✅ **Éxito**: {msg}"
+                else:
+                    output += f"\n❌ **Fallo**: {msg}"
+                return {"content": [{"type": "text", "text": output}]}
 
             else:
                 raise ValueError(f"Herramienta desconocida: {name}")
