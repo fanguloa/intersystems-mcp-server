@@ -272,6 +272,23 @@ class AtelierClient:
             return True, "UndoCheckout completado con éxito."
         return False, output_str
 
+    def list_namespaces(self):
+        code = """
+        Set tSC = ##class(%SYS.Namespace).ListAll(.list)
+        Set ns = ""
+        For {
+            Set ns = $Order(list(ns))
+            If ns = "" Quit
+            Write ns, !
+        }
+        """
+        output = self.execute_code(code)
+        namespaces = []
+        for line in output.splitlines():
+            line_str = line.strip()
+            if line_str and not line_str.startswith("ERROR:"):
+                namespaces.append(line_str)
+        return namespaces
 
 
 
@@ -279,6 +296,7 @@ class AtelierClient:
 class IRISMCPServer:
     def __init__(self):
         self.servers = {}
+        self.namespaces_cache = {}
         self.load_configuration()
 
     def load_configuration(self):
@@ -321,6 +339,53 @@ class IRISMCPServer:
             username=s["username"],
             password=s["password"]
         )
+
+    def get_server_namespaces(self, server_id):
+        if server_id in self.namespaces_cache:
+            return self.namespaces_cache[server_id]
+        
+        try:
+            # Use a basic client pointing to the default namespace to list namespaces
+            client = self.get_client(server_id)
+            namespaces = client.list_namespaces()
+            if namespaces:
+                self.namespaces_cache[server_id] = namespaces
+                return namespaces
+        except Exception as e:
+            log_debug(f"Failed to fetch namespaces for server {server_id}: {e}")
+        return []
+
+    def check_namespace_ambiguity(self, server_id, ns_arg):
+        # If the tool call explicitly passed a namespace, there's no ambiguity
+        if ns_arg:
+            return None, ns_arg
+            
+        # If the server configuration has an explicit non-USER namespace, use it without prompting
+        s = self.servers.get(server_id, {})
+        config_ns = s.get("namespace")
+        if config_ns and config_ns.upper() != "USER":
+            return None, config_ns
+            
+        # Otherwise, fetch all namespaces on the server
+        namespaces = self.get_server_namespaces(server_id)
+        if not namespaces:
+            return None, config_ns or "USER"
+            
+        # Filter working/custom namespaces
+        system_namespaces = {"%SYS", "USER", "HSLIB", "HSSYS", "HSSYSLOCALTEMP", "DATAMIGRATION", "HSCUSTOM"}
+        working_namespaces = [ns for ns in namespaces if ns.upper() not in system_namespaces and not ns.startswith("^^")]
+        
+        # If there is only one working namespace, auto-route to it
+        if len(working_namespaces) == 1:
+            log_debug(f"Auto-routing to single working namespace: {working_namespaces[0]}")
+            return None, working_namespaces[0]
+            
+        if len(working_namespaces) > 1:
+            # We have ambiguity! Return the list of working namespaces
+            return working_namespaces, None
+            
+        return None, "USER"
+
 
     def handle_tools_list(self):
         tools = [
@@ -612,6 +677,20 @@ class IRISMCPServer:
                     },
                     "required": ["server_id", "class_name"]
                 }
+            },
+            {
+                "name": "iris_list_namespaces",
+                "description": "Obtiene la lista de todos los namespaces disponibles en la instancia de InterSystems IRIS seleccionada.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "ID del servidor configurado."
+                        }
+                    },
+                    "required": ["server_id"]
+                }
             }
         ]
         return {"tools": tools}
@@ -644,7 +723,28 @@ class IRISMCPServer:
                 return {"content": [{"type": "text", "text": output}]}
                 
             server_id = arguments.get("server_id")
-            client = self.get_client(server_id, namespace_override=arguments.get("namespace"))
+            
+            # Dynamic namespace check (skip for list tools)
+            selected_ns = arguments.get("namespace")
+            if name not in ["iris_list_servers", "iris_list_namespaces"]:
+                working_ns, selected_ns = self.check_namespace_ambiguity(server_id, arguments.get("namespace"))
+                if working_ns:
+                    ns_list_str = "\n".join([f"- **`{ns}`**" for ns in working_ns])
+                    return {
+                        "isError": True,
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                f"⚠️ **Múltiples Namespaces de Trabajo Detectados**\n\n"
+                                f"No se ha especificado el parámetro `namespace` en la llamada a la herramienta para el servidor `{server_id}`, "
+                                f"y este servidor contiene más de un namespace de trabajo activo.\n\n"
+                                f"Por favor, selecciona uno de los siguientes namespaces para proceder:\n{ns_list_str}\n\n"
+                                f"Vuelve a ejecutar la herramienta especificando el namespace deseado en el parámetro `namespace`."
+                            )
+                        }]
+                    }
+                    
+            client = self.get_client(server_id, namespace_override=selected_ns)
             
             # Enforce safety write protections for Live/Production environments
             if name in ["iris_save_class", "iris_delete_class", "iris_compile_class", "iris_execute_objectscript", "iris_ccr_checkout", "iris_ccr_undocheckout"]:
@@ -864,6 +964,16 @@ class IRISMCPServer:
                     output += f"\n✅ **Éxito**: {msg}"
                 else:
                     output += f"\n❌ **Fallo**: {msg}"
+                return {"content": [{"type": "text", "text": output}]}
+
+            elif name == "iris_list_namespaces":
+                namespaces = client.list_namespaces()
+                output = f"### Namespaces disponibles en `{server_id}`:\n\n"
+                if not namespaces:
+                    output += "No se pudieron recuperar los namespaces o la lista está vacía."
+                else:
+                    for ns in namespaces:
+                        output += f"- `{ns}`\n"
                 return {"content": [{"type": "text", "text": output}]}
 
             else:

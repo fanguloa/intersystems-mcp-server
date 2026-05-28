@@ -65,9 +65,14 @@ def run_tests():
         print("Crea un archivo 'mcp_config.json' local para correr pruebas en vivo.")
         return
 
-    # Choose a server to test
-    test_sid = list(server.servers.keys())[0]
-    print(f"Paso 4: Iniciando pruebas de conexión en vivo con el primer servidor '{test_sid}'...")
+    # Choose a server to test (prefer clmebase if available, otherwise first)
+    if "clmebase" in server.servers:
+        test_sid = "clmebase"
+        test_ns = "BASE-CLME"
+    else:
+        test_sid = list(server.servers.keys())[0]
+        test_ns = server.servers[test_sid].get("namespace")
+    print(f"Paso 4: Iniciando pruebas de conexión en vivo con el servidor '{test_sid}' (Namespace: '{test_ns}')...")
     print("*(Nota: Si esto falla por timeout, verifica tu conexión VPN asociada)*")
 
     # 4. Run SQL Query
@@ -75,6 +80,7 @@ def run_tests():
     try:
         sql = "SELECT TOP 3 Name, TimeChanged FROM %Dictionary.ClassDefinition WHERE Name LIKE '%System%' ORDER BY Name"
         args = {"server_id": test_sid, "query": sql}
+        if test_ns: args["namespace"] = test_ns
         res = server.handle_tool_call("iris_query_sql", args)
         if res.get("isError"):
             print("     [FAILED] Falló la consulta SQL:")
@@ -89,6 +95,7 @@ def run_tests():
     print(f"\n  -> [Live Test] Listando clases del paquete '%SYS' (iris_list_classes) en {test_sid}...")
     try:
         args = {"server_id": test_sid, "package_prefix": "%SYS"}
+        if test_ns: args["namespace"] = test_ns
         res = server.handle_tool_call("iris_list_classes", args)
         text = res.get("content", [{}])[0].get("text", "")
         lines = text.splitlines()
@@ -103,6 +110,7 @@ def run_tests():
     try:
         code = 'Write "¡Hola desde el Servidor MCP de Antigravity!", !, "La fecha es: ", $ZDatetime($Horolog, 3), !'
         args = {"server_id": test_sid, "code": code}
+        if test_ns: args["namespace"] = test_ns
         res = server.handle_tool_call("iris_execute_objectscript", args)
         if res.get("isError"):
             print("     [FAILED] Falló la ejecución del código:")
@@ -120,6 +128,7 @@ def run_tests():
     print(f"\n  -> [Live Test] Consultando estado CCR (iris_ccr_status) en {test_sid}...")
     try:
         args = {"server_id": test_sid, "class_name": "Custom.ACHS.Integration.REST.BO.PAPerson"}
+        if test_ns: args["namespace"] = test_ns
         res = server.handle_tool_call("iris_ccr_status", args)
         if res.get("isError"):
             print("     [FAILED] Falló la consulta CCR:")
@@ -129,6 +138,20 @@ def run_tests():
             print(res.get("content", [{}])[0].get("text"))
     except Exception as e:
         print(f"     [ERROR] Excepción al consultar CCR: {e}")
+
+    # 8. Test Namespaces List Query
+    print(f"\n  -> [Live Test] Listando Namespaces (iris_list_namespaces) en {test_sid}...")
+    try:
+        args = {"server_id": test_sid}
+        res = server.handle_tool_call("iris_list_namespaces", args)
+        if res.get("isError"):
+            print("     [FAILED] Falló el listado de namespaces:")
+            print(res.get("content", [{}])[0].get("text"))
+        else:
+            print("     [SUCCESS] Listado de namespaces realizado con éxito:")
+            print(res.get("content", [{}])[0].get("text"))
+    except Exception as e:
+        print(f"     [ERROR] Excepción al listar namespaces: {e}")
 
     print("\n==================================================")
     print("   Fin de la Suite de Pruebas de Servidor MCP     ")
