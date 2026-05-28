@@ -116,6 +116,20 @@ def run_tests():
     except Exception as e:
         print(f"     [ERROR] Excepción al ejecutar código: {e}")
 
+    # 7. Test CCR Status Query
+    print(f"\n  -> [Live Test] Consultando estado CCR (iris_ccr_status) en {test_sid}...")
+    try:
+        args = {"server_id": test_sid, "class_name": "Custom.ACHS.Integration.REST.BO.PAPerson"}
+        res = server.handle_tool_call("iris_ccr_status", args)
+        if res.get("isError"):
+            print("     [FAILED] Falló la consulta CCR:")
+            print(res.get("content", [{}])[0].get("text"))
+        else:
+            print("     [SUCCESS] Consulta CCR realizada con éxito:")
+            print(res.get("content", [{}])[0].get("text"))
+    except Exception as e:
+        print(f"     [ERROR] Excepción al consultar CCR: {e}")
+
     print("\n==================================================")
     print("   Fin de la Suite de Pruebas de Servidor MCP     ")
     print("==================================================")

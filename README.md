@@ -22,7 +22,7 @@ Este servidor sigue la filosofía **Zero-Helper**: realiza consultas SQL, recupe
 
 ## 🛠️ Herramientas Expuestas (Tools)
 
-El servidor MCP registra las siguientes **9 herramientas nativas** para tu asistente de IA:
+El servidor MCP registra las siguientes **13 herramientas nativas** para tu asistente de IA:
 
 | Nombre de la Herramienta | Descripción | Parámetros de Entrada |
 | :--- | :--- | :--- |
@@ -35,6 +35,21 @@ El servidor MCP registra las siguientes **9 herramientas nativas** para tu asist
 | `iris_delete_class` | Elimina una clase de forma segura y permanente del namespace. | `server_id`, `class_name`, `namespace` (opcional) |
 | `iris_get_event_logs` | Extrae las últimas trazas de error y warnings del log del bus de integración (`Ens_Util.Log`). | `server_id`, `limit` (max 100), `namespace` (opcional) |
 | `iris_get_recent_messages` | Revisa el tráfico de mensajes recientes en el bus de Ensemble (`Ens.MessageHeader`). | `server_id`, `limit`, `only_errors` (bool), `namespace` (opcional) |
+| `iris_execute_objectscript` | Ejecuta código ObjectScript arbitrario de manera síncrona en el servidor con cero huella. | `server_id`, `code`, `namespace` (opcional) |
+| `iris_ccr_status` | Consulta el estado de control de cambios (CCR/Perforce) de una clase (bloqueada, editable, checkout). | `server_id`, `class_name`, `namespace` (opcional) |
+| `iris_ccr_checkout` | Realiza un Checkout (bloqueo/edición) de una clase bajo un identificador o descripción de CCR. | `server_id`, `class_name`, `ccr_id`, `namespace` (opcional) |
+| `iris_ccr_undocheckout` | Revierte un Checkout en el servidor, removiendo bloqueos y deshaciendo cambios no confirmados. | `server_id`, `class_name`, `namespace` (opcional) |
+
+---
+
+## 🛡️ Seguridad y Protección de Producción
+
+Para evitar accidentes críticos, el servidor MCP bloquea automáticamente cualquier acción de escritura o modificación de código (como `save`, `delete`, `compile`, `execute_objectscript`, `ccr_checkout` o `ccr_undocheckout`) en ambientes detectados como **Producción / Live** (aquellos cuyo ID de servidor contenga palabras clave como `live`, `prod`, `real`, etc., o requieran VPNs clínicas y no tengan habilitado el modo de escritura).
+
+Si requieres ejecutar operaciones de escritura en estos servidores protegidos, deberás iniciar o registrar el servidor MCP con la variable de entorno:
+```bash
+IRIS_ALLOW_PROD=1
+```
 
 ---
 
