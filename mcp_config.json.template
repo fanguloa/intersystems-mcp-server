@@ -1,0 +1,37 @@
+{
+  "servers": {
+    "my-dev-server": {
+      "host": "localhost",
+      "port": 52773,
+      "path_prefix": "",
+      "scheme": "http",
+      "username": "_SYSTEM",
+      "password": "SYS",
+      "namespace": "USER",
+      "vpn": "Local/None",
+      "description": "Local development instance"
+    },
+    "my-clinical-prod": {
+      "host": "10.150.2.4",
+      "port": 80,
+      "path_prefix": "/csp/trakcare",
+      "scheme": "http",
+      "username": "developer_user",
+      "password": "SecurePassword123",
+      "namespace": "PROD-APP",
+      "vpn": "GlobalProtect (MyCompany VPN)",
+      "description": "Clinical TrakCare Production Database"
+    },
+    "my-cloud-integration": {
+      "host": "my-instance.cl.intersystems.com",
+      "port": 80,
+      "path_prefix": "/csp/ensemble",
+      "scheme": "http",
+      "username": "api_user",
+      "password": "AnotherSecurePassword",
+      "namespace": "INT",
+      "vpn": "Cisco Secure Client (santiago.vpn.intersystems.com - issc_2fa)",
+      "description": "Integration Bus Cloud Server"
+    }
+  }
+}
