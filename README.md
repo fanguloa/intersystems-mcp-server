@@ -4,7 +4,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-brightgreen.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Un servidor nativo, robusto y ultraseguro de **Model Context Protocol (MCP)** para conectar asistentes de Inteligencia Artificial (como Claude, GPTs y agentes de desarrollo) directamente con instancias de **InterSystems IRIS** (incluyendo TrakCare y Ensemble/HealthShare). 
+Un servidor nativo, robusto y ultraseguro de **Model Context Protocol (MCP)** para conectar asistentes de Inteligencia Artificial (como Claude, GPTs y agentes de desarrollo) directamente con instancias de **InterSystems IRIS** (incluyendo interoperabilidad Ensemble/HealthShare y motores de datos IRIS). 
 
 Este servidor sigue la filosofía **Zero-Helper**: realiza consultas SQL, recupera código fuente, compila clases y revisa logs de eventos de forma pasiva a través de la API REST nativa de Atelier, **sin necesidad de instalar ninguna clase auxiliar o wrapper en las bases de datos de producción**.
 
@@ -16,7 +16,7 @@ Este servidor sigue la filosofía **Zero-Helper**: realiza consultas SQL, recupe
 * 📦 **Multiservidor Centralizado**: Soporta infinitos servidores y proyectos organizados en un único repositorio de credenciales seguro en tu directorio home (`~/.iris_mcp_servers.json`).
 * 🔀 **Namespace Dinámico**: Todas las herramientas permiten especificar un namespace en caliente. El servidor reconfigura dinámicamente la conexión REST para apuntar a la base de datos solicitada de forma transparente, con fallbacks inteligentes a `"USER"`.
 * 🛡️ **VPN-Aware (Consistente con VPNs)**: Almacena información de túneles VPN (Cisco, GlobalProtect, FortiClient, etc.). Si una conexión falla por timeout de red, el servidor intercepta el error e inyecta una sugerencia activa indicándote qué VPN debes activar antes de reintentar.
-* ❌ **Cero Huella (Zero-Footprint)**: Diseñado bajo altos estándares de seguridad para ambientes clínicos y de misión crítica, evitando alterar la integridad de los ambientes protegidos.
+* ❌ **Cero Huella (Zero-Footprint)**: Diseñado bajo altos estándares de seguridad para ambientes empresariales y de misión crítica, evitando alterar la integridad de los ambientes protegidos.
 
 ---
 
@@ -44,7 +44,7 @@ El servidor MCP registra las siguientes **13 herramientas nativas** para tu asis
 
 ## 🛡️ Seguridad y Protección de Producción
 
-Para evitar accidentes críticos, el servidor MCP bloquea automáticamente cualquier acción de escritura o modificación de código (como `save`, `delete`, `compile`, `execute_objectscript`, `ccr_checkout` o `ccr_undocheckout`) en ambientes detectados como **Producción / Live** (aquellos cuyo ID de servidor contenga palabras clave como `live`, `prod`, `real`, etc., o requieran VPNs clínicas y no tengan habilitado el modo de escritura).
+Para evitar accidentes críticos, el servidor MCP bloquea automáticamente cualquier acción de escritura o modificación de código (como `save`, `delete`, `compile`, `execute_objectscript`, `ccr_checkout` o `ccr_undocheckout`) en ambientes detectados como **Producción / Live** (aquellos cuyo ID de servidor contenga palabras clave como `live`, `prod`, `real`, etc., o requieran VPNs corporativas y no tengan habilitado el modo de escritura).
 
 Si requieres ejecutar operaciones de escritura en estos servidores protegidos, deberás iniciar o registrar el servidor MCP con la variable de entorno:
 ```bash
@@ -98,16 +98,16 @@ Edita el nuevo archivo `.iris_mcp_servers.json` en tu carpeta home con tus servi
       "vpn": "Ninguna",
       "description": "Desarrollo Local"
     },
-    "mi-trakcare-uat": {
+    "mi-servidor-uat": {
       "host": "10.0.10.4",
       "port": 80,
-      "path_prefix": "/csp/trakcare",
+      "path_prefix": "/csp/sys",
       "scheme": "http",
       "username": "api_user",
       "password": "SecretPassword123",
       "namespace": "UAT-APP",
       "vpn": "GlobalProtect (MyCompany VPN)",
-      "description": "TrakCare Clínico UAT"
+      "description": "Servidor de Pruebas UAT"
     }
   }
 }
@@ -158,10 +158,10 @@ En los ajustes de la extensión Cline o Roo Code, selecciona **MCP**, presiona *
 Una vez configurado, puedes interactuar directamente con tu IA en lenguaje natural:
 
 * 🗺️ *"Lista mis servidores configurados para verificar qué VPN necesito conectar."*
-* 🔍 *"Busca qué clases existen en el paquete `Custom.SAP` en el servidor `mi-trakcare-uat`."*
-* 📄 *"Muéstrame el código de la clase `Custom.SAP.Api.RestHandler` en `mi-trakcare-uat`."*
+* 🔍 *"Busca qué clases existen en el paquete `Custom.SAP` en el servidor `mi-servidor-uat`."*
+* 📄 *"Muéstrame el código de la clase `Custom.SAP.Api.RestHandler` en `mi-servidor-uat`."*
 * 🔨 *"Modifica el método `OnProcess` para añadir manejo de excepciones y compila la clase de nuevo."*
-* 📊 *"Ejecuta la consulta SQL 'SELECT TOP 10 ID, PAPER_Name FROM SQLUser.PA_Person' en el servidor de desarrollo."*
+* 📊 *"Ejecuta la consulta SQL 'SELECT TOP 10 ID, Name FROM Sample.Person' en el servidor de desarrollo."*
 * 🚨 *"¿Hay algún error o warning reciente en el log de Ensemble de integración?"*
 
 ---
