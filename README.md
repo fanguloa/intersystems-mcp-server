@@ -14,7 +14,7 @@ Este servidor sigue la filosofía **Zero-Helper**: realiza consultas SQL, recupe
 
 * 📡 **Conexión stdio robusta**: Implementa el protocolo estándar JSON-RPC 2.0 nativo sobre canales de entrada y salida estándar, compatible con múltiples entornos e IDEs.
 * 📦 **Multiservidor Centralizado**: Soporta infinitos servidores y proyectos organizados en un único repositorio de credenciales seguro en tu directorio home (`~/.iris_mcp_servers.json`).
-* 🔀 **Namespace Dinámico**: Todas las herramientas permiten especificar un namespace en caliente. El servidor reconfigura dinámicamente la conexión REST para apuntar a la base de datos solicitada de forma transparente, con fallbacks inteligentes a `"USER"`.
+* 🔀 **Manejo Inteligente de Namespaces (Pregunta Dinámica)**: Todas las herramientas permiten especificar un namespace en caliente. Si se omite y el servidor cuenta con múltiples entornos (ej: `BASE-CLME` e `INT`), el servidor detecta la ambigüedad y retorna una pregunta interactiva con las alternativas para que el asistente consulte cuál utilizar. Si solo hay un entorno de trabajo, se rutea de forma automática y transparente.
 * 🛡️ **VPN-Aware (Consistente con VPNs)**: Almacena información de túneles VPN (Cisco, GlobalProtect, FortiClient, etc.). Si una conexión falla por timeout de red, el servidor intercepta el error e inyecta una sugerencia activa indicándote qué VPN debes activar antes de reintentar.
 * ❌ **Cero Huella (Zero-Footprint)**: Diseñado bajo altos estándares de seguridad para ambientes empresariales y de misión crítica, evitando alterar la integridad de los ambientes protegidos.
 
@@ -22,11 +22,12 @@ Este servidor sigue la filosofía **Zero-Helper**: realiza consultas SQL, recupe
 
 ## 🛠️ Herramientas Expuestas (Tools)
 
-El servidor MCP registra las siguientes **13 herramientas nativas** para tu asistente de IA:
+El servidor MCP registra las siguientes **14 herramientas nativas** para tu asistente de IA:
 
 | Nombre de la Herramienta | Descripción | Parámetros de Entrada |
 | :--- | :--- | :--- |
 | `iris_list_servers` | Muestra la tabla de todas tus instancias, credenciales, namespaces y VPNs asociadas. | Ninguno |
+| `iris_list_namespaces` | Obtiene la lista de todos los namespaces disponibles en la instancia de InterSystems IRIS seleccionada. | `server_id` |
 | `iris_query_sql` | Corre consultas SQL parametrizadas nativas (ej. búsquedas en diccionarios u operaciones). | `server_id`, `query`, `parameters` (array), `namespace` (opcional) |
 | `iris_list_classes` | Lista de forma rápida clases personalizadas del sistema filtrando por paquete (evita sobrecargas). | `server_id`, `package_prefix`, `namespace` (opcional) |
 | `iris_get_class` | Recupera el código fuente ObjectScript completo de una clase `.cls` en el servidor. | `server_id`, `class_name`, `namespace` (opcional) |
