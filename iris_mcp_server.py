@@ -119,6 +119,81 @@ class AtelierClient:
             return True, "Deleted successfully"
         return False, f"Delete failed with status {status}: {data}"
 
+    def execute_code(self, code_str):
+        """
+        Executes arbitrary ObjectScript code over REST via Zero-Helper transient class generator.
+        Creates a temporary class, compiles it, executes it via SQL, and deletes it.
+        """
+        import uuid
+        uid = uuid.uuid4().hex[:12]
+        class_name = f"User.McpTmpRun{uid}"
+        doc_name = f"{class_name}.cls"
+        sql_func = f"SQLUser.McpTmpRun{uid}_Execute"
+        
+        class_content = [
+            f"Class {class_name} [ Final ]",
+            "{",
+            "ClassMethod Execute() As %String [ SqlProc ]",
+            "{",
+            "    Set savedIO = $IO",
+            "    Set tempFile = ##class(%File).TempFilename(\"txt\")",
+            "    Open tempFile:(\"WNS\"):5",
+            "    If '$Test { Quit \"ERROR: Cannot open temp file\" }",
+            "    Use tempFile",
+            "    Try {",
+        ]
+        
+        for line in code_str.splitlines():
+            class_content.append(f"        {line}")
+            
+        class_content.extend([
+            "    } Catch ex {",
+            "        Write \"ERROR: \", ex.DisplayString(), !",
+            "    }",
+            "    Close tempFile",
+            "    Use savedIO",
+            "    Set stream = ##class(%Stream.FileCharacter).%New()",
+            "    Set sc = stream.LinkToFile(tempFile)",
+            "    Set output = \"\"",
+            "    If $$$ISOK(sc) {",
+            "        While 'stream.AtEnd {",
+            "            Set output = output _ stream.ReadLine() _ $Char(10)",
+            "        }",
+            "    }",
+            "    Do ##class(%File).Delete(tempFile)",
+            "    Quit output",
+            "}",
+            "}"
+        ])
+        
+        # 1. Save document (PUT)
+        saved, save_msg = self.save_document(doc_name, class_content)
+        if not saved:
+            raise Exception(f"Failed to upload temporary executor class: {save_msg}")
+            
+        try:
+            # 2. Compile document (POST)
+            res = self.compile_document(doc_name)
+            errors = res.get("status", {}).get("errors", [])
+            if errors:
+                raise Exception(f"Failed to compile temporary executor class: {json.dumps(errors)}")
+                
+            # 3. Query via SQL (POST)
+            query = f"SELECT {sql_func}() AS result"
+            results = self.run_query(query)
+            if results and len(results) > 0:
+                return results[0].get("result", "")
+            return ""
+        finally:
+            # 4. Delete document (best-effort)
+            try:
+                self.delete_document(doc_name)
+            except Exception as de:
+                log_debug(f"Failed to delete temporary document {doc_name}: {de}")
+
+
+
+
 
 class IRISMCPServer:
     def __init__(self):
@@ -364,6 +439,28 @@ class IRISMCPServer:
                     },
                     "required": ["server_id"]
                 }
+            },
+            {
+                "name": "iris_execute_objectscript",
+                "description": "Ejecuta un bloque de código ObjectScript arbitrario de forma transitoria en el servidor y retorna la salida escrita estándar (Write/output).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "ID del servidor configurado."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "Código ObjectScript a ejecutar (ej: 'Write \"Hello World\", !')."
+                        }
+                    },
+                    "required": ["server_id", "code"]
+                }
             }
         ]
         return {"tools": tools}
@@ -399,14 +496,14 @@ class IRISMCPServer:
             client = self.get_client(server_id, namespace_override=arguments.get("namespace"))
             
             # Enforce safety write protections for Live/Production environments
-            if name in ["iris_save_class", "iris_delete_class", "iris_compile_class"]:
+            if name in ["iris_save_class", "iris_delete_class", "iris_compile_class", "iris_execute_objectscript"]:
                 allowed, reason = client.is_write_allowed()
                 if not allowed:
                     return {
                         "isError": True,
                         "content": [{
                             "type": "text", 
-                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Operación denegada en el servidor '{server_id}' ({client.namespace}): {reason}.\n\nPara forzar la escritura en ambientes protegidos, configura la variable de entorno `IRIS_ALLOW_PROD=1`."
+                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Operación denegada en el servidor '{server_id}' ({client.namespace}): {reason}.\n\nPara forzar la escritura/ejecución en ambientes protegidos, configura la variable de entorno `IRIS_ALLOW_PROD=1`."
                         }]
                     }
             
@@ -569,6 +666,11 @@ class IRISMCPServer:
                         is_err = "❌ Sí" if r.get("IsError") == 1 else "✅ No"
                         output += f"| `{r.get('ID')}` | `{r.get('TimeCreated')}` | `{r.get('SourceConfigName')}` | `{r.get('TargetConfigName')}` | `{r.get('Status')}` | {is_err} | {err_str} |\n"
                 return {"content": [{"type": "text", "text": output}]}
+
+            elif name == "iris_execute_objectscript":
+                code = arguments.get("code")
+                res = client.execute_code(code)
+                return {"content": [{"type": "text", "text": res}]}
 
             else:
                 raise ValueError(f"Herramienta desconocida: {name}")

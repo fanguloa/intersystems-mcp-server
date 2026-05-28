@@ -98,6 +98,24 @@ def run_tests():
     except Exception as e:
         print(f"     [ERROR] Excepción al listar clases: {e}")
 
+    # 6. Test ObjectScript Execution
+    print(f"\n  -> [Live Test] Ejecutando código ObjectScript transitorio (iris_execute_objectscript) en {test_sid}...")
+    try:
+        code = 'Write "¡Hola desde el Servidor MCP de Antigravity!", !, "La fecha es: ", $ZDatetime($Horolog, 3), !'
+        args = {"server_id": test_sid, "code": code}
+        res = server.handle_tool_call("iris_execute_objectscript", args)
+        if res.get("isError"):
+            print("     [FAILED] Falló la ejecución del código:")
+            print(res.get("content", [{}])[0].get("text"))
+        else:
+            print("     [SUCCESS] Código ejecutado con éxito. Salida recibida:")
+            output_content = res.get("content", [{}])[0].get("text", "")
+            print("--------------------------------------------------")
+            print(output_content.rstrip())
+            print("--------------------------------------------------")
+    except Exception as e:
+        print(f"     [ERROR] Excepción al ejecutar código: {e}")
+
     print("\n==================================================")
     print("   Fin de la Suite de Pruebas de Servidor MCP     ")
     print("==================================================")
