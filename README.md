@@ -1,164 +1,493 @@
 # InterSystems IRIS - Model Context Protocol (MCP) Server 🚀
 
 [![MCP Version](https://img.shields.io/badge/mcp-2024--11--05-blue.svg)](https://modelcontextprotocol.io/)
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-brightgreen.svg)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/python-3.11%2B-brightgreen.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Un servidor nativo, robusto y ultraseguro de **Model Context Protocol (MCP)** para conectar asistentes de Inteligencia Artificial (como Claude, GPTs y agentes de desarrollo) directamente con instancias de **InterSystems IRIS** (incluyendo interoperabilidad Ensemble/HealthShare y motores de datos IRIS). 
+Un servidor de **Model Context Protocol (MCP)** para conectar asistentes de desarrollo con instancias de **InterSystems IRIS**, mediante la API de Atelier.
 
-Este servidor sigue la filosofía **Zero-Helper**: realiza consultas SQL, recupera código fuente, compila clases y revisa logs de eventos de forma pasiva a través de la API REST nativa de Atelier, **sin necesidad de instalar ninguna clase auxiliar o wrapper en las bases de datos de producción**.
+Se distribuye como el paquete Python instalable `isc-ai` (versión 0.2.0, solo
+biblioteca estándar, Python 3.11 o superior). El paquete expone un único binario,
+`isc-ai`, que agrupa el servidor MCP (`isc-ai mcp`) y la CLI que administra la
+configuración por proyecto (`init`, `config`, `servers`, `facility`, `doctor`).
+Reemplaza al script suelto `intersystems-mcp-server/iris_mcp_server.py`.
+
+**Activación: HOLD.** El candidato local tiene discovery CCR parcial y controles
+fail-closed; la detección completa en destinos reales no está verificada. La nueva
+revisión independiente sigue pendiente. Consultar el
+[informe de remediación, evidencia y limitaciones](../docs/agent-environment-remediation.md)
+antes de cualquier registro, reinicio o prueba contra servidores.
+
+Guardar, compilar y borrar son escrituras. La ejecución ObjectScript y algunas
+herramientas de diagnóstico crean, compilan, ejecutan y eliminan clases temporales;
+pueden persistir datos y no son lecturas puras ni operaciones de “cero huella”.
 
 ---
 
 ## ✨ Características Destacadas
 
 * 📡 **Conexión stdio robusta**: Implementa el protocolo estándar JSON-RPC 2.0 nativo sobre canales de entrada y salida estándar, compatible con múltiples entornos e IDEs.
-* 📦 **Multiservidor Centralizado**: Soporta infinitos servidores y proyectos organizados en un único repositorio de credenciales seguro en tu directorio home (`~/.iris_mcp_servers.json`).
+* 📦 **Configuración en dos capas, sin datos de sitio en el código**: la política del proyecto vive en `<proyecto>/.iris-mcp/config.json` (formato de CCR, ruta BASE canónica, rutas HA/VIP, catálogo de packages, facilidad de mutación) y las conexiones privadas en `~/.iris-mcp/servers.json`. Los secretos se referencian como `{env:VAR}` y se resuelven desde el entorno del proceso. El listado expone metadatos seleccionados, nunca credenciales, y conserva los aliases no resueltos con su diagnóstico. Ver la sección **Configuración**.
 * 🔀 **Manejo Inteligente de Namespaces (Pregunta Dinámica)**: Todas las herramientas permiten especificar un namespace en caliente. Si se omite y el servidor cuenta con múltiples entornos (ej: `BASE-CLME` e `INT`), el servidor detecta la ambigüedad y retorna una pregunta interactiva con las alternativas para que el asistente consulte cuál utilizar. Si solo hay un entorno de trabajo, se rutea de forma automática y transparente.
-* 🛡️ **VPN-Aware (Consistente con VPNs)**: Almacena información de túneles VPN (Cisco, GlobalProtect, FortiClient, etc.). Si una conexión falla por timeout de red, el servidor intercepta el error e inyecta una sugerencia activa indicándote qué VPN debes activar antes de reintentar.
-* ❌ **Cero Huella (Zero-Footprint)**: Diseñado bajo altos estándares de seguridad para ambientes empresariales y de misión crítica, evitando alterar la integridad de los ambientes protegidos.
+* 🛡️ **Diagnóstico acotado**: Los errores de transporte omiten cuerpos, argumentos y trazas sensibles. La conexión de red y la VPN requieren alcance aprobado por separado.
+* 🔒 **Discovery parcial**: Identidad de namespace, presencia del motor y source control genérico se consultan sin runners. UNKNOWN bloquea toda mutación, incluida la ejecución ObjectScript arbitraria, incluso en BASE; no se consulta la suspensión de otro proceso para autorizar una escritura.
 
 ---
 
 ## 🛠️ Herramientas Expuestas (Tools)
 
-El servidor MCP registra las siguientes **14 herramientas nativas** para tu asistente de IA:
+El servidor MCP registra las siguientes **herramientas nativas** para tu asistente de IA:
 
 | Nombre de la Herramienta | Descripción | Parámetros de Entrada |
 | :--- | :--- | :--- |
-| `iris_list_servers` | Muestra la tabla de todas tus instancias, credenciales, namespaces y VPNs asociadas. | Ninguno |
+| `iris_list_servers` | Muestra metadatos de configuración y resolución de aliases, sin credenciales ni pruebas de conectividad. | Ninguno |
 | `iris_list_namespaces` | Obtiene la lista de todos los namespaces disponibles en la instancia de InterSystems IRIS seleccionada. | `server_id` |
 | `iris_query_sql` | Corre consultas SQL parametrizadas nativas (ej. búsquedas en diccionarios u operaciones). | `server_id`, `query`, `parameters` (array), `namespace` (opcional) |
 | `iris_list_classes` | Lista de forma rápida clases personalizadas del sistema filtrando por paquete (evita sobrecargas). | `server_id`, `package_prefix`, `namespace` (opcional) |
 | `iris_get_class` | Recupera el código fuente ObjectScript completo de una clase `.cls` en el servidor. | `server_id`, `class_name`, `namespace` (opcional) |
-| `iris_save_class` | Sube o guarda código fuente de una clase ObjectScript directamente al namespace. | `server_id`, `class_name`, `content`, `namespace` (opcional) |
-| `iris_compile_class` | Compila una clase en caliente en el servidor y retorna el resumen y logs del compilador. | `server_id`, `class_name`, `namespace` (opcional) |
+| `iris_save_class` | Sube o guarda código fuente de una clase ObjectScript directamente al namespace con soporte para auto-checkout de CCR, limpieza y normalizacion de caracteres especiales a ASCII puro (evita SAX XML errors), verificacion round-trip post-escritura (detecta duplicacion/truncacion del contenido inline antes de compilar) y compilacion automatica opcional. | `server_id`, `class_name`, `content`, `namespace` (opcional), `auto_checkout` (bool, opcional, por defecto true), `clean_ascii` (bool, opcional, por defecto false), `verify` (bool, opcional, por defecto true), `compile` (bool, opcional, por defecto false) |
+| `iris_save_class_from_file` | **(Preferido para overwrites grandes)** Lee una clase desde un archivo `.cls` local y conserva la ruta directa existente, sujeta a los gates legacy. | `server_id`, `class_name`, `file_path`, `namespace` (opcional), `auto_checkout`, `ccr_id`, `clean_ascii`, `verify`, `compile` |
+| `iris_ccr_mutate_class_from_file` | Ruta permanente y acotada para clases bajo `mutation.class_prefix` en el `canonical_base` configurado mediante la facilidad instalada `MCP.Mutate`; no instala ni actualiza clases `MCP.*`. El archivo local debe estar bajo `mutation.local_source_root`. | `server_id`, `namespace` (el `canonical_base.namespace` explícito, ej. `BASE-SITE`), `class_name`, `file_path`, `ccr_id`, `expected_before_sha256` |
+| `iris_compile_class` | Compila una clase o un documento con sufijo explícito; respeta el gate de mutación y las convenciones de nombres indicadas abajo. | `server_id`, `class_name`, `namespace` (opcional) |
 | `iris_delete_class` | Elimina una clase de forma segura y permanente del namespace. | `server_id`, `class_name`, `namespace` (opcional) |
+| `iris_get_document` | Recupera el fuente de un documento por nombre exacto con extensión: include files (`.inc`), rutinas (`.mac`/`.int`), clases (`.cls`). Gate READ. | `server_id`, `document_name`, `namespace` (opcional) |
+| `iris_save_document` | Guarda un documento (`.inc`/`.mac`/`.int`/`.cls`) con los mismos gates y opciones que `iris_save_class`; el package se evalúa sobre el nombre sin extensión. | `server_id`, `document_name`, `content`, `namespace`, `auto_checkout`, `ccr_id`, `clean_ascii`, `verify`, `compile` |
+| `iris_save_document_from_file` | Guarda un documento leyendo su fuente de un archivo local. | `server_id`, `document_name`, `file_path`, + opciones de escritura |
+| `iris_patch_document` | Parche quirúrgico a un documento existente (`old_string` → `new_string`, `expected_count`); aborta sin escribir si el conteo no coincide. | `server_id`, `document_name`, `old_string`, `new_string`, `expected_count`, + opciones de escritura |
+| `iris_delete_document` | Elimina un documento del namespace (CODE WRITE sin CCR: solo ruta ABSENT catalogada). | `server_id`, `document_name`, `namespace` (opcional) |
 | `iris_get_event_logs` | Extrae las últimas trazas de error y warnings del log del bus de integración (`Ens_Util.Log`). | `server_id`, `limit` (max 100), `namespace` (opcional) |
 | `iris_get_recent_messages` | Revisa el tráfico de mensajes recientes en el bus de Ensemble (`Ens.MessageHeader`). | `server_id`, `limit`, `only_errors` (bool), `namespace` (opcional) |
-| `iris_execute_objectscript` | Ejecuta código ObjectScript arbitrario de manera síncrona en el servidor con cero huella. | `server_id`, `code`, `namespace` (opcional) |
-| `iris_ccr_status` | Consulta el estado de control de cambios (CCR/Perforce) de una clase (bloqueada, editable, checkout). | `server_id`, `class_name`, `namespace` (opcional) |
-| `iris_ccr_checkout` | Realiza un Checkout (bloqueo/edición) de una clase bajo un identificador o descripción de CCR. | `server_id`, `class_name`, `ccr_id`, `namespace` (opcional) |
-| `iris_ccr_undocheckout` | Revierte un Checkout en el servidor, removiendo bloqueos y deshaciendo cambios no confirmados. | `server_id`, `class_name`, `namespace` (opcional) |
+| `iris_get_ensemble_trace` | Obtiene la traza completa (Visual Trace) de una ejecución de Ensemble/IRIS Interoperability por su `SessionId`, incluyendo mensajes, logs y payloads de cuerpos de mensaje. | `server_id`, `session_id` (int/string), `include_logs` (bool, opcional, por defecto true), `include_bodies` (bool, opcional, por defecto false), `namespace` (opcional) |
+| `iris_ensemble_production_control` | Consulta el estado o controla la Producción de Ensemble (`status`, `start`, `stop`, `restart`). | `server_id`, `action` (status/start/stop/restart), `production_name` (opcional), `timeout` (int, opcional), `force` (bool, opcional), `namespace` (opcional) |
+| `iris_ensemble_component_control` | Gestiona componentes individuales de la producción (Business Services/Processes/Operations) en caliente (`list`, `enable`, `disable`, `restart`). | `server_id`, `action` (list/enable/disable/restart), `component_name` (string), `production_name` (opcional), `namespace` (opcional) |
+| `iris_ensemble_default_settings` | Consulta, crea, actualiza o elimina ajustes por defecto del sistema de Ensemble (`Ens.Config.DefaultSettings`). | `server_id`, `action` (list/set/delete), `id` (int/string), `production_name`, `item_name`, `host_class_name`, `setting_name`, `setting_value`, `deployable` (bool), `namespace` (opcional) |
+| `iris_ensemble_queue_control` | Monitorea colas de mensajes de Ensemble (`list_queues`, `list_messages`), re-envía mensajes (`resend_message`, via `Ens.MessageHeader.ResendDuplicatedMessage`: clona el header, misma SessionId, destino original o `new_target`; devuelve el nuevo header id) o desencola/aborta mensajes atascados (`abort_message`). | `server_id`, `action` (list_queues/list_messages/resend_message/abort_message), `queue_name` (string), `message_id` (int/string), `new_target` (string, ej. `HL7 Rule`), `limit` (int), `namespace` (opcional) |
+| `iris_execute_objectscript` | Ejecuta código mediante una clase temporal fija `User.McpTmpRun*`; el payload puede persistir datos y usa el gate fail-closed normal. Solo una ausencia CCR suficientemente verificada y una ruta de ambiente permitida autorizan; UNKNOWN, control activo/suspendido y producción bloquean. | `server_id`, `code`, `namespace` (opcional) |
+| `iris_ccr_status` | Consulta el estado de control de cambios (CCR/Perforce) de una clase o documento (bloqueado, editable, checkout). | `server_id`, `class_name` **o** `document_name`, `namespace` (opcional) |
+| `iris_ccr_checkout` | Realiza un Checkout (bloqueo/edición) de una clase o documento bajo un identificador de CCR. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
+| `iris_ccr_undocheckout` | Revierte un Checkout en el servidor, removiendo bloqueos y deshaciendo cambios no confirmados. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
+
+**Convención de nombres:** las herramientas `iris_*_class` reciben nombres de clase con
+el sufijo exacto `.cls` opcional. Conservan los componentes y su capitalización:
+`%SYSTEM.OBJ` apunta a `%SYSTEM.OBJ.cls`, y `Custom.Site.Obj` a `Custom.Site.Obj.cls`.
+No interpretan `.mac`, `.inc`, `.obj` u otros componentes como extensiones de rutina.
+Para include files y rutinas usar las herramientas `iris_*_document`, cuyo
+`document_name` lleva SIEMPRE la extensión exacta en minúsculas (`Custom.Site.Macros.inc`,
+`Custom.Site.Util.mac`); no se infiere ni se agrega nada. Las herramientas CCR
+aceptan exactamente uno de `class_name` (implica `.cls`) o `document_name`.
+Solo compile admite ambos estilos en `class_name`: los sufijos documentales exactos en
+minúsculas `.cls`, `.mac`, `.int`, `.inc`, `.bas`, `.obj` indican documento; de otro modo
+agrega `.cls` sin normalizar mayúsculas. Para compilar una clase cuyo último componente
+sea `obj`, usar `Custom.obj.cls`.
+El catálogo de packages se evalúa sobre el nombre sin extensión, así que
+`Custom.Site.Macros.inc` está cubierto por un grant `{"prefix": "Custom.Site"}`.
+Ningún nombre puede ser una ruta o contener separadores codificados.
+
+**Contrato de aliases:** cualquier entrada con `canonical_server_id` es una
+referencia, incluso si conserva campos de conexión antiguos. Sus demás campos se
+ignoran por completo: host, puerto, prefijo, namespace predeterminado, credenciales,
+defaults CCR y controles `is_production`/`env_role` proceden solo de la entrada
+concreta final. No se mezclan ni heredan overrides del alias. Catálogo, cliente y
+selección de namespace usan el mismo resolver, limitado a 16 entradas por cadena.
+Targets ausentes, ciclos o configuraciones inválidas producen UNRESOLVED en el
+catálogo y bloqueo antes del transporte al ejecutar. Un alias listado en
+`routes.alias_constraints` debe terminar en el host y prefijo declarados (el VIP
+documentado); no hay fallback a nodos.
+
+El parámetro explícito `namespace` conserva su contrato dentro de la instancia
+canónica y no modifica los controles de producción. Si el default canónico es
+`USER`, la selección automática consulta únicamente metadatos REST de esa misma
+instancia. Cada llamada de herramienta recarga la configuración una sola vez; los
+helpers de cliente usan ese snapshot y no lo recargan entre selección y ejecución.
 
 ---
 
 ## 🛡️ Seguridad y Protección de Producción
 
-Para evitar accidentes críticos, el servidor MCP bloquea automáticamente cualquier acción de escritura o modificación de código (como `save`, `delete`, `compile`, `execute_objectscript`, `ccr_checkout` o `ccr_undocheckout`) en ambientes detectados como **Producción / Live** (aquellos cuyo ID de servidor contenga palabras clave como `live`, `prod`, `real`, etc., o requieran VPNs corporativas y no tengan habilitado el modo de escritura).
+Las escrituras y promociones están prohibidas en **Producción / Live**. El control
+usa la marca `is_production`, el rol configurado y los indicadores de producción
+del namespace. La variable `IRIS_ALLOW_PROD` no concede autorización: su antiguo
+override fue eliminado.
 
-Si requieres ejecutar operaciones de escritura en estos servidores protegidos, deberás iniciar o registrar el servidor MCP con la variable de entorno:
-```bash
-IRIS_ALLOW_PROD=1
-```
+La ausencia CCR requiere evidencia suficiente; un motor instalado o source control
+genérico configurado no prueba el binding TC. UNKNOWN bloquea guardado, compilación,
+borrado, checkout, promoción y las herramientas que ejecutan ObjectScript mediante
+el `execute_code` regular, incluso en BASE. El binding exacto y la suspensión del
+proceso real requieren una facilidad backend autorizada antes de habilitar esas
+mutaciones. El clasificador SQL no es una frontera de autorización: un SELECT puede
+invocar procedimientos con efectos secundarios.
+
+Las dos rutas MCP explícitas son `iris_execute_objectscript` y
+`iris_ccr_mutate_class_from_file`. La primera ejecuta un payload que puede persistir
+datos únicamente cuando el gate normal prueba ausencia CCR suficiente, permite la
+ruta de ambiente configurada y el rol es explícitamente no productivo. El transporte solo crea
+clases `User.McpTmpRun*`, rechaza `LIVE`/`PROD`, namespaces con apariencia productiva
+y roles desconocidos, y exige borrado verificado y ausencia de residuos de control
+de cambios. Esta excepción no habilita mutaciones permanentes ni herramientas que
+usen internamente el `execute_code` regular. La segunda llama exclusivamente al
+SQL fijo `MCP.Mutate(?,?,?,?,?)` sobre el `canonical_base` configurado; no usa
+runner, PUT, endpoint de compilación, discovery previo ni evidencia cacheada.
+Normaliza LF/CRLF a CRLF antes del hash y Base64; el SQLProc repite esa
+canonicalización para baseline, import y round-trip. Solo acepta la combinación
+independiente `TC.ChangeControl.CCR` + `%Studio.SourceControl.ISC`, valida identidad,
+acción, CCR, source, archivo y usuario de la fila pendiente. Cada invocación exige
+ausencia total de trabajo pendiente previo y verifica que la fila final haya nacido
+en esa invocación. No intenta rollback automático de documentos `.cls`: antes de
+checkout/save rechaza sin cambiar source; después de iniciar ese ciclo conserva el
+estado y devuelve `UNKNOWN_PARTIAL` o un estado `*_RETAINED`, con
+`manual_action_required=true` y evidencia separada sobre checkout, source y tracking.
+
+La inicialización de la facilidad es un comando de distribución separado
+(`isc-ai facility install`). Lee
+internamente la plantilla empaquetada `isc_ai/resources/MCP/CCRMutation.cls.template`, la renderiza con
+los valores del sitio (`{{CANONICAL_NAMESPACE}}`, `{{CCR_PREFIX}}`,
+`{{MUTATION_CLASS_PREFIX}}`, `{{PROTOCOL_PREFIX}}`, entre otros), normaliza LF/CRLF a
+CRLF, valida UTF-8 estricto sin BOM/NUL, la declaración exacta y el límite de tamaño,
+y calcula el SHA-256 canónico **sobre la salida renderizada** en cada ejecución. Por
+eso un sitio cuya facilidad se instaló antes de la plantilla sigue informando
+`UNCHANGED` cuando los valores coinciden. `isc-ai facility render` produce la misma
+salida y su hash sin conectarse. No acepta una ruta de fuente ni ObjectScript.
+Resuelve aliases y configuración con el mismo resolver del servidor, pero exige el
+ID canónico, el namespace configurado solicitado y la **ruta canónica exacta** del
+`canonical_base`: la misma verificación que usa el transporte `MCP.Mutate` (host,
+puerto, prefijo y namespace declarados en `canonical_base`, rol `BASE`, no
+productivo). Esa verificación se aplica dos veces, sobre la configuración
+resuelta y sobre el cliente ya construido; cualquier otra ruta se rechaza antes de
+leer el recurso o crear el runner.
+
+El runner privado `User.McpTmpRun*` toma un lock fijo y decide en el mismo proceso:
+`INSTALLED` agrega, compila y verifica una clase ausente; `UNCHANGED` no muta y solo
+se informa cuando la fuente coincide **y** el artefacto compilado está al día
+(`$System.OBJ.IsUpToDate`) **y** existe el método compilado `MCP.CCRMutation||Mutate`
+con `SqlProc` y `SqlName = Mutate`; `SOURCE_MATCH_NOT_COMPILED` es el estado
+fail-closed cuando la fuente coincide pero esos artefactos faltan o están
+desactualizados (no compila automáticamente, porque compilar bajo CCR es una
+mutación); `DIFFERENT` informa el hash actual; `UPGRADED` requiere `--upgrade` y
+coincidencia exacta de `--expected-current-sha256`, luego hace checkout editado,
+compila y verifica. Add/edit conservan procedencia exacta y devuelven un `change_id`
+positivo. No-op, drift y `SOURCE_MATCH_NOT_COMPILED` no hacen checkout, save,
+compile ni crean una fila.
+
+Namespace, binding exacto `TC.ChangeControl.CCR`, `%Studio.SourceControl.ISC`,
+`IsSuspended()=0` y `GetSuspendLevel()=0` se revalidan en el mismo proceso
+**inmediatamente antes del primer paso capaz de mutar** (checkout si la clase existe,
+`OnBeforeSave` si no) y **otra vez inmediatamente antes de `SetTextFromString`**.
+Antes del import se cierra además la ventana TOCTOU: se vuelve a comprobar la
+presencia de la clase, se relee la fuente actual y su SHA canónico debe seguir
+siendo el baseline observado (`--expected-current-sha256` en upgrade; ausente debe
+seguir ausente en install) y se releen las filas pendientes exigiendo exactamente la
+fila propia del checkout (o ninguna en install). Cualquier deriva devuelve
+`CONTROL_CHANGED`/`CONTROL_CHANGED_RETAINED` o `BASELINE_DRIFT_RETAINED` con
+`manual_action_required=1` y evidencia retenida; nunca continúa. El SQLProc
+empaquetado `MCP.CCRMutation.MutateWorker` aplica el mismo orden: revalidación antes
+del checkout y, tras `OnBeforeSave`, revalidación + recomprobación de baseline antes
+del import.
+
+El runner debe quedar ausente y sin fila pendiente; ambigüedad, baseline distinto o
+resultado parcial exige inspección manual y no se reintenta automáticamente. Nunca
+llama Suspend/Resume y no habilita `MCP.*`, otro target, otra fuente, ejecución
+arbitraria ni un bypass UNKNOWN reutilizable.
+
+Remediación manual de `SOURCE_MATCH_NOT_COMPILED`: un administrador compila
+`MCP.CCRMutation` por el flujo CCR soportado (checkout tracked y compilación con la
+herramienta sancionada), verifica `IsUpToDate` y la proyección exacta `MCP.Mutate`
+en `INFORMATION_SCHEMA.ROUTINES`, y recién entonces repite `isc-ai facility install`,
+que debe devolver `UNCHANGED`. El comando no compila en su lugar.
+
+El contrato de salida del runner directo limita la captura a **180.000 caracteres**.
+Ese límite mantiene el resultado SQLProc dentro de `%String(MAXLEN=1048576)` aun
+en el peor caso de UTF-8 de cuatro bytes y su expansión Base64. La captura se corta
+antes de convertir o codificar; el runner devuelve `MCPUNKNOWN|OUTPUT` y el cliente
+informa, sin incluir el payload ni su salida, que la ejecución ocurrió, pudo
+persistir datos y excedió el límite. Dentro del límite, la salida se convierte
+explícitamente a bytes UTF-8 y se transporta como Base64 sin saltos de línea; el
+cliente exige Base64 y UTF-8 válidos. Este límite no reduce los riesgos de efectos
+persistentes ni modifica el estado **HOLD**.
 
 ---
 
 ## 📋 Requisitos Previos
 
-* **Python 3.8 o superior** instalado en el sistema.
+* **Python 3.11 o superior** (`requires-python = ">=3.11"` en `pyproject.toml`). El
+  paquete no tiene dependencias fuera de la biblioteca estándar; el extra opcional
+  `socks` agrega `PySocks` para proxies SOCKS.
+* **[uv](https://docs.astral.sh/uv/)** para instalar el binario `isc-ai` como
+  herramienta de usuario (alternativamente `pip install` en un entorno propio).
 * **Acceso de red** a la API de Atelier en tus instancias de IRIS (por defecto expuesta en el puerto CSP, ej. `80`, `52773` o `42773`).
 * **Credenciales** (Usuario / Contraseña) con permisos de lectura para las consultas y operaciones REST deseadas.
 
 ---
 
-## 🚀 Guía de Instalación Rápida
+## 📦 Instalación
 
-### Paso 1: Clonar el Repositorio
-Clona este repositorio en un directorio local de tu máquina:
-```bash
-git clone https://github.com/tu-usuario/intersystems-iris-mcp.git
-cd intersystems-iris-mcp
+El repositorio vive en `Documents/work/tools/isc-ai`. Instalación editable como
+herramienta de usuario (idempotente: volver a ejecutarla actualiza la instalación):
+
+```powershell
+uv tool install --editable C:\ruta\a\isc-ai
 ```
 
-### Paso 2: Crear el Archivo de Configuración de Servidores
-Copia la plantilla provista a tu directorio personal de usuario (home) con el nombre `.iris_mcp_servers.json`:
+El binario `isc-ai` queda en `~/.local/bin` (agregar ese directorio al `PATH` si
+`uv` lo indica). Alternativa desde la raíz del repositorio, sin modo editable:
 
-* En **Windows** (PowerShell):
-  ```powershell
-  Copy-Item mcp_config.json.template -Destination "$HOME\.iris_mcp_servers.json"
-  ```
-* En **Linux / macOS**:
-  ```bash
-  cp mcp_config.json.template ~/.iris_mcp_servers.json
-  ```
+```powershell
+uv tool install .
+```
 
-Edita el nuevo archivo `.iris_mcp_servers.json` en tu carpeta home con tus servidores y credenciales de confianza. Ejemplo de estructura:
+Mantenimiento:
+
+```powershell
+uv tool upgrade isc-ai
+uv tool uninstall isc-ai
+isc-ai --version
+```
+
+Con la instalación editable, los cambios en `isc_ai/` se reflejan al siguiente
+arranque del proceso; el servidor MCP en ejecución debe reiniciarse (ver más abajo).
+
+---
+
+## 🗂️ Estructura del repositorio
+
+```text
+isc-ai/
+├── pyproject.toml                   # nombre isc-ai, versión 0.2.0, entry point isc-ai = isc_ai.cli:main
+├── README.md
+├── LICENSE
+├── isc_ai/
+│   ├── cli.py                       # CLI: mcp | init | config | servers | facility | doctor
+│   ├── config.py                    # dos capas de configuración, búsqueda ascendente del proyecto, {env:VAR}
+│   ├── server.py                    # servidor MCP stdio, herramientas iris_* y gates
+│   ├── ccr_discovery.py             # discovery CCR parcial y política local
+│   └── resources/
+│       ├── config.template.json     # plantilla que usa `isc-ai init`
+│       └── MCP/
+│           └── CCRMutation.cls.template   # facilidad MCP.CCRMutation renderizada por sitio
+└── tests/
+    ├── hermetic_test_support.py
+    ├── test_config.py
+    ├── test_ccr_discovery.py
+    ├── test_ccr_verification.py
+    ├── test_ccr_controlled_mutation.py
+    └── live_smoke_server.py         # script en vivo; requiere servidores reales, no es parte de la suite
+```
+
+---
+
+## ⚙️ Configuración
+
+El código no contiene identificadores de cliente ni de sitio. Todo lo específico
+(formato de CCR, ruta BASE canónica, nodos HA, packages permitidos, prefijo de
+mutación) proviene de dos archivos JSON. Ambos se releen en **cada llamada de
+herramienta**, por lo que las ediciones por CLI aplican en vivo; un archivo mal
+formado conserva el snapshot anterior y registra el fallo sin detalles.
+
+### Capa 1: política del proyecto — `<proyecto>/.iris-mcp/config.json`
+
+**Resolución del proyecto.** Tanto el servidor MCP como todo comando de la CLI que
+necesita un proyecto buscan **hacia arriba** desde el `cwd` el `.iris-mcp/config.json`
+más cercano, del mismo modo en que git localiza `.git`. Por eso el servidor puede
+lanzarse desde cualquier subdirectorio de un despliegue y toma la política de ese
+despliegue. Precedencia:
+
+1. `IRIS_MCP_PROJECT_DIR`: directorio de proyecto explícito; **desactiva la búsqueda**.
+2. Ancestro más cercano del `cwd` (incluido el propio `cwd`) con `.iris-mcp/config.json`.
+3. El `cwd` mismo, que produce una política **no configurada**.
+
+`IRIS_MCP_CONFIG` fuerza la ruta del archivo de configuración con independencia del
+directorio resuelto. Los comandos `config`, `facility` y `doctor` aceptan además
+`--project-dir DIR`. `isc-ai doctor` muestra qué proyecto y qué archivos resolvió
+el proceso.
+
+Sin configuración de proyecto, las herramientas de lectura (gate READ) y de
+ejecución acotada (gate RUNTIME) siguen operando sobre los servidores del usuario,
+pero toda escritura de código (CODE WRITE) queda **bloqueada**: no hay catálogo de
+packages, `canonical_base` ni formato de CCR que la autorice.
+
+Secciones del archivo:
+
+| Sección | Contenido |
+| :--- | :--- |
+| `site` | `name`; `ccr_id {prefix, digits}` define el formato del identificador CCR (prefijo `SITE` y 4 dígitos → `SITE0001`); `protocol_prefix` nombra los protocolos `<prefix>_CCR_MUTATION_V1` / `<prefix>_CCR_INITIALIZER_V1`; `production_markers`, `production_roles`, `non_production_roles`, `system_namespaces`. |
+| `canonical_base` | `{server_id, host, port, path_prefix, namespace}`. Única ruta donde se admiten bundle/upload/create de CCR, el SQLProc de mutación controlada y el inicializador de la facilidad. El rol debe ser `BASE` e `is_production` falso. |
+| `routes` | `direct_ha_nodes`: hosts donde las escrituras de código se bloquean salvo excepción. `alias_constraints {alias_id: {host, path_prefix}}`: un alias debe resolver a ese VIP. `uat_write_exceptions`: lista de `{label, namespace, hosts?, path_prefixes, requires_active_node}`; sin `hosts` aplica a cualquier nodo HA directo; `requires_active_node: true` exige evidencia fresca de que el nodo ejecuta la producción. |
+| `packages` | `{namespace: [grants]}`. Cada grant fija exactamente uno de `prefix` (coincide con `<prefix>.<clase>`, nunca el prefijo solo), `class` (stem exacto) o `document` (nombre con extensión), más `roles` opcional. Nunca se otorgan las raíces `%`, `Ens`, `Region`, `MCP`, `TC`, `web`, `websys`, `EPR`, `User`, `Model`, `SQLUser` ni la facilidad `MCP.CCRMutation`. |
+| `mutation` | `{class_prefix, local_source_root}`: clases admitidas por `iris_ccr_mutate_class_from_file` y el directorio local (relativo al proyecto) que debe contener el `.cls` aprobado; la ruta es la raíz más los componentes de la clase posteriores al prefijo. |
+| `servers` (opcional) | Entradas de servidor con el mismo formato que la capa 2. Las del proyecto prevalecen sobre las del usuario. |
+
+Este archivo es **commitable** cuando sus secretos son referencias `{env:VAR}`.
+
+### Capa 2: servidores del usuario — `~/.iris-mcp/servers.json`
 
 ```json
-{
-  "servers": {
-    "mi-servidor-local": {
-      "host": "localhost",
-      "port": 52773,
-      "path_prefix": "",
-      "scheme": "http",
-      "username": "SuperUser",
-      "password": "SYS",
-      "namespace": "USER",
-      "vpn": "Ninguna",
-      "description": "Desarrollo Local"
-    },
-    "mi-servidor-uat": {
-      "host": "10.0.10.4",
-      "port": 80,
-      "path_prefix": "/csp/sys",
-      "scheme": "http",
-      "username": "api_user",
-      "password": "SecretPassword123",
-      "namespace": "UAT-APP",
-      "vpn": "GlobalProtect (MyCompany VPN)",
-      "description": "Servidor de Pruebas UAT"
-    }
-  }
-}
+{ "servers": { "my-base": { "host": "base.example.invalid", "port": 80, "path_prefix": "/base01",
+  "namespace": "BASE-SITE", "env_role": "BASE", "is_production": false,
+  "username": "{env:IRIS_USER}", "password": "{env:IRIS_PASSWORD}" } } }
 ```
 
-### Paso 3: Ejecutar Pruebas Locales (Opcional)
-Para validar que tus credenciales carguen de forma perfecta y que la API REST responda rápido, ejecuta la suite de pruebas unitaria:
-```bash
-python test_mcp_server.py
+Claves admitidas por entrada: `host`, `port`, `path_prefix`, `username`, `password`,
+`namespace`, `env_role`, `is_production`, `proxy`, `ccr_id`, `upload_token`,
+`canonical_server_id` (alias), `description`. El archivo heredado
+`~/.iris_mcp_servers.json` sigue leyéndose como fallback (se registra una nota);
+`isc-ai servers migrate` lo copia al nuevo destino. Este archivo es **privado**:
+agregarlo al `.gitignore` global y no copiarlo a repositorios.
+
+### Secretos
+
+Cualquier valor de cadena puede ser `{env:VAR_NAME}`; se resuelve desde el entorno
+del proceso al cargar. Una referencia sin resolver marca la entrada de servidor con
+un error (no puede usarse) en lugar de detener el servidor. `isc-ai config show` redacta
+`password` y `upload_token` literales salvo `--reveal`. El archivo del proyecto
+rechaza secretos literales al escribir con `config set` o `config add-server`
+(usar referencias `{env:VAR}` o `add-server --user`).
+
+### `IRIS_EXTRA_PACKAGES` (compatibilidad)
+
+La variable `IRIS_EXTRA_PACKAGES` (`NAMESPACE:pkg1,pkg2;NAMESPACE2:pkg3`) sigue
+aplicándose como grant aditivo **solo para el rol `BASE`** al cargar la
+configuración. El archivo `.env` del directorio padre **ya no se lee**: solo cuenta
+el entorno del proceso MCP. Se aplican las mismas raíces prohibidas que en
+`packages`. Preferir la sección `packages` del `config.json` del proyecto.
+
+### CLI
+
+```powershell
+isc-ai [--version] <comando> [opciones]
 ```
+
+La CLI **solo edita archivos**; únicamente `isc-ai mcp` e `isc-ai facility install`
+se conectan a IRIS. Invocar `isc-ai` sin comando termina con error (no arranca el
+servidor). Los comandos `config`, `facility` y `doctor` aceptan `--project-dir DIR`;
+sin él aplican la búsqueda ascendente descrita en la Capa 1.
+
+| Comando | Efecto |
+| :--- | :--- |
+| `isc-ai mcp` | Ejecuta el servidor MCP sobre stdio. Es lo que lanza el cliente de IA. |
+| `isc-ai init [DIR] [--from PLANTILLA] [--force] [--no-servers]` | Crea `<DIR o cwd>/.iris-mcp/config.json` desde la plantilla empaquetada (`isc_ai/resources/config.template.json`) o una plantilla propia (validada). **Idempotente**: si el archivo ya existe no hace nada, lo informa y termina en `0`; `--force` lo regenera. `--no-servers` omite la sección de servidores de ejemplo. |
+| `isc-ai config show [--servers] [--reveal]` | Imprime la política del proyecto o, con `--servers`, los servidores mezclados de ambas capas; secretos redactados salvo `--reveal`. Las notas de carga van a stderr. |
+| `isc-ai config set <ruta.punteada> <valor>` | Tipa el valor según el esquema actual (int/bool/lista/objeto vía JSON; cadena en otro caso), valida la política y rechaza secretos literales antes de escribir. Ej.: `canonical_base.host`. |
+| `isc-ai config unset <ruta.punteada>` | Elimina una clave de la política. |
+| `isc-ai config add-server <id> --host H [--port] [--path-prefix] [--namespace] [--role] [--production] [--username] [--password] [--upload-token] [--ccr-id] [--proxy] [--description] [--user]` | Agrega o reemplaza una entrada. `--user` escribe en `~/.iris-mcp/servers.json` en lugar del archivo del proyecto; usuario y contraseña valen `{env:IRIS_USER}` / `{env:IRIS_PASSWORD}` por defecto. |
+| `isc-ai config remove-server <id> [--user]` | Elimina una entrada del proyecto o, con `--user`, del archivo del usuario. |
+| `isc-ai config validate` | Resumen JSON de la configuración efectiva; sale con `1` si hay problemas (secretos sin resolver, entradas mal formadas, `canonical_base.server_id` sin entrada de servidor). |
+| `isc-ai servers migrate [--force]` | Copia el archivo heredado `~/.iris_mcp_servers.json` a `~/.iris-mcp/servers.json`. Falla si el destino existe, salvo `--force`. |
+| `isc-ai facility render [--output RUTA]` | Renderiza `MCP.CCRMutation` para el sitio configurado e imprime clase, SHA-256 y tamaño, sin conectarse. `--output` escribe la clase renderizada. |
+| `isc-ai facility install --server S --namespace NS --ccr CCR [--upgrade --expected-current-sha256 H]` | Instala o actualiza condicionalmente la facilidad en el `canonical_base` (ver **Guía rápida**, paso 3). `--upgrade` y `--expected-current-sha256` son obligatorios uno con otro. |
+| `isc-ai doctor` | Informe JSON de lo que resolvería este proceso: `project_dir`, rutas y presencia de `project_config` y `user_servers`, `site`, `configured`, `ccr_format`, `canonical_base`, `mutation_configured`, `servers`, `notes`, `problems`, `cwd`, variables de entorno relevantes (`IRIS_MCP_PROJECT_DIR`, `IRIS_MCP_CONFIG`, `IRIS_EXTRA_PACKAGES`, `IRIS_MCP_TIMEOUT`) y `version`. Sale con `1` si hay problemas; si no encuentra configuración de proyecto sugiere `isc-ai init` en stderr. |
+
+Ejemplo mínimo, ejecutado desde el directorio del despliegue:
+
+```powershell
+isc-ai init --no-servers
+isc-ai config set site.ccr_id.prefix SITE
+isc-ai config set canonical_base.namespace BASE-SITE
+isc-ai config set packages.BASE-SITE '[{"prefix": "Custom.Site"}]'
+isc-ai config add-server my-base --host base.example.invalid --path-prefix /base01 --namespace BASE-SITE --role BASE --user
+isc-ai config validate
+isc-ai doctor
+```
+
+---
+
+## 🚀 Guía rápida local — activación HOLD
+
+### 1. Revisar el candidato y sus backups
+El informe enlazado arriba identifica archivos, manifests SHA-256, cambios de
+compatibilidad y pasos de rollback. La aprobación de trabajo local no autoriza
+conexiones, lectura de credenciales, instalación ni activación.
+
+### 2. Ejecutar únicamente la suite offline explícita
+Desde la raíz del repositorio, con Python 3.11+ y después de verificar la ruta:
+```powershell
+python -m unittest discover -s tests -t . -p "test_c*.py"
+```
+La suite (234 pruebas: `test_config`, `test_ccr_discovery`, `test_ccr_verification`,
+`test_ccr_controlled_mutation`) usa datos sintéticos y bloquea red/configuración real.
+El patrón `test_c*.py` es deliberado: `tests/live_smoke_server.py` es un script en vivo
+que necesita servidores reales, alcance independiente aprobado, destinos identificados
+y revisión previa. No es una prueba local hermética y no debe incluirse en el
+descubrimiento.
+
+### 3. Inicializar la facilidad empaquetada cuando exista autorización remota
+
+Instalación condicional:
+
+```powershell
+isc-ai facility install --server <id> --namespace <ns> --ccr <SITE0001>
+```
+
+Upgrade explícito y ligado al baseline observado:
+
+```powershell
+isc-ai facility install --server <id> --namespace <ns> --ccr <SITE0001> --upgrade --expected-current-sha256 <sha256-actual>
+```
+
+`--ccr` debe cumplir el formato configurado en `site.ccr_id`; argparse solo valida
+la forma general y el servidor aplica el formato del sitio. El comando no usa upload
+token. Códigos de salida: `INSTALLED`, `UNCHANGED` y
+`UPGRADED` verificados terminan en `0`; `DIFFERENT` imprime el registro con el hash
+actual y termina en `2`; `SOURCE_MATCH_NOT_COMPILED`, cualquier estado retenido o
+rechazado, errores de política y excepciones inesperadas terminan en `1`. Una
+excepción inesperada imprime en stderr solo el tipo de error, acotado y sin
+traceback ni detalles (rutas, credenciales o respuestas del servidor). Errores o
+cleanup ambiguo requieren inspección manual antes de cualquier nuevo intento.
+
+### 4. Mantener pendiente la configuración/activación
+Los aliases declarados en `routes.alias_constraints` deben resolver al VIP
+configurado; no hay elección de nodo mediante escrituras. No crear/copiar
+configuración con credenciales literales ni iniciar el servidor como parte de esta
+validación offline; usar referencias `{env:VAR}`. La compatibilidad real del
+catálogo SQL, el binding TC y el control operativo del proceso siguen pendientes.
+
+Después de instalar o actualizar deben verificarse la proyección exacta
+`MCP.Mutate`, la fila pendiente y los permisos mínimos. La activación del tool
+permanece en **HOLD** hasta revisión humana. Modificar el código del paquete
+`isc_ai/` o la plantilla de su recurso requiere cerrar y reiniciar el cliente
+(OpenCode); el proceso stdio y los recursos no se recargan en vivo, aun con
+instalación editable. Los archivos de configuración (`config.json` y
+`servers.json`) sí se releen en cada llamada. El servidor MCP se inicia solo con
+`isc-ai mcp`; `isc-ai` sin comando termina con error.
 
 ---
 
 ## ⚙️ Registro en Clientes de IA
 
-Registra el script `iris_mcp_server.py` en tu entorno preferido usando la configuración de tipo `stdio`:
+**Pendiente mientras continúe HOLD.** El transporte es stdio, pero el registro y
+reinicio requieren revisión completada y autorización explícita. No se ha verificado
+la activación de este candidato en ningún cliente de IA o servidor real.
 
-### 1. Claude Desktop
-Abre tu archivo de configuración de Claude Desktop en `%APPDATA%\Claude\mcp_config.json` (Windows) o `~/Library/Application Support/Claude/mcp_config.json` (macOS) y añade el nodo:
+Cuando exista autorización, el registro es **una sola entrada para todos los
+proyectos**: no hay variables de entorno por proyecto ni rutas al repositorio. El
+servidor resuelve el proyecto desde su `cwd` con la búsqueda ascendente de
+`.iris-mcp/config.json`. Ejemplo para `opencode.json`:
 
 ```json
 {
-  "mcpServers": {
+  "mcp": {
     "intersystems-iris": {
-      "command": "python",
-      "args": [
-        "/ruta/absoluta/a/intersystems-iris-mcp/iris_mcp_server.py"
-      ]
+      "type": "local",
+      "command": ["isc-ai", "mcp"],
+      "cwd": ".",
+      "environment": { "IRIS_MCP_TIMEOUT": "1800" }
     }
   }
 }
 ```
 
-### 2. VS Code (Cline / Roo Code)
-En los ajustes de la extensión Cline o Roo Code, selecciona **MCP**, presiona **Edit MCP Settings** y pega el bloque del servidor correspondiente.
-
-### 3. Cursor IDE
-* Abre **Cursor Settings** -> **Features** -> **MCP**.
-* Añade un nuevo servidor:
-  * **Name**: `intersystems-iris`
-  * **Type**: `stdio`
-  * **Command**: `python -u "/ruta/absoluta/a/intersystems-iris-mcp/iris_mcp_server.py"`
+Con `"cwd": "."` el cliente lanza el proceso en el directorio de trabajo de la
+sesión; si ese directorio (o alguno de sus ancestros) contiene `.iris-mcp/config.json`,
+esa política gobierna la sesión. Sin configuración de proyecto, las herramientas
+READ/RUNTIME funcionan y las escrituras de código quedan bloqueadas. Para confirmar
+qué proyecto verá el servidor, ejecutar `isc-ai doctor` desde el mismo directorio.
 
 ---
 
 ## 💬 Ejemplos de Uso en el Chat
 
-Una vez configurado, puedes interactuar directamente con tu IA en lenguaje natural:
+Ejemplos para una futura sesión con alcance remoto autorizado; no ejecutarlos como
+parte del quickstart offline:
 
-* 🗺️ *"Lista mis servidores configurados para verificar qué VPN necesito conectar."*
+* 🗺️ *"Lista los metadatos de servidores y los aliases no resueltos."*
 * 🔍 *"Busca qué clases existen en el paquete `Custom.SAP` en el servidor `mi-servidor-uat`."*
 * 📄 *"Muéstrame el código de la clase `Custom.SAP.Api.RestHandler` en `mi-servidor-uat`."*
 * 🔨 *"Modifica el método `OnProcess` para añadir manejo de excepciones y compila la clase de nuevo."*
