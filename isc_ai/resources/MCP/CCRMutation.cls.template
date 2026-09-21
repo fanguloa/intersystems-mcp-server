@@ -1,0 +1,269 @@
+Class MCP.CCRMutation Extends %RegisteredObject [ Final ]
+{
+
+Parameter MAXSOURCEBYTES = 524288;
+
+Parameter APPROVEDSOURCECONTROL = "%Studio.SourceControl.ISC";
+
+/// Installed once by an administrator through the supported CCR workflow.
+ClassMethod Mutate(pClass As %String, pCCR As %String, pExpectedBeforeSHA256 As %String, pCandidateSHA256 As %String, pSourceBase64 As %String(MAXLEN=700000)) As %String(MAXLEN=16384) [ SqlName = Mutate, SqlProc ]
+{
+    New %SourceControl, %ChangeControl, %ccrSession
+    Set tLocked = 0, tResult = ""
+    Try {
+        Lock +^MCP.CCRMutation(pClass):30
+        If '$Test {
+            Set tResult = ..BeforeFail("LOCK_TIMEOUT", "Target class lock timed out", pClass, pCCR, pCandidateSHA256, "", "", "")
+        } Else {
+            Set tLocked = 1
+            Try {
+                Set tResult = ..MutateWorker(pClass, pCCR, pExpectedBeforeSHA256, pCandidateSHA256, pSourceBase64)
+            } Catch tWorkerException {
+                Set tResult = "{""protocol"":""{{PROTOCOL_PREFIX}}_CCR_MUTATION_V1"",""ok"":0,""state"":""UNKNOWN_PARTIAL"",""code"":""EXCEPTION"",""message"":""Mutation outcome is unknown; inspect class and pending change manually"",""manual_action_required"":1,""checkout_may_exist"":1,""source_may_exist"":1,""tracking_may_exist"":1}"
+            }
+        }
+    } Catch tWrapperException {
+        Set tResult = "{""protocol"":""{{PROTOCOL_PREFIX}}_CCR_MUTATION_V1"",""ok"":0,""state"":""UNKNOWN_PARTIAL"",""code"":""WRAPPER_EXCEPTION"",""message"":""Mutation wrapper failed; inspect class and pending change manually"",""manual_action_required"":1,""checkout_may_exist"":1,""source_may_exist"":1,""tracking_may_exist"":1}"
+    }
+    If tLocked Lock -^MCP.CCRMutation(pClass)
+    Quit tResult
+}
+
+ClassMethod MutateWorker(pClass As %String, pCCR As %String, pExpectedBeforeSHA256 As %String, pCandidateSHA256 As %String, pSourceBase64 As %String) As %String [ Private ]
+{
+    Set tBinding = "", tSourceBinding = "", tSuspendLevel = "", tDocument = pClass_".cls"
+    Set tWasPresent = 0, tCheckoutCreated = 0, tTrackingCreated = 0, tRowID = ""
+
+    If $Namespace '= "{{CANONICAL_NAMESPACE}}" Quit ..BeforeFail("INVALID_NAMESPACE", "Facility is restricted to {{CANONICAL_NAMESPACE}}", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If '..ValidClassName(pClass) Quit ..BeforeFail("INVALID_CLASS", "Class must be an allowed {{MUTATION_CLASS_PREFIX}} class", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If '..ValidCCR(pCCR) Quit ..BeforeFail("INVALID_CCR", "CCR must match {{CCR_DESCRIPTION}}", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If '..ValidSHA(pCandidateSHA256) Quit ..BeforeFail("INVALID_CANDIDATE_HASH", "Candidate SHA-256 is invalid", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If (pExpectedBeforeSHA256 '= "ABSENT") && ('..ValidSHA(pExpectedBeforeSHA256)) Quit ..BeforeFail("INVALID_BASELINE_HASH", "Expected baseline must be ABSENT or lowercase SHA-256", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If (pSourceBase64 = "") || ($Length(pSourceBase64) > 699052) Quit ..BeforeFail("INVALID_SOURCE", "Canonical Base64 source is required", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+
+    Set tSourceBytes = $System.Encryption.Base64Decode(pSourceBase64)
+    If $System.Encryption.Base64Encode(tSourceBytes, 1) '= pSourceBase64 Quit ..BeforeFail("INVALID_BASE64", "Source Base64 is not canonical", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If ($Length(tSourceBytes) = 0) || ($Length(tSourceBytes) > ..#MAXSOURCEBYTES) Quit ..BeforeFail("SOURCE_SIZE", "Decoded source size is outside the allowed range", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If $Find(tSourceBytes, $Char(0)) Quit ..BeforeFail("SOURCE_NUL", "Source contains a NUL byte", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If $Extract(tSourceBytes, 1, 3) = $Char(239, 187, 191) Quit ..BeforeFail("SOURCE_BOM", "UTF-8 BOM is not allowed", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    Set tSource = $ZConvert(tSourceBytes, "I", "UTF8")
+    If $ZConvert(tSource, "O", "UTF8") '= tSourceBytes Quit ..BeforeFail("SOURCE_UTF8", "Source is not strict UTF-8", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    Set tCanonicalSource = ..CanonicalCRLF(tSource), tCanonicalBytes = $ZConvert(tCanonicalSource, "O", "UTF8")
+    If tCanonicalBytes '= tSourceBytes Quit ..BeforeFail("SOURCE_LINE_ENDINGS", "Source must use canonical CRLF line endings", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+    If ..SHA256(tCanonicalBytes) '= pCandidateSHA256 Quit ..BeforeFail("CANDIDATE_HASH_MISMATCH", "Candidate SHA-256 does not match canonical source", pClass, pCCR, "", tBinding, tSourceBinding, tSuspendLevel)
+
+    Set tBinding = ##class(TC.ChangeControl.Interface).ChangeControlClassGet()
+    Set tSourceBinding = ##class(%Studio.SourceControl.Interface).SourceControlClassGet()
+    Set tSuspendLevel = ##class(TC.ChangeControl.Interface).GetSuspendLevel()
+    If tBinding '= "TC.ChangeControl.CCR" Quit ..BeforeFail("BINDING_MISMATCH", "Exact TC.ChangeControl.CCR binding is required", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+    If tSourceBinding '= ..#APPROVEDSOURCECONTROL Quit ..BeforeFail("SOURCE_BINDING_MISMATCH", "Configured source-control class is not approved", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+    If ##class(TC.ChangeControl.Interface).IsSuspended() || (+tSuspendLevel '= 0) Quit ..BeforeFail("CONTROL_SUSPENDED", "Change control must be active at suspend level zero", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+
+    Set tSC = ##class(TC.ChangeControl.Interface).ChangeControlCreate($Username, "", .tCreated)
+    If $$$ISERR(tSC) || ('tCreated) || ('$IsObject($Get(%ChangeControl))) || ($ClassName(%ChangeControl) '= tBinding) Quit ..BeforeFail("CHANGE_CONTROL_CREATE", "Unable to create exact bound change-control object", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+    Set tNormalizedCCR = %ChangeControl.NormaliseKey(pCCR)
+    If (tNormalizedCCR '= pCCR) || ('%ChangeControl.IsKeyValid(tNormalizedCCR)) Quit ..BeforeFail("CCR_REJECTED", "CCR normalization or validation changed/rejected the requested value", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+
+    Set %ccrSession = pCCR
+    Set tSC = ##class(%Studio.SourceControl.Interface).SourceControlCreate("", "", .tSourceCreated)
+    If $$$ISERR(tSC) || ('tSourceCreated) || ('$IsObject($Get(%SourceControl))) || ($ClassName(%SourceControl) '= tSourceBinding) Quit ..BeforeFail("SOURCE_CONTROL_CREATE", "Unable to create exact configured source-control object", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+
+    Set tExpectedFile = %SourceControl.ExternalName(tDocument)
+    Set tExpectedName = tDocument, tExpectedSource = "studio"
+    Set tExpectedUser = $Username
+    If (tExpectedFile = "") || (tExpectedName = "") || (tExpectedUser = "") Quit ..BeforeFail("SOURCE_IDENTITY", "Source-control file, name, and owner must be explicit", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+
+    Set tWasPresent = ##class(%Dictionary.ClassDefinition).%ExistsId(pClass)
+    If tWasPresent {
+        Set tSC = ##class(%Compiler.UDL.TextServices).GetTextAsString("", tDocument, .tBeforeSource)
+        If $$$ISERR(tSC) Quit ..BeforeFail("BASELINE_READ", "Unable to read current class source", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+        Set tBeforeHash = ..SHA256($ZConvert(..CanonicalCRLF(tBeforeSource), "O", "UTF8"))
+        If (pExpectedBeforeSHA256 = "ABSENT") || (tBeforeHash '= pExpectedBeforeSHA256) Quit ..BeforeFail("BASELINE_MISMATCH", "Current canonical source does not match expected baseline", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+    } ElseIf pExpectedBeforeSHA256 '= "ABSENT" {
+        Quit ..BeforeFail("BASELINE_ABSENT", "Target class is absent but a hash was required", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+    }
+
+    Set tSC = ..ReadPending(tDocument, tExpectedFile, .tPendingCount, .tPendingID, .tPendingName, .tPendingAction, .tPendingCCR, .tPendingSource, .tPendingFile, .tPendingUser, .tPendingInternal)
+    If $$$ISERR(tSC) Quit ..BeforeFail("PENDING_QUERY", "Unable to inspect pending source-control changes", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+    If tPendingCount Quit ..BeforeFail("PREEXISTING_PENDING", "Target document or file already has pending work", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+
+    // Revalidate namespace, exact bindings and process-local suspension immediately
+    // before the first mutation-capable step (checkout when present, else OnBeforeSave).
+    If '..ControlIntact(.tSuspendLevel) Quit ..BeforeFail("CONTROL_CHANGED", "Namespace, configured bindings or process-local suspension changed before mutation", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel)
+
+    If tWasPresent {
+        Set tCheckoutCreated = 1
+        Set tSC = %SourceControl.CheckOut(tDocument, "MCP CCRMutation", 0)
+        If $$$ISERR(tSC) Quit ..Retained("CHECKOUT_FAILED_RETAINED", "Checkout failed; inspect document and pending queue manually", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, 1, 0, 1, "")
+        Set tSC = ..ReadPending(tDocument, tExpectedFile, .tPendingCount, .tPendingID, .tPendingName, .tPendingAction, .tPendingCCR, .tPendingSource, .tPendingFile, .tPendingUser, .tPendingInternal)
+        If $$$ISERR(tSC) || (tPendingCount '= 1) || ('..PendingOwned(tPendingID, tPendingName, tPendingAction, tPendingCCR, tPendingSource, tPendingFile, tPendingUser, tPendingInternal, tExpectedName, "edit", pCCR, tExpectedSource, tExpectedFile, tExpectedUser, tDocument)) Quit ..Retained("UNKNOWN_PARTIAL", "Checkout provenance is unknown; inspect document and pending queue manually", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, 1, 0, 1, tPendingID)
+        Set tTrackingCreated = 1, tRowID = tPendingID
+        If tPendingCCR = "" {
+            Set tSC = ##class(%Studio.SourceControl.Change).UpdateUncommitted(tExpectedFile, , , , , , , pCCR)
+            If $$$ISERR(tSC) Quit ..Retained("CHECKOUT_CCR_RETAINED", "Checkout exists but CCR assignment failed", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, 1, 0, 1, tRowID)
+        }
+        Set tSC = ..ReadPending(tDocument, tExpectedFile, .tPendingCount, .tPendingID, .tPendingName, .tPendingAction, .tPendingCCR, .tPendingSource, .tPendingFile, .tPendingUser, .tPendingInternal)
+        If $$$ISERR(tSC) || (tPendingCount '= 1) || (tPendingID '= tRowID) || ('..PendingMatches(tPendingID, tPendingName, tPendingAction, tPendingCCR, tPendingSource, tPendingFile, tPendingUser, tPendingInternal, tExpectedName, "edit", pCCR, tExpectedSource, tExpectedFile, tExpectedUser, tDocument)) Quit ..Retained("UNKNOWN_PARTIAL", "Assigned checkout provenance is unknown", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, 1, 0, 1, tRowID)
+    }
+
+    Set tSC = %SourceControl.OnBeforeSave(tDocument)
+    If $$$ISERR(tSC) Quit ..Retained("BEFORE_SAVE_FAILED_RETAINED", "Before-save hook failed; manual inspection is required", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+
+    // Revalidate again immediately before import.
+    If '..ControlIntact(.tSuspendLevel) Quit ..Retained("CONTROL_CHANGED_RETAINED", "Namespace, configured bindings or process-local suspension changed immediately before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+
+    // Close the TOCTOU window: presence, current canonical hash and pending rows must
+    // still equal the baseline observed earlier in this same process.
+    If ##class(%Dictionary.ClassDefinition).%ExistsId(pClass) '= tWasPresent Quit ..Retained("BASELINE_DRIFT_RETAINED", "Target presence changed before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+    If tWasPresent {
+        Set tSC = ##class(%Compiler.UDL.TextServices).GetTextAsString("", tDocument, .tRecheckSource)
+        If $$$ISERR(tSC) Quit ..Retained("BASELINE_DRIFT_RETAINED", "Current source cannot be reread before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+        If ..SHA256($ZConvert(..CanonicalCRLF(tRecheckSource), "O", "UTF8")) '= pExpectedBeforeSHA256 Quit ..Retained("BASELINE_DRIFT_RETAINED", "Current canonical source changed before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+    }
+    Set tSC = ..ReadPending(tDocument, tExpectedFile, .tPendingCount, .tPendingID, .tPendingName, .tPendingAction, .tPendingCCR, .tPendingSource, .tPendingFile, .tPendingUser, .tPendingInternal)
+    If $$$ISERR(tSC) Quit ..Retained("BASELINE_DRIFT_RETAINED", "Pending rows cannot be reread before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+    If tWasPresent {
+        If (tPendingCount '= 1) || (tPendingID '= tRowID) || ('..PendingMatches(tPendingID, tPendingName, tPendingAction, tPendingCCR, tPendingSource, tPendingFile, tPendingUser, tPendingInternal, tExpectedName, "edit", pCCR, tExpectedSource, tExpectedFile, tExpectedUser, tDocument)) Quit ..Retained("BASELINE_DRIFT_RETAINED", "Unexpected pending rows before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, tTrackingCreated, tRowID)
+    } ElseIf tPendingCount '= 0 {
+        Quit ..Retained("BASELINE_DRIFT_RETAINED", "Unexpected pending rows before import", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 0, 1, tPendingID)
+    }
+
+    Set tSC = ##class(%Compiler.UDL.TextServices).SetTextFromString($Namespace, pClass, tCanonicalSource)
+    If $$$ISERR(tSC) Quit ..Retained("IMPORT_FAILED_RETAINED", "Source import failed or is partial; manual inspection is required", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, tTrackingCreated, tRowID)
+
+    If tWasPresent {
+        Set tSC = %SourceControl.OnAfterSave(tDocument)
+    } Else {
+        Set tSC = %SourceControl.AddToSourceControl(tDocument, "MCP CCRMutation")
+    }
+    If $$$ISERR(tSC) Quit ..Retained("AFTER_SAVE_FAILED_RETAINED", "Source changed but final source-control hook failed", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tRowID)
+
+    Set tExpectedAction = $Select(tWasPresent:"edit", 1:"add")
+    Set tSC = ..ReadPending(tDocument, tExpectedFile, .tPendingCount, .tPendingID, .tPendingName, .tPendingAction, .tPendingCCR, .tPendingSource, .tPendingFile, .tPendingUser, .tPendingInternal)
+    If $$$ISERR(tSC) || (tPendingCount '= 1) || ('..PendingOwned(tPendingID, tPendingName, tPendingAction, tPendingCCR, tPendingSource, tPendingFile, tPendingUser, tPendingInternal, tExpectedName, tExpectedAction, pCCR, tExpectedSource, tExpectedFile, tExpectedUser, tDocument)) Quit ..Retained("UNKNOWN_PARTIAL", "Final pending-row provenance is unknown", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tPendingID)
+    If tWasPresent && (tPendingID '= tRowID) Quit ..Retained("UNKNOWN_PARTIAL", "Pending row identity changed after save", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tPendingID)
+    Set tTrackingCreated = 1, tRowID = tPendingID
+    If tPendingCCR = "" {
+        Set tSC = ##class(%Studio.SourceControl.Change).UpdateUncommitted(tExpectedFile, , , , , , , pCCR)
+        If $$$ISERR(tSC) Quit ..Retained("FINAL_CCR_RETAINED", "Source and tracking exist but CCR assignment failed", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tRowID)
+    }
+    Set tSC = ..ReadPending(tDocument, tExpectedFile, .tPendingCount, .tPendingID, .tPendingName, .tPendingAction, .tPendingCCR, .tPendingSource, .tPendingFile, .tPendingUser, .tPendingInternal)
+    If $$$ISERR(tSC) || (tPendingCount '= 1) || (tPendingID '= tRowID) || ('..PendingMatches(tPendingID, tPendingName, tPendingAction, tPendingCCR, tPendingSource, tPendingFile, tPendingUser, tPendingInternal, tExpectedName, tExpectedAction, pCCR, tExpectedSource, tExpectedFile, tExpectedUser, tDocument)) Quit ..Retained("UNKNOWN_PARTIAL", "Final assigned row provenance is unknown", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tRowID)
+
+    Set tSC = ##class(%Compiler.UDL.TextServices).GetTextAsString("", tDocument, .tRoundTripSource)
+    If $$$ISERR(tSC) Quit ..Retained("ROUND_TRIP_READ_RETAINED", "Source and tracking exist but round-trip read failed", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tRowID)
+    If ..SHA256($ZConvert(..CanonicalCRLF(tRoundTripSource), "O", "UTF8")) '= pCandidateSHA256 Quit ..Retained("ROUND_TRIP_MISMATCH_RETAINED", "Source and tracking exist but canonical hash differs", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tRowID)
+
+    Set tCompileSC = $System.OBJ.Compile(pClass, "ck-d")
+    If $$$ISERR(tCompileSC) Quit ..Retained("COMPILE_FAILED_RETAINED", "Source and tracking exist but compilation failed; prior compiled code may remain active", pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tCheckoutCreated, 1, 1, tRowID)
+    Quit ..Success(pClass, pCCR, pCandidateSHA256, tBinding, tSourceBinding, tSuspendLevel, tRowID, tCheckoutCreated)
+}
+
+ClassMethod CanonicalCRLF(pText As %String) As %String [ Private ]
+{
+    Set tText = $Replace($Replace(pText, $Char(13, 10), $Char(10)), $Char(13), $Char(10))
+    While ($Length(tText) > 0) && (($Extract(tText, *) = $Char(10)) || ($Extract(tText, *) = " ")) { Set tText = $Extract(tText, 1, *-1) }
+    Quit $Replace(tText _ $Char(10), $Char(10), $Char(13, 10))
+}
+
+/// Same-process revalidation of namespace, exact bindings and process-local suspension.
+ClassMethod ControlIntact(Output pSuspendLevel As %String) As %Boolean [ Private ]
+{
+    Set pSuspendLevel = ##class(TC.ChangeControl.Interface).GetSuspendLevel()
+    If $Namespace '= "{{CANONICAL_NAMESPACE}}" Quit 0
+    If ##class(TC.ChangeControl.Interface).ChangeControlClassGet() '= "TC.ChangeControl.CCR" Quit 0
+    If ##class(%Studio.SourceControl.Interface).SourceControlClassGet() '= ..#APPROVEDSOURCECONTROL Quit 0
+    If ##class(TC.ChangeControl.Interface).IsSuspended() Quit 0
+    If +pSuspendLevel '= 0 Quit 0
+    Quit 1
+}
+
+ClassMethod ReadPending(pDocument As %String, pExpectedFile As %String, Output pCount As %Integer, Output pID As %String, Output pName As %String, Output pAction As %String, Output pCCR As %String, Output pSource As %String, Output pFile As %String, Output pUser As %String, Output pInternal As %String) As %Status [ Private ]
+{
+    Set (pCount, pID, pName, pAction, pCCR, pSource, pFile, pUser, pInternal) = ""
+    &SQL(SELECT COUNT(*), MIN(ID), MIN(%EXACT(Name)), MIN(%EXACT(Action)), MIN(%EXACT(CCR)), MIN(%EXACT(Source)), MIN(%EXACT(ItemFile)), MIN(%EXACT("User")), MIN(%EXACT(InternalName)) INTO :pCount, :pID, :pName, :pAction, :pCCR, :pSource, :pFile, :pUser, :pInternal FROM %Studio_SourceControl.Change WHERE (InternalName = :pDocument OR ItemFile = :pExpectedFile) AND Committed = 0)
+    If SQLCODE Quit $$$ERROR($$$GeneralError, "Pending source-control query failed")
+    Quit $$$OK
+}
+
+ClassMethod PendingMatches(pID As %String, pName As %String, pAction As %String, pCCR As %String, pSource As %String, pFile As %String, pUser As %String, pInternal As %String, pExpectedName As %String, pExpectedAction As %String, pExpectedCCR As %String, pExpectedSource As %String, pExpectedFile As %String, pExpectedUser As %String, pExpectedInternal As %String) As %Boolean [ Private ]
+{
+    Quit (pID '= "") && (pName = pExpectedName) && (pAction = pExpectedAction) && (pCCR = pExpectedCCR) && (pSource = pExpectedSource) && (pFile = pExpectedFile) && (pUser = pExpectedUser) && (pInternal = pExpectedInternal)
+}
+
+ClassMethod PendingOwned(pID As %String, pName As %String, pAction As %String, pCCR As %String, pSource As %String, pFile As %String, pUser As %String, pInternal As %String, pExpectedName As %String, pExpectedAction As %String, pExpectedCCR As %String, pExpectedSource As %String, pExpectedFile As %String, pExpectedUser As %String, pExpectedInternal As %String) As %Boolean [ Private ]
+{
+    Quit ((pCCR = "") || (pCCR = pExpectedCCR)) && ..PendingMatches(pID, pName, pAction, pCCR, pSource, pFile, pUser, pInternal, pExpectedName, pExpectedAction, pCCR, pExpectedSource, pExpectedFile, pExpectedUser, pExpectedInternal)
+}
+
+ClassMethod BeforeFail(pCode As %String, pMessage As %String, pClass As %String, pCCR As %String, pCandidateSHA256 As %String, pBinding As %String, pSourceBinding As %String, pSuspendLevel As %String) As %String [ Private ]
+{
+    Set tResult = ..BaseResult(0, "REJECTED", pCode, pMessage, pClass, pCCR, pCandidateSHA256, pBinding, pSourceBinding, pSuspendLevel)
+    Do tResult.%Set("manual_action_required", 0), tResult.%Set("checkout_may_exist", 0), tResult.%Set("source_may_exist", 0), tResult.%Set("tracking_may_exist", 0)
+    Quit ..BoundJSON(tResult)
+}
+
+ClassMethod Retained(pState As %String, pMessage As %String, pClass As %String, pCCR As %String, pCandidateSHA256 As %String, pBinding As %String, pSourceBinding As %String, pSuspendLevel As %String, pCheckoutMayExist As %Boolean, pSourceMayExist As %Boolean, pTrackingMayExist As %Boolean, pRowID As %String) As %String [ Private ]
+{
+    Set tResult = ..BaseResult(0, pState, pState, pMessage, pClass, pCCR, pCandidateSHA256, pBinding, pSourceBinding, pSuspendLevel)
+    Do tResult.%Set("manual_action_required", 1), tResult.%Set("checkout_may_exist", +pCheckoutMayExist), tResult.%Set("source_may_exist", +pSourceMayExist), tResult.%Set("tracking_may_exist", +pTrackingMayExist), tResult.%Set("change_id", +pRowID)
+    Quit ..BoundJSON(tResult)
+}
+
+ClassMethod ValidClassName(pClass As %String) As %Boolean [ Private ]
+{
+    If ($Extract(pClass, 1, {{MUTATION_CLASS_PREFIX_DOT_LENGTH}}) '= "{{MUTATION_CLASS_PREFIX_DOT}}") || ($ZConvert(pClass, "U") = $ZConvert($ClassName(), "U")) || ($Extract(pClass, *) = ".") || (pClass [ "..") Quit 0
+    Set tValid = 1
+    For tIndex = 1:1:$Length(pClass) {
+        If '$Find("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.", $Extract(pClass, tIndex)) Set tValid = 0 Quit
+    }
+    Quit tValid
+}
+
+ClassMethod ValidCCR(pCCR As %String) As %Boolean [ Private ]
+{
+    Quit ($Length(pCCR) = {{CCR_LENGTH}}) && ($Extract(pCCR, 1, {{CCR_PREFIX_LENGTH}}) = "{{CCR_PREFIX}}") && ($Extract(pCCR, {{CCR_DIGITS_START}}, {{CCR_LENGTH}})?{{CCR_DIGITS}}N)
+}
+
+ClassMethod ValidSHA(pValue As %String) As %Boolean [ Private ]
+{
+    If $Length(pValue) '= 64 Quit 0
+    Set tValid = 1
+    For tIndex = 1:1:64 {
+        If '$Find("0123456789abcdef", $Extract(pValue, tIndex)) Set tValid = 0 Quit
+    }
+    Quit tValid
+}
+
+ClassMethod SHA256(pBytes As %String) As %String [ Private ]
+{
+    Set tHash = $System.Encryption.SHAHash(256, pBytes), tHex = "", tDigits = "0123456789abcdef"
+    For tIndex = 1:1:$Length(tHash) {
+        Set tByte = $Ascii(tHash, tIndex)
+        Set tHex = tHex_$Extract(tDigits, (tByte\16)+1)_$Extract(tDigits, (tByte#16)+1)
+    }
+    Quit tHex
+}
+
+ClassMethod Success(pClass As %String, pCCR As %String, pCandidateSHA256 As %String, pBinding As %String, pSourceBinding As %String, pSuspendLevel As %String, pRowID As %String, pCheckoutCreated As %Boolean) As %String [ Private ]
+{
+    Set tResult = ..BaseResult(1, "VERIFIED", "", "", pClass, pCCR, pCandidateSHA256, pBinding, pSourceBinding, pSuspendLevel)
+    Do tResult.%Set("controlled_active", 1), tResult.%Set("suspension_scope", "same-request-process"), tResult.%Set("round_trip", 1), tResult.%Set("tracking", 1), tResult.%Set("compile", 1), tResult.%Set("change_id", +pRowID), tResult.%Set("checkout_created", +pCheckoutCreated), tResult.%Set("created_tracking", 1), tResult.%Set("manual_action_required", 0)
+    Quit ..BoundJSON(tResult)
+}
+
+ClassMethod BaseResult(pOK As %Boolean, pState As %String, pCode As %String, pMessage As %String, pClass As %String, pCCR As %String, pCandidateSHA256 As %String, pBinding As %String, pSourceBinding As %String, pSuspendLevel As %String) As %DynamicObject [ Private ]
+{
+    Set tResult = ##class(%DynamicObject).%New()
+    Do tResult.%Set("protocol", "{{PROTOCOL_PREFIX}}_CCR_MUTATION_V1"), tResult.%Set("ok", +pOK), tResult.%Set("state", pState), tResult.%Set("code", pCode), tResult.%Set("message", pMessage), tResult.%Set("namespace", $Namespace), tResult.%Set("class", pClass), tResult.%Set("ccr", pCCR), tResult.%Set("candidate_sha256", pCandidateSHA256), tResult.%Set("binding", pBinding), tResult.%Set("source_binding", pSourceBinding), tResult.%Set("suspend_level", +pSuspendLevel)
+    Quit tResult
+}
+
+ClassMethod BoundJSON(pResult As %DynamicObject) As %String [ Private ]
+{
+    Set tJSON = pResult.%ToJSON()
+    If $Length(tJSON) > 16000 Quit "{""protocol"":""{{PROTOCOL_PREFIX}}_CCR_MUTATION_V1"",""ok"":0,""state"":""UNKNOWN_PARTIAL"",""code"":""RESPONSE_LIMIT"",""message"":""Structured response exceeded limit"",""manual_action_required"":1,""checkout_may_exist"":1,""source_may_exist"":1,""tracking_may_exist"":1}"
+    Quit tJSON
+}
+
+}

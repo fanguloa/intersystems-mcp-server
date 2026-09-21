@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "_comment": "Project policy for the IRIS MCP server. Created by 'isc-ai init'; edit with 'isc-ai config set' or your editor. Secrets go in ~/.iris-mcp/servers.json or as {env:VAR} references; never store them here.",
+  "site": {
+    "name": "my-site",
+    "ccr_id": {
+      "prefix": "SITE",
+      "digits": 4
+    },
+    "protocol_prefix": "MCP",
+    "production_markers": ["PROD", "PRODUCTION", "LIVE", "PRD"],
+    "production_roles": ["LIVE", "PROD", "PRODUCTION", "PRD"],
+    "non_production_roles": ["BASE", "DEV", "UAT", "QA", "TEST", "SCRATCH", "TRAIN"],
+    "system_namespaces": ["%SYS", "USER", "HSLIB", "HSSYS", "HSSYSLOCALTEMP", "DATAMIGRATION", "HSCUSTOM"]
+  },
+  "canonical_base": {
+    "server_id": "my-base",
+    "host": "base.example.invalid",
+    "port": 80,
+    "path_prefix": "/base01",
+    "namespace": "BASE-SITE"
+  },
+  "routes": {
+    "direct_ha_nodes": ["uat-node01.example.invalid", "uat-node02.example.invalid"],
+    "alias_constraints": {
+      "my-uat": {
+        "host": "uat-vip.example.invalid",
+        "path_prefix": ""
+      }
+    },
+    "uat_write_exceptions": [
+      {
+        "label": "Integration UAT VIP",
+        "namespace": "INT",
+        "hosts": ["uat-vip.example.invalid"],
+        "path_prefixes": ["/intuat"],
+        "requires_active_node": false
+      },
+      {
+        "label": "Integration UAT active mirror node",
+        "namespace": "INT",
+        "path_prefixes": ["/intuat01", "/intuat02"],
+        "requires_active_node": true
+      }
+    ]
+  },
+  "packages": {
+    "BASE-SITE": [
+      { "prefix": "Custom.Site" }
+    ],
+    "INT": [
+      { "prefix": "Custom.Site.Integration" },
+      { "prefix": "OwnPackage", "roles": ["BASE"] },
+      { "class": "INTPKG.FoundationProduction" }
+    ]
+  },
+  "mutation": {
+    "class_prefix": "Custom.Site",
+    "local_source_root": "BASE-SITE/src/Custom/Site"
+  },
+  "servers": {
+    "my-base": {
+      "host": "base.example.invalid",
+      "port": 80,
+      "path_prefix": "/base01",
+      "namespace": "BASE-SITE",
+      "env_role": "BASE",
+      "is_production": false,
+      "username": "{env:IRIS_MY_BASE_USER}",
+      "password": "{env:IRIS_MY_BASE_PASSWORD}",
+      "description": "Origin of changes (CCR BASE)"
+    },
+    "my-uat": {
+      "host": "uat-vip.example.invalid",
+      "port": 80,
+      "path_prefix": "",
+      "namespace": "UAT-SITE",
+      "env_role": "UAT",
+      "is_production": false,
+      "username": "{env:IRIS_MY_UAT_USER}",
+      "password": "{env:IRIS_MY_UAT_PASSWORD}",
+      "upload_token": "{env:IRIS_CCR_TOKEN}",
+      "description": "UAT clinical VIP (promotion target)"
+    },
+    "my-live": {
+      "host": "live.example.invalid",
+      "port": 80,
+      "path_prefix": "",
+      "namespace": "LIVE-SITE",
+      "env_role": "LIVE",
+      "is_production": true,
+      "username": "{env:IRIS_MY_LIVE_USER}",
+      "password": "{env:IRIS_MY_LIVE_PASSWORD}",
+      "description": "Production; every write gate blocks here"
+    }
+  }
+}

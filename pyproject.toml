@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "isc-ai"
+version = "0.2.0"
+description = "InterSystems IRIS/TrakCare MCP server with CCR-aware write gates, plus the CLI that manages its per-project configuration."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+socks = ["PySocks>=1.7"]
+
+[project.scripts]
+isc-ai = "isc_ai.cli:main"
+
+[tool.setuptools]
+packages = ["isc_ai"]
+
+[tool.setuptools.package-data]
+isc_ai = ["resources/*.json", "resources/MCP/*.template"]

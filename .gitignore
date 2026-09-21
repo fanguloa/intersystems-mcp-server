@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.tmp
 
 # Environments
 .env
@@ -12,7 +17,9 @@ ENV/
 env.bak/
 venv.bak/
 
-# Configuration (Contains sensitive credentials)
+# Private server credentials (never commit). The project policy
+# .iris-mcp/config.json IS committable when secrets use {env:VAR} references.
+.iris-mcp/servers.json
 mcp_config.json
 .iris_mcp_servers.json
 
