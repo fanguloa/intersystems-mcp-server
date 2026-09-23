@@ -74,23 +74,41 @@ def _toggle_vscode(path, server_name, spec, enable, changes, environment):
 
 
 def _toggle_claude(path, project, server_name, enable, changes):
-    """Claude keeps the per-directory on/off lists in its global file."""
+    """Claude keeps the per-directory on/off lists in its global file.
+
+    `enabledMcpjsonServers` is an allowlist, not a per-server switch: once it holds a
+    name, every server absent from it is off. So enabling means removing the name from
+    the disabled list and nothing more, unless an allowlist is already in force, in which
+    case the name has to join it. Adding to that list unconditionally is how enabling one
+    server silently disables the rest.
+    """
     data, strict, _ = load_json_file(path)
     if not strict or project is None:
         return None
     projects = dict(data.get("projects") or {})
     key = next((raw for raw in projects if audit._same_path(raw, project)), str(project).replace("\\", "/"))
     entry = dict(projects.get(key) or {})
-    enabled = [item for item in (entry.get("enabledMcpjsonServers") or []) if item != server_name]
+    allowlist = list(entry.get("enabledMcpjsonServers") or [])
     disabled = [item for item in (entry.get("disabledMcpjsonServers") or []) if item != server_name]
+
     if enable:
-        enabled.append(server_name)
-        changes.append(f"claude: listed '{server_name}' as enabled for {key}")
+        if allowlist and server_name not in allowlist:
+            allowlist.append(server_name)
+            changes.append(f"claude: added '{server_name}' to the allowlist already in force for {key}")
+        else:
+            changes.append(f"claude: removed '{server_name}' from the disabled list for {key}")
     else:
         disabled.append(server_name)
+        allowlist = [item for item in allowlist if item != server_name]
         changes.append(f"claude: listed '{server_name}' as disabled for {key}")
-    entry["enabledMcpjsonServers"] = sorted(set(enabled))
+
     entry["disabledMcpjsonServers"] = sorted(set(disabled))
+    if allowlist:
+        entry["enabledMcpjsonServers"] = sorted(set(allowlist))
+    else:
+        # An empty allowlist is not the same as an absent one only by accident; keep the
+        # key present and empty, which is how Claude ships it.
+        entry["enabledMcpjsonServers"] = []
     projects[key] = entry
     if projects == (data.get("projects") or {}):
         return None

@@ -158,6 +158,29 @@ class ToggleTests(StoreTestCase):
         self.assertEqual((entry["command"], entry["args"]), ("alpha-server", ["--x"]))
         self.assertTrue(self.read(self.opencode)["mcp"]["alpha"]["enabled"])
 
+    def test_enabling_does_not_turn_the_allowlist_into_a_trap(self):
+        """`enabledMcpjsonServers` is an allowlist: a name in it disables every other one.
+
+        Enabling one server by adding it there silently switched off the rest, which is
+        exactly what happened on a real workstation before this was fixed.
+        """
+        self.toggle(False, apply_changes=True)   # alpha lands in the disabled list
+        self.toggle(True, apply_changes=True)    # and must simply leave it
+        project_key = next(iter(self.read(self.claude)["projects"]))
+        entry = self.read(self.claude)["projects"][project_key]
+        self.assertEqual(entry["disabledMcpjsonServers"], [])
+        self.assertEqual(entry["enabledMcpjsonServers"], [],
+                         "enabling must not create an allowlist that excludes everything else")
+
+    def test_an_allowlist_already_in_force_is_respected(self):
+        project_key = str(self.project).replace("\\", "/")
+        self.claude.write_text(json.dumps(
+            {"projects": {project_key: {"enabledMcpjsonServers": ["other-server"]}}}), encoding="utf-8")
+        self.toggle(True, apply_changes=True)
+        entry = self.read(self.claude)["projects"][project_key]
+        self.assertEqual(entry["enabledMcpjsonServers"], ["alpha", "other-server"],
+                         "where an allowlist exists, the name has to join it to be reachable")
+
     def test_the_plan_writes_nothing(self):
         before = {path: path.read_bytes() for path in (self.opencode, self.vscode, self.claude)}
         report = self.toggle(False)
