@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 
-MCP_NAME = "isc-ai"
+# The registration name is the canonical suite name, so setup and suite agree
+# and a workstation never ends up with the same server under two names.
+MCP_NAME = "intersystems-iris"
 SCHEMA_URL = "https://opencode.ai/config.json"
 TUI_SCHEMA_URL = "https://opencode.ai/tui.json"
 DEFAULT_TIMEOUT = 1800

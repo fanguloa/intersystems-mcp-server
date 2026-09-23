@@ -60,7 +60,7 @@ class SetupTestCase(unittest.TestCase):
         report = self.run_setup(apply=True, configure_opencode=True, opencode_config=config_path)
         data = json.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(data["$schema"], setup.SCHEMA_URL)
-        self.assertEqual(data["mcp"]["isc-ai"], {
+        self.assertEqual(data["mcp"][setup.MCP_NAME], {
             "type": "local",
             "command": ["isc-ai", "mcp"],
             "enabled": True,
@@ -122,7 +122,7 @@ class SetupTestCase(unittest.TestCase):
             "theme": "custom",
             "mcp": {
                 "other": {"type": "remote", "url": "https://example.invalid"},
-                "isc-ai": {
+                setup.MCP_NAME: {
                     "custom": 7,
                     "cwd": ".",
                     "enabled": False,
@@ -134,14 +134,14 @@ class SetupTestCase(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(merged["theme"], "custom")
         self.assertEqual(merged["mcp"]["other"], original["mcp"]["other"])
-        self.assertEqual(merged["mcp"]["isc-ai"]["custom"], 7)
-        self.assertNotIn("cwd", merged["mcp"]["isc-ai"])
-        self.assertEqual(merged["mcp"]["isc-ai"]["environment"], {"KEEP": "yes", "IRIS_MCP_TIMEOUT": "9"})
+        self.assertEqual(merged["mcp"][setup.MCP_NAME]["custom"], 7)
+        self.assertNotIn("cwd", merged["mcp"][setup.MCP_NAME])
+        self.assertEqual(merged["mcp"][setup.MCP_NAME]["environment"], {"KEEP": "yes", "IRIS_MCP_TIMEOUT": "9"})
 
     def test_schema_only_change_is_reported_and_applied(self):
         path = self.root / "opencode.json"
         entry = setup.opencode_mcp_entry(timeout=1800)
-        path.write_text(json.dumps({"mcp": {"isc-ai": entry}}), encoding="utf-8")
+        path.write_text(json.dumps({"mcp": {setup.MCP_NAME: entry}}), encoding="utf-8")
         report = self.run_setup(apply=True, configure_opencode=True, opencode_config=path)
         self.assertEqual(report["actions"][0]["action"], "update")
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["$schema"], setup.SCHEMA_URL)
@@ -153,7 +153,7 @@ class SetupTestCase(unittest.TestCase):
                 with self.assertRaisesRegex(setup.SetupError, expected):
                     setup.merge_opencode_config(data)
         with self.assertRaisesRegex(setup.SetupError, "environment must be an object"):
-            setup.merge_opencode_config({"mcp": {"isc-ai": {"environment": []}}})
+            setup.merge_opencode_config({"mcp": {setup.MCP_NAME: {"environment": []}}})
         with self.assertRaisesRegex(setup.SetupError, "'plugin' must be an array"):
             setup.merge_tui_config({"plugin": {}}, "logo.tsx")
 
@@ -165,7 +165,7 @@ class SetupTestCase(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(len(report["manual"]), 1)
         snippet = json.loads(report["manual"][0]["snippet"])
-        self.assertEqual(snippet["mcp"]["isc-ai"]["command"], ["isc-ai", "mcp"])
+        self.assertEqual(snippet["mcp"][setup.MCP_NAME]["command"], ["isc-ai", "mcp"])
 
     def test_default_opencode_config_ambiguity_requires_explicit_path(self):
         config_dir = setup.opencode_config_dir(self.home, self.environ)
@@ -187,7 +187,7 @@ class SetupTestCase(unittest.TestCase):
         data = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(data["custom"], 1)
         self.assertIn("other", data["mcpServers"])
-        self.assertEqual(data["mcpServers"]["isc-ai"]["args"], ["mcp"])
+        self.assertEqual(data["mcpServers"][setup.MCP_NAME]["args"], ["mcp"])
 
     def test_logo_install_noop_and_user_modified_conflict(self):
         first = setup.run_setup(

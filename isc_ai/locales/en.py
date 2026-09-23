@@ -216,6 +216,8 @@ MESSAGES = {
     "flag.suite.check": "print the plan without writing (default)",
     "flag.suite.client": "limit to one client: opencode, vscode, claude",
     "flag.suite.server": "limit to one server of the suite",
+    "flag.suite.prune_claude": "also repair the Claude global file: drop dead per-directory overrides, "
+                              "rename aliased entries and replace literal secrets",
 
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "show the project, files and servers this process resolves",

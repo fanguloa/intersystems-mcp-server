@@ -244,6 +244,129 @@ def plan(project_dir=None, home=None, environ=None, suite_path=None, clients=Non
     return report, writes
 
 
+def prune_claude_global(home=None, environ=None, suite_path=None, apply_changes=False):
+    """Clean the Claude global file without rewriting it as a suite registration.
+
+    That file is owned and actively written by Claude Code, and it merges with the
+    project `.mcp.json`, so registering the suite there would run some servers twice.
+    Only three narrow repairs happen:
+
+      * a per-directory override that points at a path which no longer exists is
+        removed, because it can only fail
+      * a global entry registered under an alias is renamed to the suite name, and its
+        settings are renamed through the declared aliases with their values preserved
+      * a literal secret in a global entry becomes a reference
+
+    Every other key of the file is carried through untouched, and the write is atomic
+    with rollback. It refuses to run while Claude Code is up, because the client writes
+    this file too and the last writer would win.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    environ = os.environ if environ is None else environ
+    home = Path.home() if home is None else Path(home)
+    suite = audit.load_suite(suite_path)
+    path = audit._resolve_placeholders(
+        (suite["clients"]["claude"].get("config") or {})["user"], home, None, environ)
+    report = {"path": str(path), "mode": "apply" if apply_changes else "check",
+              "changes": [], "written": False}
+    if not path.is_file():
+        report["changes"].append("no global Claude file")
+        return report
+
+    data, strict, _ = load_json_file(path)
+    if not strict:
+        report["changes"].append("file is JSONC; left untouched")
+        return report
+
+    style = (suite["clients"]["claude"].get("config") or {}).get("reference_style") or "${NAME}"
+    canonical = {}
+    for name, spec in suite["servers"].items():
+        canonical[audit._normalize_name(name)] = name
+        for alias in spec.get("aliases", []):
+            canonical[audit._normalize_name(alias)] = name
+
+    result = dict(data)
+
+    projects = {}
+    for raw_path, config in (data.get("projects") or {}).items():
+        entry = dict(config)
+        servers = dict(entry.get("mcpServers") or {})
+        for server_name in list(servers):
+            if audit._normalize_name(server_name) not in canonical:
+                continue
+            probe = audit.Entry(client="claude", scope="user", path=path, name=server_name,
+                                command=servers[server_name].get("command", ""),
+                                args=tuple(servers[server_name].get("args") or []))
+            if audit._missing_paths(probe):
+                del servers[server_name]
+                report["changes"].append(
+                    f"removed dead override '{server_name}' under {raw_path}")
+        if servers:
+            entry["mcpServers"] = servers
+        else:
+            entry.pop("mcpServers", None)
+        projects[raw_path] = entry
+    if projects:
+        result["projects"] = projects
+
+    servers = dict(data.get("mcpServers") or {})
+    for server_name in list(servers):
+        target = canonical.get(audit._normalize_name(server_name))
+        if target is None:
+            continue
+        spec = suite["servers"][target]
+        entry = dict(servers[server_name])
+        declared = spec.get("settings") or {}
+        alias_of = {alias.upper(): key for key, rule in declared.items()
+                    for alias in rule.get("aliases", [])}
+        environment = {}
+        for raw_key, value in (entry.get("env") or {}).items():
+            key = alias_of.get(raw_key.upper(), raw_key)
+            rule = declared.get(key) or {}
+            if rule.get("secret") and not audit.REFERENCE.match(str(value)):
+                environment[key] = _reference(style, key)
+                report["changes"].append(f"replaced the literal {key} of '{server_name}' with a reference")
+            else:
+                environment[key] = value
+            if key != raw_key:
+                report["changes"].append(f"renamed setting {raw_key} to {key} in '{server_name}'")
+        if environment:
+            entry["env"] = environment
+        if target != server_name:
+            del servers[server_name]
+            report["changes"].append(f"renamed global entry '{server_name}' to '{target}'")
+        servers[target] = entry
+    if servers:
+        result["mcpServers"] = servers
+
+    if not report["changes"]:
+        return report
+    if not apply_changes:
+        return report
+
+    binary = (suite["clients"]["claude"].get("binary") or "claude")
+    if shutil.which(binary):
+        try:
+            running = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {binary}.exe", "/NH"],
+                capture_output=True, text=True, timeout=20,
+            ).stdout if os.name == "nt" else ""
+        except (OSError, subprocess.SubprocessError):
+            running = ""
+        if f"{binary}.exe" in running.lower():
+            raise SetupError(
+                f"{binary} is running and owns this file; close it before pruning so the "
+                f"client does not overwrite the repair")
+
+    _apply_transaction([ManagedWrite(path.parent, _managed_target(path.parent, path),
+                                     _json_bytes(result))], external_install=False)
+    report["written"] = True
+    return report
+
+
 def apply(project_dir=None, home=None, environ=None, suite_path=None, clients=None, servers=None):
     """Apply the plan atomically: every file or none."""
     report, writes = plan(project_dir=project_dir, home=home, environ=environ,

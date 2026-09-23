@@ -390,9 +390,10 @@ def classify(suite, entries, findings, clients=None):
                 _audit_settings(item, spec, findings)
                 states.append(item_states or ["OK"])
             if len(chosen) > 1:
+                where = ", ".join(f"{item.name} ({item.scope})" for item in chosen)
                 findings.append(Finding(
                     "SERVER_DUPLICATE", WARNING, client=client, server=name,
-                    message=f"registered {len(chosen)} times: {', '.join(item.name for item in chosen)}",
+                    message=f"registered {len(chosen)} times: {where}",
                 ))
             flat = sorted({state for group in states for state in group})
             per_client[client] = {"state": "+".join(flat), "registered_as": [item.name for item in chosen]}

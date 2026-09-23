@@ -286,6 +286,7 @@ def _parse_cli_args(argv):
     p_suite.add_argument("--client", action="append", choices=("opencode", "vscode", "claude"),
                          help=t("flag.suite.client"))
     p_suite.add_argument("--server", action="append", help=t("flag.suite.server"))
+    p_suite.add_argument("--prune-claude-global", action="store_true", help=t("flag.suite.prune_claude"))
     p_suite.add_argument("--suite", help=t("flag.audit.suite"))
 
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
@@ -602,7 +603,12 @@ def _run_suite(args):
     runner = isc_suite.apply if args.apply else isc_suite.plan
     result = runner(project_dir=getattr(args, "project_dir", None), suite_path=args.suite,
                     clients=args.client, servers=args.server)
+    # plan() returns (report, writes) so callers can inspect the writes; apply() returns
+    # the report alone.
     report = result[0] if isinstance(result, tuple) else result
+    if args.prune_claude_global:
+        report["claude_global"] = isc_suite.prune_claude_global(
+            suite_path=args.suite, apply_changes=args.apply)
     _emit(json.dumps(report, indent=2, ensure_ascii=False))
     return 0
 

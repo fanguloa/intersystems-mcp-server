@@ -129,7 +129,9 @@
       "aliases": [
         "intersystems_iris",
         "iris-mcp",
-        "intersystems-iris-mcp"
+        "intersystems-iris-mcp",
+        "isc-ai",
+        "iris"
       ],
       "settings": {
         "IRIS_MCP_TIMEOUT": {
