@@ -423,7 +423,9 @@ def classify(suite, entries, findings, clients=None):
 
 MODEL_TEMPLATE_RELATIVE = PurePosixPath("skills/ai-work-policy/assets/model-role-template.json")
 FRONTMATTER_MODEL = re.compile(r"^model:\s*(\S+)\s*$", re.M)
-MANAGED_BLOCK = re.compile(r"<!--\s*gentle-ai:([a-z0-9-]+)\s*-->")
+# Managed instruction blocks, whoever owns them: the harness writes `gentle-ai:` and
+# `isc-ai docs` writes `isc-ai:`. Both count as managed.
+MANAGED_BLOCK = re.compile(r"<!--\s*(?:gentle-ai|isc-ai):([a-z0-9-]+)\s*-->")
 
 
 def audit_harness(home, findings, manifest_path=None):
