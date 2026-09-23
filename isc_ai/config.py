@@ -144,6 +144,9 @@ class SitePolicy:
     # Language the AI agents reply in. Not the language of this CLI (that is --lang):
     # this one is rendered into the instruction files the agents read.
     agent_reply_language: str = "es-CL"
+    # role -> provider-qualified model id. Empty means "let the client decide": a
+    # concrete id is a decision about which model runs the work, never a default.
+    agent_models: dict = field(default_factory=dict)
 
     # -- CCR identifier -------------------------------------------------
 
@@ -502,8 +505,16 @@ def _parse_agents(data, policy_kwargs):
     if agents is None:
         return
     _expect(isinstance(agents, dict), "agents must be an object.")
-    unknown = set(agents) - {"reply_language"}
+    unknown = set(agents) - {"reply_language", "models"}
     _expect(not unknown, f"Unknown keys in agents: {sorted(unknown)}.")
+    models = agents.get("models")
+    if models is not None:
+        _expect(isinstance(models, dict), "agents.models must be an object keyed by role.")
+        for role, model in models.items():
+            _string(role, f"agents.models key {role!r}", re.compile(r"[a-z][a-z0-9-]*"))
+            _expect(isinstance(model, str) and "/" in model,
+                    f"agents.models.{role} must be a provider-qualified model id.")
+        policy_kwargs["agent_models"] = dict(models)
     language = agents.get("reply_language")
     if language is None:
         return

@@ -241,6 +241,27 @@ MESSAGES = {
     "flag.docs.apply": "write the changes",
     "flag.docs.check": "print the plan without writing (default)",
 
+    # -- agents ----------------------------------------------------------
+    "cmd.agents.help": "show or write the model assigned to each SDD sub-agent",
+    "cmd.agents.examples": (
+        "isc-ai agents                          the assignment per role, nothing written\n"
+        "isc-ai agents --apply                  declare the sub-agents in OpenCode\n"
+        "isc-ai config set agents.models.sdd-apply amazon-bedrock/anthropic.claude-sonnet-5\n"
+        "\n"
+        "The two clients read the assignment differently: Claude Code takes the `model:`\n"
+        "line from the packaged agent frontmatter, OpenCode takes agent.<role>.model from\n"
+        "its own configuration and wants a provider-qualified id, not a family name.\n"
+        "\n"
+        "A concrete id is never invented: the role template states a family preference, and\n"
+        "turning that into an id decides which model runs your work and on whose account.\n"
+        "Without configuration the sub-agent is still declared, the model is left to the\n"
+        "client default, and the candidates available here are reported. Ids are validated\n"
+        "against `opencode models`, so a stale one is an error instead of a runtime failure."
+    ),
+    "flag.agents.apply": "write the changes",
+    "flag.agents.check": "print the plan without writing (default)",
+    "flag.agents.no_verify": "do not ask the client which models are available",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "show the project, files and servers this process resolves",
     "cmd.doctor.examples": (

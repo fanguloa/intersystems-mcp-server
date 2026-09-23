@@ -242,6 +242,27 @@ MESSAGES = {
     "flag.docs.apply": "escribe los cambios",
     "flag.docs.check": "imprime el plan sin escribir (por defecto)",
 
+    # -- agents ----------------------------------------------------------
+    "cmd.agents.help": "muestra o escribe el modelo asignado a cada sub-agente SDD",
+    "cmd.agents.examples": (
+        "isc-ai agents                          la asignación por rol, sin escribir nada\n"
+        "isc-ai agents --apply                  declara los sub-agentes en OpenCode\n"
+        "isc-ai config set agents.models.sdd-apply amazon-bedrock/anthropic.claude-sonnet-5\n"
+        "\n"
+        "Los dos clientes leen la asignación distinto: Claude Code toma la línea `model:` del\n"
+        "frontmatter empaquetado del agente, y OpenCode toma agent.<rol>.model de su propia\n"
+        "configuración y quiere un id con proveedor, no un nombre de familia.\n"
+        "\n"
+        "Un id concreto nunca se inventa: la plantilla de roles declara una preferencia de\n"
+        "familia, y convertirla en un id decide qué modelo corre tu trabajo y en qué cuenta.\n"
+        "Sin configurar, el sub-agente igual se declara, el modelo queda al default del\n"
+        "cliente y se reportan los candidatos disponibles acá. Los ids se validan contra\n"
+        "`opencode models`, así que uno viejo es un error y no una falla en runtime."
+    ),
+    "flag.agents.apply": "escribe los cambios",
+    "flag.agents.check": "imprime el plan sin escribir (por defecto)",
+    "flag.agents.no_verify": "no le pregunta al cliente qué modelos hay disponibles",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "muestra el proyecto, los archivos y los servidores que resuelve este proceso",
     "cmd.doctor.examples": (

@@ -30,6 +30,7 @@ from pathlib import Path
 from isc_ai import __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
+from isc_ai import agents as isc_agents
 from isc_ai import docs as isc_docs
 from isc_ai import suite as isc_suite
 from isc_ai.audit import run_audit
@@ -295,6 +296,13 @@ def _parse_cli_args(argv):
     docs_mode = p_docs.add_mutually_exclusive_group()
     docs_mode.add_argument("--apply", action="store_true", help=t("flag.docs.apply"))
     docs_mode.add_argument("--check", action="store_true", help=t("flag.docs.check"))
+
+    p_agents = _add_parser(sub, "agents", "cmd.agents.help", "cmd.agents.examples")
+    _add_project_dir(p_agents)
+    agents_mode = p_agents.add_mutually_exclusive_group()
+    agents_mode.add_argument("--apply", action="store_true", help=t("flag.agents.apply"))
+    agents_mode.add_argument("--check", action="store_true", help=t("flag.agents.check"))
+    p_agents.add_argument("--no-verify-models", action="store_true", help=t("flag.agents.no_verify"))
 
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
@@ -605,6 +613,16 @@ def _run_audit(args):
     return 2 if summary["warnings"] or summary["info"] else 0
 
 
+def _run_agents(args):
+    """Sub-agent model assignment. Plan by default; --apply writes the OpenCode entries."""
+    runner = isc_agents.apply if args.apply else isc_agents.plan
+    result = runner(project_dir=getattr(args, "project_dir", None),
+                    verify_models=not args.no_verify_models)
+    report = result[0] if isinstance(result, tuple) else result
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if any(item["severity"] == "error" for item in report["findings"]) else 0
+
+
 def _run_docs(args):
     """Refresh the managed blocks. Plan by default; --apply writes."""
     runner = isc_docs.apply if args.apply else isc_docs.plan
@@ -717,6 +735,8 @@ def main(argv=None):
             return _run_facility(args)
         if args.command == "audit":
             return _run_audit(args)
+        if args.command == "agents":
+            return _run_agents(args)
         if args.command == "docs":
             return _run_docs(args)
         if args.command == "suite":
