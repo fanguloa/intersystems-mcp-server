@@ -865,8 +865,11 @@ class InitializerTests(unittest.TestCase):
         with patch("isc_ai.cli.IRISMCPServer", return_value=stdio_server):
             self.assertEqual(main(["mcp"]), 0)
         stdio_server.run.assert_called_once_with()
-        with self.assertRaises(SystemExit):
+        help_out = io.StringIO()
+        with patch("sys.stdout", help_out), self.assertRaises(SystemExit) as raised:
             main([])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("examples:", help_out.getvalue())
 
     def test_cli_exit_code_matrix(self):
         argv = ["facility", "install", "--server", "achsbase", "--namespace", "BASE-ACHS", "--ccr", CCR_ID]

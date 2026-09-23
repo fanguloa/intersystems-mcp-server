@@ -33,13 +33,31 @@ def list_result(ccr="ACHS0875", env="BASE", items=None):
     return "\n".join(lines)
 
 
+def download_result(load=True):
+    lines = [
+        "DOWNLOADED|isid=42|file=item.xml",
+        "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT",
+    ]
+    if load:
+        lines.extend(["LOADED_OS", "LOADED_NS|itemset=7"])
+    lines.append("SUCCESS")
+    return "\n".join(lines)
+
+
 class FakeToolClient(AtelierClient):
-    def __init__(self, response="", exception=None):
+    def __init__(self, response="", exception=None, promotion=False, document_reads=None):
         # Explicit, synthetic ABSENT evidence through the real discovery transport.
-        self.__dict__.update(synthetic_client().__dict__)
+        if promotion:
+            base = synthetic_client("UAT-ACHS", "UAT", host="10.244.20.6")
+        else:
+            base = synthetic_client()
+        self.__dict__.update(base.__dict__)
         self.response = response
         self.exception = exception
         self.calls = []
+        self.document_reads = {
+            name: list(reads) for name, reads in (document_reads or {}).items()
+        }
 
     def _result(self):
         if self.exception:
@@ -57,6 +75,17 @@ class FakeToolClient(AtelierClient):
     def ccr_list_itemsets(self, ccr_id, env=None, token=""):
         self.calls.append(("list", ccr_id, env, token))
         return self._result()
+
+    def ccr_download_load(self, itemset_id, load=True, token=""):
+        self.calls.append(("download_load", itemset_id, load, token))
+        return self._result()
+
+    def get_document(self, document_name, strict=False):
+        self.calls.append(("get_document", document_name, strict))
+        value = self.document_reads[document_name].pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
 
     def ccr_checkout(self, class_name, ccr_id, document_name=None):
         self.calls.append(("checkout", class_name or document_name, ccr_id))
@@ -152,13 +181,13 @@ class WriteGuardTests(HermeticTestCase):
         server = object.__new__(IRISMCPServer)
         tools = {tool["name"]: tool for tool in server.handle_tools_list()["tools"]}
         description = tools["iris_execute_objectscript"]["description"]
-        self.assertIn("puede persistir datos", description)
-        self.assertIn("Gate RUNTIME", description)
+        self.assertIn("may persist data", description)
+        self.assertIn("RUNTIME gate", description)
         self.assertIn("LIVE/PROD", description)
         self.assertNotIn("UNKNOWN", description)
         for name in ("iris_ccr_list_itemsets", "iris_ccr_can_upload", "iris_ccr_download_load"):
             self.assertNotIn("UNKNOWN", tools[name]["description"])
-        self.assertIn("INFORMATIVO", tools["iris_ccr_namespace_status"]["description"])
+        self.assertIn("INFORMATIONAL", tools["iris_ccr_namespace_status"]["description"])
         self.assertIn("SQL", tools["iris_query_sql"]["description"])
         self.assertIn("SELECT", tools["iris_query_sql"]["description"])
 
@@ -290,7 +319,7 @@ class GeneratedObjectScriptTests(HermeticTestCase):
 
         code = captured[0]
         self.assertTrue(success)
-        self.assertIn("asociacion CCR verificada", message)
+        self.assertIn("CCR association verified", message)
         self.assertIn('Set requestedCCR = "ACHS""0875"', code)
         self.assertIn("Set %ccrSession = requestedCCR", code)
         self.assertIn("Set externalName = scInst.ExternalName(className)", code)
@@ -324,7 +353,7 @@ class GeneratedObjectScriptTests(HermeticTestCase):
 
         code = captured[0]
         self.assertTrue(success)
-        self.assertIn("asociacion CCR verificada", message)
+        self.assertIn("CCR association verified", message)
         self.assertIn('Set requestedCCR = "ACHS0875"', code)
         self.assertIn("IsUncommitted(externalName)", code)
         self.assertIn("OpenUncommitted(externalName)", code)
@@ -408,7 +437,7 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         )
         success, message = client.ccr_checkout("Custom.ACHS.Test", "ACHS0875")
         self.assertTrue(success)
-        self.assertIn("exactamente", message)
+        self.assertIn("exactly the requested CCR", message)
 
     def test_checkout_tolerates_core_echo_around_the_terminal_record(self):
         """AddToSourceControl echoes TrakCare noise (e.g. 'Assigned GUID: ...') that used to be
@@ -610,7 +639,7 @@ class ToolContractTests(HermeticTestCase):
 
         self.assertTrue(result.get("isError"))
         self.assertIn("ERROR_STALE_CHECKOUT", result["content"][0]["text"])
-        self.assertNotIn("**\u00c9xito**", result["content"][0]["text"])
+        self.assertNotIn("**Success**", result["content"][0]["text"])
         self.assertEqual(client.calls, [("checkout", "Custom.Test.cls", "ACHS0875")])
 
     def test_save_handler_stops_when_explicit_ccr_checkout_is_rejected(self):
@@ -627,7 +656,7 @@ class ToolContractTests(HermeticTestCase):
         )
 
         self.assertTrue(result.get("isError"))
-        self.assertIn("no se guardo", result["content"][0]["text"])
+        self.assertIn("did not save", result["content"][0]["text"])
         self.assertIn("ERROR_CCR_MISMATCH", result["content"][0]["text"])
         self.assertEqual(client.calls, [("checkout", "Custom.ACHS.Test.cls", "ACHS0875")])
 
@@ -668,7 +697,7 @@ class ToolContractTests(HermeticTestCase):
         self.assertNotIn("secret-token", messages)
         self.assertIn("<redacted>", messages)
 
-    def test_commit_handler_renders_only_valid_verified_record(self):
+    def test_commit_handler_rejects_legacy_direct_retry_action(self):
         client = FakeToolClient(
             "VERIFIED|action=direct_retry|local_id=1080|local_name=item.xml|"
             "server_id=42|server_name=item.xml"
@@ -679,9 +708,317 @@ class ToolContractTests(HermeticTestCase):
             change_ids=[100],
         )
 
+        self.assertTrue(result.get("isError"))
+        self.assertNotIn("**VERIFIED**", result["content"][0]["text"])
+
+    def test_download_load_schema_exposes_document_verification(self):
+        tools = object.__new__(IRISMCPServer).handle_tools_list()["tools"]
+        tool = next(tool for tool in tools if tool["name"] == "iris_ccr_download_load")
+        verify = tool["inputSchema"]["properties"]["verify_documents"]
+        self.assertEqual(verify["type"], "array")
+        self.assertEqual(verify["items"], {"type": "string"})
+
+    def test_download_load_rejects_invalid_verification_before_remote_access(self):
+        cases = (
+            ({"load": False, "verify_documents": ["Custom.Order.cls"]}, "load=true"),
+            ({"verify_documents": []}, "non-empty"),
+            ({"verify_documents": ["Custom.Order.CLS"]}, "extension"),
+            ({"verify_documents": ["Custom.Order.cls", "Custom.Order.cls"]}, "duplicates"),
+            ({"verify_documents": ["Custom.Order.cls", "custom.order.cls"]}, "case-insensitive"),
+            ({"verify_documents": "Custom.Order.cls"}, "type"),
+        )
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                server = fake_server(FakeToolClient())
+                requested = []
+                server.get_client = lambda *args, **kwargs: requested.append(True)
+                result = self.call(
+                    server,
+                    "iris_ccr_download_load",
+                    itemset_id=42,
+                    **extra,
+                )
+                self.assertTrue(result.get("isError"))
+                self.assertIn(expected, result["content"][0]["text"])
+                self.assertEqual(requested, [])
+
+    def test_download_load_reports_unverified_success_without_documents(self):
+        client = FakeToolClient(download_result(), promotion=True)
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
         self.assertFalse(result.get("isError", False))
-        self.assertIn("**VERIFIED**", result["content"][0]["text"])
-        self.assertIn("`42` (`item.xml`)", result["content"][0]["text"])
+        self.assertEqual(result["structuredContent"]["status"], "LOAD_REPORTED_SUCCESS_UNVERIFIED")
+        self.assertIn("LoadToOS/LoadToNS", result["content"][0]["text"])
+
+    def test_download_only_requires_its_exact_sequence(self):
+        client = FakeToolClient(download_result(load=False), promotion=True)
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", load=False,
+        )
+        self.assertFalse(result.get("isError", False))
+        self.assertFalse(result["structuredContent"]["load_attempted"])
+
+    def test_download_load_observes_all_requested_documents_changed(self):
+        documents = {
+            "Custom.Order.cls": [["Class Custom.Order {}"], ["Class Custom.Order Extends X {}"]],
+            "Custom.Rule.mac": [["ROUTINE Custom.Rule"], ["ROUTINE Custom.Rule", "Changed"]],
+        }
+        client = FakeToolClient(download_result(), promotion=True, document_reads=documents)
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", verify_documents=list(documents),
+        )
+        self.assertFalse(result.get("isError", False))
+        self.assertEqual(result["structuredContent"]["status"], "POST_LOAD_CHANGE_OBSERVED")
+        self.assertFalse(result["structuredContent"]["proves_payload_equality"])
+        self.assertIn("does NOT prove equality against", result["content"][0]["text"])
+        self.assertEqual(client.calls[2], ("download_load", 42, True, "configured-token"))
+
+    def test_download_load_fails_for_partial_or_unreadable_result_without_retry(self):
+        documents = {
+            "Custom.Order.cls": [["  old order "], ["", "old order"]],
+            "Custom.Rule.cls": [["old rule"], ["new rule"]],
+            "Custom.Other.cls": [["old other"], RuntimeError("read failed")],
+        }
+        client = FakeToolClient(download_result(), promotion=True, document_reads=documents)
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", verify_documents=list(documents),
+        )
+        self.assertTrue(result.get("isError"))
+        verification = result["structuredContent"]
+        self.assertEqual(verification["status"], "POST_LOAD_VERIFICATION_FAILED")
+        self.assertEqual(verification["changed"], ["Custom.Rule.cls"])
+        self.assertEqual(verification["unchanged"], ["Custom.Order.cls"])
+        self.assertEqual(verification["unreadable"], ["Custom.Other.cls"])
+        self.assertFalse(verification["automatic_retry"])
+        self.assertIn("possible partial load", result["content"][0]["text"])
+        self.assertIn("NO automatic RETRY", result["content"][0]["text"])
+
+    def test_snapshot_normalization_depends_on_document_type(self):
+        self.assertEqual(
+            AtelierClient._document_change_snapshot("Custom.Order.cls", ["  Class X {}  ", ""]),
+            AtelierClient._document_change_snapshot("Custom.Order.cls", ["Class X {}"]),
+        )
+        for extension in ("mac", "int", "inc", "bas", "obj"):
+            with self.subTest(extension=extension):
+                name = f"Custom.Order.{extension}"
+                self.assertEqual(
+                    AtelierClient._document_change_snapshot(name, ["line  ", ""]),
+                    AtelierClient._document_change_snapshot(name, ["line  "]),
+                )
+                self.assertNotEqual(
+                    AtelierClient._document_change_snapshot(name, ["line  "]),
+                    AtelierClient._document_change_snapshot(name, ["line"]),
+                )
+
+    def test_download_load_aborts_before_download_when_snapshot_is_unreadable(self):
+        client = FakeToolClient(
+            download_result(), promotion=True,
+            document_reads={"Custom.Order.cls": [FileNotFoundError("404 not found")]},
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", verify_documents=["Custom.Order.cls"],
+        )
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(result["structuredContent"]["status"], "PRE_LOAD_VERIFICATION_FAILED")
+        self.assertFalse(result["structuredContent"]["load_attempted"])
+        self.assertEqual(result["structuredContent"]["unreadable"], ["Custom.Order.cls"])
+        self.assertNotIn("download_load", [call[0] for call in client.calls])
+
+    def test_download_load_marks_document_missing_after_load_as_unreadable(self):
+        client = FakeToolClient(
+            download_result(), promotion=True,
+            document_reads={"Custom.Order.cls": [["before"], FileNotFoundError("404 not found")]},
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", verify_documents=["Custom.Order.cls"],
+        )
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(result["structuredContent"]["status"], "POST_LOAD_VERIFICATION_FAILED")
+        self.assertTrue(result["structuredContent"]["load_attempted"])
+        self.assertEqual(result["structuredContent"]["unreadable"], ["Custom.Order.cls"])
+
+    def test_strict_document_read_rejects_application_and_shape_errors(self):
+        invalid = (
+            {"status": {"errors": [{"text": "failed"}]}, "result": {"content": ["source"]}},
+            {"status": {"errors": []}},
+            {"status": {"errors": []}, "result": {}},
+            {"status": {"errors": []}, "result": {"content": "source"}},
+            {"status": {"errors": []}, "result": {"content": [1]}},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                client = synthetic_client()
+                client._send_request = Mock(return_value=(200, payload))
+                with self.assertRaises(Exception):
+                    client.get_document("Custom.Order.cls", strict=True)
+
+    def test_download_load_requires_one_terminal_success_and_rejects_any_error(self):
+        responses = (
+            "ERROR_LOADTOOS: failed\nSUCCESS",
+            "SUCCESS\nERROR_LOADTONS: late failure",
+            "SUCCESS\nLOADED_NS|itemset=7",
+            "SUCCESS\nSUCCESS",
+            "LOADED_NS|itemset=7",
+            download_result().replace("LOADED_OS", "UNKNOWN"),
+            download_result().replace("LOADED_OS\n", ""),
+            download_result() + "\nTRAILING",
+            download_result().replace("LOADED_NS|itemset=7", "LOADED_NS|itemset=8"),
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                client = FakeToolClient(response, promotion=True)
+                result = self.call(
+                    fake_server(client), "iris_ccr_download_load", itemset_id=42,
+                    namespace="UAT-ACHS",
+                )
+                self.assertTrue(result.get("isError"))
+
+    def test_download_load_rejects_unexpected_downloaded_itemset(self):
+        client = FakeToolClient(
+            download_result().replace("DOWNLOADED|isid=42", "DOWNLOADED|isid=999"),
+            promotion=True,
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        self.assertTrue(result.get("isError"))
+        self.assertIn("unexpected ItemSet", result["content"][0]["text"])
+        self.assertFalse(result["structuredContent"]["load_attempted"])
+        self.assertIsNone(result["structuredContent"]["phase_reached"])
+        self.assertEqual(result["structuredContent"]["failed_phase"], "download")
+
+    def test_download_load_truncated_after_loaded_os_preserves_partial_evidence(self):
+        truncated = "\n".join(download_result().splitlines()[:3])
+        client = FakeToolClient(truncated, promotion=True)
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        failure = result["structuredContent"]
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(failure["phase_reached"], "LOADED_OS")
+        self.assertEqual(failure["failed_phase"], "load_to_ns")
+        self.assertTrue(failure["load_attempted"])
+        self.assertTrue(failure["possible_partial_load"])
+        self.assertFalse(failure["automatic_retry"])
+        self.assertIn("NO automatic RETRY", result["content"][0]["text"])
+
+    def test_download_load_malformed_record_after_loaded_os_preserves_prefix(self):
+        malformed = "\n".join(download_result().splitlines()[:3] + ["LOADED_NS|bad=7"])
+        client = FakeToolClient(malformed, promotion=True)
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        failure = result["structuredContent"]
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(failure["phase_reached"], "LOADED_OS")
+        self.assertEqual(failure["failed_phase"], "load_to_ns")
+        self.assertTrue(failure["possible_partial_load"])
+        self.assertIn("NO automatic RETRY", result["content"][0]["text"])
+
+    def test_download_load_truncated_or_malformed_after_import_is_uncertain(self):
+        imported_prefix = "\n".join(download_result().splitlines()[:2])
+        for output in (imported_prefix, imported_prefix + "\nLOADED_OS|malformed=1"):
+            with self.subTest(output=output):
+                client = FakeToolClient(output, promotion=True)
+                result = self.call(
+                    fake_server(client), "iris_ccr_download_load", itemset_id=42,
+                    namespace="UAT-ACHS",
+                )
+                failure = result["structuredContent"]
+                self.assertTrue(result.get("isError"))
+                self.assertEqual(failure["phase_reached"], "IMPORTED")
+                self.assertEqual(failure["failed_phase"], "load_to_os")
+                self.assertFalse(failure["load_attempted"])
+                self.assertTrue(failure["load_may_have_started"])
+                self.assertTrue(failure["possible_partial_load"])
+                self.assertFalse(failure["automatic_retry"])
+                self.assertIn("NO automatic RETRY", result["content"][0]["text"])
+
+    def test_download_load_transport_failure_is_conservative_by_load_mode(self):
+        for load, possible_partial in ((True, True), (False, False)):
+            with self.subTest(load=load):
+                client = FakeToolClient(exception="transport failed", promotion=True)
+                result = self.call(
+                    fake_server(client), "iris_ccr_download_load", itemset_id=42,
+                    namespace="UAT-ACHS", load=load,
+                )
+                failure = result["structuredContent"]
+                self.assertTrue(result.get("isError"))
+                self.assertEqual(failure["status"], "DOWNLOAD_LOAD_FAILED")
+                self.assertFalse(failure["load_attempted"])
+                self.assertEqual(failure["load_may_have_started"], possible_partial)
+                self.assertEqual(failure["possible_partial_load"], possible_partial)
+                self.assertIsNone(failure["phase_reached"])
+                self.assertEqual(failure["failed_phase"], "unknown")
+                self.assertFalse(failure["automatic_retry"])
+                self.assertEqual("NO automatic RETRY" in result["content"][0]["text"], load)
+
+
+    def test_download_load_failure_before_load_has_conservative_structure(self):
+        client = FakeToolClient(
+            "DOWNLOADED|isid=42|file=item.xml\nERROR_IMPORT: failed",
+            promotion=True,
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        self.assertTrue(result.get("isError"))
+        failure = result["structuredContent"]
+        self.assertEqual(failure["status"], "DOWNLOAD_LOAD_FAILED")
+        self.assertEqual(failure["phase_reached"], "DOWNLOADED")
+        self.assertEqual(failure["failed_phase"], "import")
+        self.assertFalse(failure["load_attempted"])
+        self.assertFalse(failure["possible_partial_load"])
+        self.assertNotIn("Posible carga parcial", result["content"][0]["text"])
+
+    def test_download_load_loadtoos_error_marks_partial_and_no_retry(self):
+        client = FakeToolClient(
+            "DOWNLOADED|isid=42|file=item.xml\n"
+            "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT\n"
+            "ERROR_LOADTOOS: failed",
+            promotion=True,
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        failure = result["structuredContent"]
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(failure["phase_reached"], "IMPORTED")
+        self.assertEqual(failure["failed_phase"], "load_to_os")
+        self.assertTrue(failure["load_attempted"])
+        self.assertTrue(failure["possible_partial_load"])
+        self.assertFalse(failure["automatic_retry"])
+        self.assertIn("NO automatic RETRY", result["content"][0]["text"])
+
+    def test_download_load_loadtons_error_after_loaded_os_marks_partial(self):
+        client = FakeToolClient(
+            "DOWNLOADED|isid=42|file=item.xml\n"
+            "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT\n"
+            "LOADED_OS\nERROR_LOADTONS: failed",
+            promotion=True,
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        failure = result["structuredContent"]
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(failure["phase_reached"], "LOADED_OS")
+        self.assertEqual(failure["failed_phase"], "load_to_ns")
+        self.assertTrue(failure["possible_partial_load"])
+        self.assertIn("NO automatic RETRY", result["content"][0]["text"])
 
     def test_commit_handler_rejects_unverified_legacy_success(self):
         result = self.call(
@@ -745,7 +1082,7 @@ class ToolContractTests(HermeticTestCase):
 
         self.assertTrue(result.get("isError"))
         self.assertIn("PENDING_VERIFICATION", result["content"][0]["text"])
-        self.assertIn("NO REINTENTAR", result["content"][0]["text"])
+        self.assertIn("DO NOT RETRY AUTOMATICALLY", result["content"][0]["text"])
         self.assertIn("`1080` (`item.xml`)", result["content"][0]["text"])
         self.assertNotIn("**VERIFIED**", result["content"][0]["text"])
 

@@ -6,10 +6,18 @@
     isc-ai servers migrate          copy legacy ~/.iris_mcp_servers.json into ~/.iris-mcp/servers.json
     isc-ai facility render|install  render / conditionally install MCP.CCRMutation for this site
     isc-ai doctor                   what project, files and servers this process would use
+    isc-ai setup                    plan/apply local OpenCode and Claude harness configuration
 
 The CLI only edits configuration files; only `mcp` and `facility install` talk to IRIS.
 Every command that resolves a project accepts `--project-dir` and otherwise searches
 upward from the current directory for `.iris-mcp/config.json`.
+
+`isc-ai` with no command prints the full help (exit 0); every sub-command carries its
+own examples, reachable with `isc-ai <command> -h`.
+
+Every human-facing string here comes from `isc_ai.i18n` (English or Spanish, selected
+with `--lang` or ISC_AI_LANG). Machine-facing output does not: JSON payloads, gate
+verdicts, facility states and configuration keys stay English in every language.
 """
 
 import argparse
@@ -21,120 +29,285 @@ from pathlib import Path
 
 from isc_ai import __version__
 from isc_ai import config as isc_config
+from isc_ai import i18n
 from isc_ai.ccr_discovery import LocalPolicyError
 from isc_ai.config import ConfigError
+from isc_ai.i18n import t
 from isc_ai.server import IRISMCPServer, _CCR_MUTATION_CLASS, _cli_failure_message, _load_ccr_mutation_resource
+from isc_ai.setup import DEFAULT_TIMEOUT, SetupError, run_setup
 
 PROG = "isc-ai"
+
+_BANNER_ART = r"""
+ ___  ___   ___      _    ___
+|_ _|/ __| / __|    /_\  |_ _|
+ | | \__ \| (__    / _ \  | |
+|___||___/ \___|  /_/ \_\|___|"""
+
+_ISC_BLUE = "\033[38;5;33m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _use_color(stream):
+    """Same contract as argparse 3.14: honour NO_COLOR / FORCE_COLOR, otherwise require a TTY."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    try:
+        return bool(stream.isatty())
+    except Exception:  # noqa: BLE001 - a wrapped or fake stream is simply not a terminal
+        return False
+
+
+def _banner(stream=None):
+    art = _BANNER_ART.strip("\n")
+    version = f"  v{__version__}"
+    if _use_color(stream if stream is not None else sys.stdout):
+        art = "\n".join(f"{_ISC_BLUE}{line}{_RESET}" for line in art.splitlines())
+        version = f"{_DIM}{version}{_RESET}"
+    return f"{art}{version}\n"
+
+
+class _BannerParser(argparse.ArgumentParser):
+    """argparse prints 'usage:' first, so the banner is prepended to the whole help block."""
+
+    def format_help(self):
+        return _banner() + "\n" + super().format_help()
+
+
+class _Formatter(argparse.RawDescriptionHelpFormatter):
+    """Keeps descriptions and examples verbatim and localizes the 'usage:' prefix."""
+
+    def add_usage(self, usage, actions, groups, prefix=None):
+        super().add_usage(usage, actions, groups, t("chrome.usage_prefix") if prefix is None else prefix)
+
+
+def _localize_groups(parser):
+    """Translate argparse's two built-in section titles.
+
+    argparse exposes no public hook for them, so the private attributes are
+    confined to this function: they have been stable since argparse entered the
+    standard library, and the test suite asserts the localized titles, so a future
+    rename fails loudly here instead of leaking English headings into the Spanish
+    help. argparse's own parse errors ('unrecognized arguments', 'invalid choice')
+    belong to its gettext domain and stay English.
+    """
+    parser._positionals.title = t("chrome.group.arguments")
+    parser._optionals.title = t("chrome.group.options")
+    return parser
 
 
 # ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
 
+def _add_language_option(parser):
+    """Accept --lang at every level.
+
+    The value is already applied by `_prescan_language`, so this declaration exists
+    to keep `isc-ai doctor --lang es` working as naturally as `isc-ai --lang es
+    doctor`. SUPPRESS keeps it out of the namespace: nothing reads args.lang.
+    """
+    parser.add_argument("--lang", choices=i18n.LANGUAGES, default=argparse.SUPPRESS, help=t("chrome.lang"))
+
+
+def _add_parser(sub, name, help_key, examples_key=None, **kwargs):
+    """Sub-parser whose own help repeats the summary and shows verbatim examples."""
+    help_text = t(help_key)
+    epilog = None
+    if examples_key:
+        block = i18n.lines(examples_key)
+        epilog = t("chrome.examples_label") + "\n" + "".join(f"  {line}\n" if line else "\n" for line in block)
+    parser = sub.add_parser(
+        name,
+        help=help_text,
+        description=help_text,
+        epilog=epilog,
+        formatter_class=_Formatter,
+        add_help=False,
+        **kwargs,
+    )
+    _localize_groups(parser)
+    parser.add_argument("-h", "--help", action="help", help=t("chrome.help"))
+    _add_language_option(parser)
+    return parser
+
+
+def _require_subcommand(parser, message):
+    """Missing sub-command: show that command's own help, then fail like argparse does."""
+    parser.print_help(sys.stderr)
+    sys.stderr.write(f"\n{PROG}: {t('msg.prefix.error')}: {message}\n")
+    sys.stderr.flush()
+    raise SystemExit(2)
+
+
 def _ccr_cli_value(value):
     """Shape check only; the site format (site.ccr_id) is enforced by the server."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", value or ""):
-        raise argparse.ArgumentTypeError("must be a CCR identifier (letters, digits, '_' or '-')")
+        raise argparse.ArgumentTypeError(t("error.value.ccr"))
     return value
 
 
 def _sha256_cli_value(value):
     if not re.fullmatch(r"[0-9a-f]{64}", value or ""):
-        raise argparse.ArgumentTypeError("must be a lowercase 64-character SHA-256")
+        raise argparse.ArgumentTypeError(t("error.value.sha256"))
     return value
 
 
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(t("error.value.positive_int")) from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(t("error.value.positive_int"))
+    return parsed
+
+
 def _add_project_dir(parser):
-    parser.add_argument("--project-dir", help="project directory (default: nearest ancestor of cwd with .iris-mcp/, or IRIS_MCP_PROJECT_DIR)")
+    parser.add_argument("--project-dir", help=t("flag.project_dir"))
+
+
+def _prescan_language(argv):
+    """Read --lang before argparse exists, because the help text itself depends on it.
+
+    Accepts `--lang es` and `--lang=es`. An unsupported value is not rejected here:
+    resolve_language() decides, reports it and falls back to English.
+    """
+    for index, token in enumerate(argv):
+        if token == "--lang":
+            return argv[index + 1] if index + 1 < len(argv) else ""
+        if token.startswith("--lang="):
+            return token.split("=", 1)[1]
+    return None
 
 
 def _parse_cli_args(argv):
-    parser = argparse.ArgumentParser(prog=PROG, description="InterSystems IRIS/TrakCare MCP server and project configuration.")
-    parser.add_argument("--version", action="version", version=f"{PROG} {__version__}")
-    sub = parser.add_subparsers(dest="command")
+    # The help text is built from the catalog, so the language must be settled first.
+    choice = i18n.resolve_language(explicit=_prescan_language(argv))
+    i18n.set_language(choice)
 
-    p_mcp = sub.add_parser("mcp", help="run the MCP server over stdio")
+    parser = _BannerParser(
+        prog=PROG,
+        description=t("app.description"),
+        epilog=t("chrome.examples_label") + "\n"
+               + "".join(f"  {line}\n" if line else "\n" for line in i18n.lines("app.examples"))
+               + "\n" + t("app.footer"),
+        formatter_class=_Formatter,
+        add_help=False,
+    )
+    _localize_groups(parser)
+    parser.add_argument("-h", "--help", action="help", help=t("chrome.help"))
+    parser.add_argument("--version", action="version", version=f"{PROG} {__version__}", help=t("chrome.version"))
+    _add_language_option(parser)
+    sub = parser.add_subparsers(dest="command", title=t("chrome.group.commands"), metavar="<command>")
+
+    p_mcp = _add_parser(sub, "mcp", "cmd.mcp.help", "cmd.mcp.examples")
     _add_project_dir(p_mcp)
 
-    p_init = sub.add_parser("init", help="create .iris-mcp/config.json from the packaged template (idempotent)")
-    p_init.add_argument("directory", nargs="?", help="project directory (default: cwd)")
-    p_init.add_argument("--from", dest="template", help="alternative template file")
-    p_init.add_argument("--force", action="store_true", help="overwrite an existing project configuration")
-    p_init.add_argument("--no-servers", action="store_true", help="omit the example servers section")
+    p_init = _add_parser(sub, "init", "cmd.init.help", "cmd.init.examples")
+    p_init.add_argument("directory", nargs="?", help=t("flag.init.directory"))
+    p_init.add_argument("--from", dest="template", help=t("flag.init.template"))
+    p_init.add_argument("--force", action="store_true", help=t("flag.init.force"))
+    p_init.add_argument("--no-servers", action="store_true", help=t("flag.init.no_servers"))
 
-    p_config = sub.add_parser("config", help="inspect and edit configuration files")
+    p_config = _add_parser(sub, "config", "cmd.config.help", "cmd.config.examples")
     _add_project_dir(p_config)
-    config_sub = p_config.add_subparsers(dest="config_command")
+    config_sub = p_config.add_subparsers(dest="config_command", title=t("chrome.group.subcommands"),
+                                         metavar="<sub-command>")
 
-    p_show = config_sub.add_parser("show", help="print the effective configuration (secrets redacted)")
-    p_show.add_argument("--reveal", action="store_true", help="print literal secrets instead of redacting")
-    p_show.add_argument("--servers", action="store_true", help="print merged servers instead of the project policy")
+    p_show = _add_parser(config_sub, "show", "cmd.config.show.help", "cmd.config.show.examples")
+    p_show.add_argument("--reveal", action="store_true", help=t("flag.show.reveal"))
+    p_show.add_argument("--servers", action="store_true", help=t("flag.show.servers"))
 
-    p_set = config_sub.add_parser("set", help="set a project setting by dotted path, e.g. canonical_base.host")
+    p_set = _add_parser(config_sub, "set", "cmd.config.set.help", "cmd.config.set.examples")
     p_set.add_argument("path")
-    p_set.add_argument("value", help="JSON when parseable (numbers, booleans, lists, objects), otherwise a string")
+    p_set.add_argument("value", help=t("flag.set.value"))
 
-    p_unset = config_sub.add_parser("unset", help="remove a project setting by dotted path")
+    p_unset = _add_parser(config_sub, "unset", "cmd.config.unset.help", "cmd.config.unset.examples")
     p_unset.add_argument("path")
 
-    p_add = config_sub.add_parser("add-server", help="add or replace a server entry")
+    p_add = _add_parser(config_sub, "add-server", "cmd.config.add_server.help", "cmd.config.add_server.examples")
     p_add.add_argument("server_id")
     p_add.add_argument("--host", required=True)
     p_add.add_argument("--port", type=int, default=80)
     p_add.add_argument("--path-prefix", default="")
     p_add.add_argument("--namespace", default="USER")
-    p_add.add_argument("--role", default="", help="env_role, e.g. BASE, UAT, LIVE")
-    p_add.add_argument("--production", action="store_true", help="mark as is_production=true")
-    p_add.add_argument("--username", default="{env:IRIS_USER}", help="literal or {env:VAR} reference")
-    p_add.add_argument("--password", default="{env:IRIS_PASSWORD}", help="literal or {env:VAR} reference")
-    p_add.add_argument("--upload-token", help="literal or {env:VAR} reference for the CCR upload token")
-    p_add.add_argument("--ccr-id", help="default CCR identifier for this server")
+    p_add.add_argument("--role", default="", help=t("flag.add.role"))
+    p_add.add_argument("--production", action="store_true", help=t("flag.add.production"))
+    p_add.add_argument("--username", default="{env:IRIS_USER}", help=t("flag.add.username"))
+    p_add.add_argument("--password", default="{env:IRIS_PASSWORD}", help=t("flag.add.password"))
+    p_add.add_argument("--upload-token", help=t("flag.add.upload_token"))
+    p_add.add_argument("--ccr-id", help=t("flag.add.ccr_id"))
     p_add.add_argument("--proxy")
     p_add.add_argument("--description")
-    p_add.add_argument("--user", action="store_true", help="write to ~/.iris-mcp/servers.json instead of the project file")
+    p_add.add_argument("--user", action="store_true", help=t("flag.add.user"))
 
-    p_remove = config_sub.add_parser("remove-server", help="remove a server entry")
+    p_remove = _add_parser(config_sub, "remove-server", "cmd.config.remove_server.help",
+                           "cmd.config.remove_server.examples")
     p_remove.add_argument("server_id")
-    p_remove.add_argument("--user", action="store_true", help="remove from ~/.iris-mcp/servers.json instead of the project file")
+    p_remove.add_argument("--user", action="store_true", help=t("flag.remove.user"))
 
-    config_sub.add_parser("validate", help="load and validate the effective configuration")
+    _add_parser(config_sub, "validate", "cmd.config.validate.help", "cmd.config.validate.examples")
 
-    p_servers = sub.add_parser("servers", help="user-level server connections")
-    servers_sub = p_servers.add_subparsers(dest="servers_command")
-    p_migrate = servers_sub.add_parser("migrate", help="copy legacy ~/.iris_mcp_servers.json into ~/.iris-mcp/servers.json")
-    p_migrate.add_argument("--force", action="store_true")
+    p_servers = _add_parser(sub, "servers", "cmd.servers.help", "cmd.servers.examples")
+    servers_sub = p_servers.add_subparsers(dest="servers_command", title=t("chrome.group.subcommands"),
+                                           metavar="<sub-command>")
+    p_migrate = _add_parser(servers_sub, "migrate", "cmd.servers.migrate.help", "cmd.servers.migrate.examples")
+    p_migrate.add_argument("--force", action="store_true", help=t("flag.migrate.force"))
 
-    p_facility = sub.add_parser("facility", help="MCP.CCRMutation facility for the configured site")
+    p_facility = _add_parser(sub, "facility", "cmd.facility.help", "cmd.facility.examples")
     _add_project_dir(p_facility)
-    facility_sub = p_facility.add_subparsers(dest="facility_command")
-    p_render = facility_sub.add_parser("render", help="render the facility for this site and print its SHA-256")
-    p_render.add_argument("--output", help="write the rendered class to this path")
-    p_install = facility_sub.add_parser("install", help="conditionally install/upgrade the facility on the canonical BASE")
+    facility_sub = p_facility.add_subparsers(dest="facility_command", title=t("chrome.group.subcommands"),
+                                             metavar="<sub-command>")
+    p_render = _add_parser(facility_sub, "render", "cmd.facility.render.help", "cmd.facility.render.examples")
+    p_render.add_argument("--output", help=t("flag.render.output"))
+    p_install = _add_parser(facility_sub, "install", "cmd.facility.install.help", "cmd.facility.install.examples")
     p_install.add_argument("--server", required=True)
     p_install.add_argument("--namespace", required=True)
-    p_install.add_argument("--ccr", required=True, type=_ccr_cli_value, help="CCR identifier in the configured site format (site.ccr_id)")
+    p_install.add_argument("--ccr", required=True, type=_ccr_cli_value, help=t("flag.install.ccr"))
     p_install.add_argument("--upgrade", action="store_true")
     p_install.add_argument("--expected-current-sha256", type=_sha256_cli_value)
 
-    p_doctor = sub.add_parser("doctor", help="show the project, files and servers this process resolves")
+    p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
 
+    p_setup = _add_parser(sub, "setup", "cmd.setup.help", "cmd.setup.examples")
+    mode = p_setup.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help=t("flag.setup.apply"))
+    mode.add_argument("--check", action="store_true", help=t("flag.setup.check"))
+    p_setup.add_argument("--claude-project", metavar="DIR", help=t("flag.setup.claude_project"))
+    p_setup.add_argument("--opencode-config", metavar="PATH", help=t("flag.setup.opencode_config"))
+    p_setup.add_argument("--no-opencode", action="store_true", help=t("flag.setup.no_opencode"))
+    p_setup.add_argument("--no-logo", action="store_true", help=t("flag.setup.no_logo"))
+    p_setup.add_argument("--no-harness", action="store_true", help=t("flag.setup.no_harness"))
+    p_setup.add_argument("--timeout", type=_positive_int, default=DEFAULT_TIMEOUT, help=t("flag.setup.timeout"))
+    p_setup.add_argument("--with-opencode", action="store_true", help=t("flag.setup.with_opencode"))
+
     args = parser.parse_args(argv)
+    if choice.rejected:
+        _warn(t("msg.language.rejected", values=", ".join(choice.rejected),
+                language=choice.language, supported=", ".join(i18n.LANGUAGES)))
     if args.command is None:
-        parser.error("a command is required (try: isc-ai doctor)")
+        # No command is a discovery attempt, not a failure: show everything and exit clean.
+        parser.print_help()
+        raise SystemExit(0)
     if args.command == "config" and not args.config_command:
-        p_config.error("a config sub-command is required")
+        _require_subcommand(p_config, t("error.subcommand.config"))
     if args.command == "servers" and not args.servers_command:
-        p_servers.error("a servers sub-command is required")
+        _require_subcommand(p_servers, t("error.subcommand.servers"))
     if args.command == "facility":
         if not args.facility_command:
-            p_facility.error("a facility sub-command is required")
+            _require_subcommand(p_facility, t("error.subcommand.facility"))
         if args.facility_command == "install":
             if args.upgrade and not args.expected_current_sha256:
-                parser.error("--upgrade requires --expected-current-sha256")
+                parser.error(t("error.upgrade_requires_sha"))
             if not args.upgrade and args.expected_current_sha256:
-                parser.error("--expected-current-sha256 requires --upgrade")
+                parser.error(t("error.sha_requires_upgrade"))
+    if args.command == "setup" and args.with_opencode and not args.apply:
+        p_setup.error(t("error.with_opencode_requires_apply"))
     return args
 
 
@@ -169,6 +342,24 @@ def _emit(text):
     sys.stdout.flush()
 
 
+def _tell(prefix_key, message):
+    """Prefixed line on stderr: note / warning / hint, with a localized label."""
+    sys.stderr.write(f"{t(prefix_key)}: {message}\n")
+    sys.stderr.flush()
+
+
+def _note(message):
+    _tell("msg.prefix.note", message)
+
+
+def _warn(message):
+    _tell("msg.prefix.warning", message)
+
+
+def _hint(message):
+    _tell("msg.prefix.hint", message)
+
+
 def _project_paths(args):
     explicit = getattr(args, "project_dir", None)
     project_dir = Path(explicit).resolve() if explicit else isc_config.project_directory()
@@ -177,10 +368,10 @@ def _project_paths(args):
 
 def _load_project_data(config_path):
     if not config_path.is_file():
-        raise ConfigError(f"No project configuration at {config_path}; run 'isc-ai init' first.")
+        raise ConfigError(t("error.project.missing", path=config_path))
     data = isc_config.read_json(config_path)
     if not isinstance(data, dict):
-        raise ConfigError(f"{config_path} must contain a JSON object.")
+        raise ConfigError(t("error.project.not_object", path=config_path))
     return data
 
 
@@ -189,13 +380,13 @@ def _servers_file_for(args, config_path):
         path = isc_config.user_servers_path()
         data = isc_config.read_json(path) if path.is_file() else {"servers": {}}
         if not isinstance(data, dict) or not isinstance(data.get("servers", {}), dict):
-            raise ConfigError(f"{path} must contain a 'servers' object.")
+            raise ConfigError(t("error.servers.not_object", path=path))
         data.setdefault("servers", {})
         return path, data
     data = _load_project_data(config_path)
     servers = data.setdefault("servers", {})
     if not isinstance(servers, dict):
-        raise ConfigError("servers must be an object keyed by server id.")
+        raise ConfigError(t("error.servers.value_not_object"))
     return config_path, data
 
 
@@ -203,10 +394,7 @@ def _reject_literal_project_secrets(data):
     """The project file is committable: secrets must be {env:VAR} references."""
     literals = isc_config.literal_secret_paths(data.get("servers", {}))
     if literals:
-        raise ConfigError(
-            "Literal secrets are not allowed in the project configuration "
-            f"({', '.join(literals)}); use {{env:VAR}} references or 'add-server --user'."
-        )
+        raise ConfigError(t("error.secrets.literal", paths=", ".join(literals)))
 
 
 # ---------------------------------------------------------------------------
@@ -217,20 +405,18 @@ def _run_init(args):
     directory = Path(args.directory).resolve() if args.directory else Path.cwd().resolve()
     config_path = directory / isc_config.PROJECT_CONFIG_RELATIVE
     if config_path.exists() and not args.force:
-        _emit(f"{config_path} already exists; nothing changed (use --force to regenerate from the template).")
+        _emit(t("msg.init.exists", path=config_path))
         return 0
     if not directory.is_dir():
-        raise ConfigError(f"{directory} is not an existing directory; create the deployment folder first.")
+        raise ConfigError(t("error.init.not_a_directory", directory=directory))
     ancestor = isc_config.find_project_root(directory.parent) if directory.parent != directory else None
     template = isc_config.load_template(args.template)
     if args.no_servers:
         template.pop("servers", None)
     isc_config.write_json(config_path, template)
-    _emit(f"Created {config_path} from template. Edit it with 'isc-ai config set' or your editor; "
-          "keep secrets as {env:VAR} references.")
+    _emit(t("msg.init.created", path=config_path))
     if ancestor is not None:
-        sys.stderr.write(f"warning: an ancestor project configuration exists at {ancestor}; "
-                         f"this new file shadows it for everything under {directory}.\n")
+        _warn(t("msg.init.shadow", ancestor=ancestor, directory=directory))
     return 0
 
 
@@ -246,7 +432,7 @@ def _run_config(args):
             data = _load_project_data(config_path) if config_path.is_file() else {}
         _emit(json.dumps(data if args.reveal else isc_config.redact(data), indent=2, ensure_ascii=False, sort_keys=True))
         for note in runtime.notes:
-            sys.stderr.write(f"note: {note}\n")
+            _note(note)
         return 0
 
     if command == "set":
@@ -257,24 +443,26 @@ def _run_config(args):
         isc_config.parse_policy(data, project_dir)
         _reject_literal_project_secrets(data)
         isc_config.write_json(config_path, data)
-        secret = args.path.split(".")[-1] in isc_config.SECRET_KEYS
-        _emit(f"{args.path} = {'<set>' if secret else json.dumps(value, ensure_ascii=False)}")
+        if args.path.split(".")[-1] in isc_config.SECRET_KEYS:
+            _emit(t("msg.config.set_secret", path=args.path))
+        else:
+            _emit(t("msg.config.set", path=args.path, value=json.dumps(value, ensure_ascii=False)))
         return 0
 
     if command == "unset":
         data = _load_project_data(config_path)
         if not isc_config.unset_path(data, args.path):
-            raise ConfigError(f"{args.path} is not set.")
+            raise ConfigError(t("error.path.not_set", path=args.path))
         isc_config.parse_policy(data, project_dir)
         isc_config.write_json(config_path, data)
-        _emit(f"removed {args.path}")
+        _emit(t("msg.config.unset", path=args.path))
         return 0
 
     if command == "add-server":
         path, data = _servers_file_for(args, config_path)
         role = args.role.strip().upper()
         if role and not re.fullmatch(r"[A-Z][A-Z0-9_]*", role):
-            raise ConfigError("--role must be a plain identifier (letters, digits, '_').")
+            raise ConfigError(t("error.role.identifier"))
         entry = {
             "host": args.host, "port": args.port, "path_prefix": args.path_prefix,
             "namespace": args.namespace, "env_role": role,
@@ -290,16 +478,16 @@ def _run_config(args):
         if not getattr(args, "user", False):
             _reject_literal_project_secrets(data)
         isc_config.write_json(path, data)
-        _emit(f"server '{args.server_id}' written to {path}")
+        _emit(t("msg.server.written", server_id=args.server_id, path=path))
         return 0
 
     if command == "remove-server":
         path, data = _servers_file_for(args, config_path)
         if args.server_id not in data["servers"]:
-            raise ConfigError(f"server '{args.server_id}' is not defined in {path}.")
+            raise ConfigError(t("error.server.unknown", server_id=args.server_id, path=path))
         del data["servers"][args.server_id]
         isc_config.write_json(path, data)
-        _emit(f"server '{args.server_id}' removed from {path}")
+        _emit(t("msg.server.removed", server_id=args.server_id, path=path))
         return 0
 
     if command == "validate":
@@ -307,7 +495,7 @@ def _run_config(args):
         _emit(json.dumps(summary, indent=2, ensure_ascii=False))
         return 1 if problems else 0
 
-    raise ConfigError("Unsupported config command.")
+    raise ConfigError(t("error.unsupported.config"))
 
 
 def _validate(project_dir):
@@ -360,18 +548,22 @@ def _run_doctor(args):
         summary["project_source"] = "cwd (no configuration found)"
     summary["env"] = {
         name: os.environ.get(name)
-        for name in (isc_config.PROJECT_DIR_ENV, isc_config.PROJECT_CONFIG_ENV, isc_config.EXTRA_PACKAGES_ENV, "IRIS_MCP_TIMEOUT")
+        for name in (isc_config.PROJECT_DIR_ENV, isc_config.PROJECT_CONFIG_ENV, isc_config.EXTRA_PACKAGES_ENV,
+                     "IRIS_MCP_TIMEOUT", i18n.LANGUAGE_ENV)
         if os.environ.get(name) is not None
     }
+    # Machine-facing values: the report states which language the terminal uses but is
+    # itself always English, so a script can parse it regardless of who ran the command.
+    summary["language"] = i18n.current_language()
+    summary["language_source"] = i18n.current().source
     summary["version"] = __version__
     _emit(json.dumps(summary, indent=2, ensure_ascii=False))
     if not summary["project_config_present"]:
-        sys.stderr.write("hint: no project configuration found; run 'isc-ai init' in the deployment directory.\n")
+        _hint(t("msg.doctor.no_config"))
     elif resolved == Path.home().resolve():
-        sys.stderr.write("warning: the governing project configuration is in your HOME directory; every "
-                         "deployment without its own .iris-mcp/config.json inherits it. Remove it unless intended.\n")
+        _warn(t("msg.doctor.home_policy"))
     elif summary["project_source"].startswith("ancestor"):
-        sys.stderr.write(f"note: policy inherited from ancestor {resolved}.\n")
+        _note(t("msg.doctor.ancestor", project_dir=resolved))
     return 1 if problems else 0
 
 
@@ -380,17 +572,32 @@ def _run_servers(args):
         legacy = isc_config.legacy_user_servers_path()
         target = isc_config.user_servers_path()
         if not legacy.is_file():
-            raise ConfigError(f"No legacy file at {legacy}.")
+            raise ConfigError(t("error.legacy.missing", legacy=legacy))
         if target.exists() and not args.force:
-            raise ConfigError(f"{target} already exists; use --force to overwrite.")
+            raise ConfigError(t("error.legacy.target_exists", target=target))
         data = isc_config.read_json(legacy)
         if not isinstance(data, dict) or not isinstance(data.get("servers"), dict):
-            raise ConfigError(f"{legacy} must contain a 'servers' object.")
+            raise ConfigError(t("error.legacy.shape", legacy=legacy))
         isc_config.write_json(target, {"servers": data["servers"]})
-        _emit(f"Copied {len(data['servers'])} servers to {target}. Remove {legacy} once verified; "
-              "the legacy file is still read as a fallback.")
+        _emit(t("msg.servers.migrated", count=len(data["servers"]), target=target, legacy=legacy))
         return 0
-    raise ConfigError("Unsupported servers command.")
+    raise ConfigError(t("error.unsupported.servers"))
+
+
+def _run_setup(args):
+    report = run_setup(
+        apply=args.apply,
+        check=args.check,
+        configure_opencode=not args.no_opencode,
+        install_logo=not args.no_logo,
+        install_harness=not args.no_harness,
+        claude_project=args.claude_project,
+        opencode_config=args.opencode_config,
+        with_opencode=args.with_opencode,
+        timeout=args.timeout,
+    )
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if report["conflicts"] else 0
 
 
 def _run_facility(args):
@@ -414,20 +621,17 @@ def _run_facility(args):
             sys.stdout.flush()
             return _cli_exit_code(record)
         except LocalPolicyError as exc:
-            sys.stderr.write(f"Initializer failed: {_cli_failure_message(exc)}\n")
+            sys.stderr.write(t("error.facility.failed", detail=_cli_failure_message(exc)) + "\n")
             sys.stderr.flush()
             return 1
         except Exception as exc:  # noqa: BLE001 - bounded, redacted CLI boundary
             # Unexpected failure: never print a traceback or exception text, which may
             # carry paths, credentials or server details. Outcome is unverified.
-            sys.stderr.write(
-                "Initializer failed: unexpected "
-                f"{_cli_failure_message(type(exc).__name__, 64)}; details withheld. "
-                "Outcome is unverified; inspect the target manually before any retry.\n"
-            )
+            sys.stderr.write(t("error.facility.unexpected",
+                               name=_cli_failure_message(type(exc).__name__, 64)) + "\n")
             sys.stderr.flush()
             return 1
-    raise ConfigError("Unsupported facility command.")
+    raise ConfigError(t("error.unsupported.facility"))
 
 
 def main(argv=None):
@@ -450,16 +654,20 @@ def main(argv=None):
             return _run_facility(args)
         if args.command == "doctor":
             return _run_doctor(args)
-    except (ConfigError, LocalPolicyError) as exc:
-        sys.stderr.write(f"{args.command} failed: {_cli_failure_message(exc)}\n")
+        if args.command == "setup":
+            return _run_setup(args)
+    except (ConfigError, LocalPolicyError, SetupError) as exc:
+        sys.stderr.write(t("error.command_failed", command=args.command,
+                           detail=_cli_failure_message(exc)) + "\n")
         sys.stderr.flush()
         return 1
     except OSError as exc:
         # Filesystem failures (permissions, read-only share, disk full): bounded, no traceback.
-        sys.stderr.write(f"{args.command} failed: {_cli_failure_message(exc.strerror or type(exc).__name__, 200)}\n")
+        sys.stderr.write(t("error.command_failed", command=args.command,
+                           detail=_cli_failure_message(exc.strerror or type(exc).__name__, 200)) + "\n")
         sys.stderr.flush()
         return 1
-    raise LocalPolicyError("Unsupported command.")
+    raise LocalPolicyError(t("error.unsupported.command"))
 
 
 if __name__ == "__main__":

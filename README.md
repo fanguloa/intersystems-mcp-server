@@ -6,10 +6,10 @@
 
 Un servidor de **Model Context Protocol (MCP)** para conectar asistentes de desarrollo con instancias de **InterSystems IRIS**, mediante la API de Atelier.
 
-Se distribuye como el paquete Python instalable `isc-ai` (versión 0.2.0, solo
+Se distribuye como el paquete Python instalable `isc-ai` (versión 0.3.0, solo
 biblioteca estándar, Python 3.11 o superior). El paquete expone un único binario,
 `isc-ai`, que agrupa el servidor MCP (`isc-ai mcp`) y la CLI que administra la
-configuración por proyecto (`init`, `config`, `servers`, `facility`, `doctor`).
+configuración por proyecto (`init`, `config`, `servers`, `facility`, `doctor`, `setup`).
 Reemplaza al script suelto `intersystems-mcp-server/iris_mcp_server.py`.
 
 **Activación: HOLD.** El candidato local tiene discovery CCR parcial y controles
@@ -44,6 +44,8 @@ El servidor MCP registra las siguientes **herramientas nativas** para tu asisten
 | `iris_list_namespaces` | Obtiene la lista de todos los namespaces disponibles en la instancia de InterSystems IRIS seleccionada. | `server_id` |
 | `iris_query_sql` | Corre consultas SQL parametrizadas nativas (ej. búsquedas en diccionarios u operaciones). | `server_id`, `query`, `parameters` (array), `namespace` (opcional) |
 | `iris_list_classes` | Lista de forma rápida clases personalizadas del sistema filtrando por paquete (evita sobrecargas). | `server_id`, `package_prefix`, `namespace` (opcional) |
+| `iris_describe_class` | Describe metadatos declarados de una clase desde `%Dictionary`, con propiedades heredadas opcionales. | `server_id`, `class_name`, `namespace`, `include_inherited` |
+| `iris_scan_namespace` | Inventaría clases por package. Devuelve `class_type` declarado y `direct_role` solo como pista basada en superclases directas conocidas; no afirma clasificación por herencia indirecta. | `server_id`, `package_prefix`, `persistent_only`, `limit`, `namespace` |
 | `iris_get_class` | Recupera el código fuente ObjectScript completo de una clase `.cls` en el servidor. | `server_id`, `class_name`, `namespace` (opcional) |
 | `iris_save_class` | Sube o guarda código fuente de una clase ObjectScript directamente al namespace con soporte para auto-checkout de CCR, limpieza y normalizacion de caracteres especiales a ASCII puro (evita SAX XML errors), verificacion round-trip post-escritura (detecta duplicacion/truncacion del contenido inline antes de compilar) y compilacion automatica opcional. | `server_id`, `class_name`, `content`, `namespace` (opcional), `auto_checkout` (bool, opcional, por defecto true), `clean_ascii` (bool, opcional, por defecto false), `verify` (bool, opcional, por defecto true), `compile` (bool, opcional, por defecto false) |
 | `iris_save_class_from_file` | **(Preferido para overwrites grandes)** Lee una clase desde un archivo `.cls` local y conserva la ruta directa existente, sujeta a los gates legacy. | `server_id`, `class_name`, `file_path`, `namespace` (opcional), `auto_checkout`, `ccr_id`, `clean_ascii`, `verify`, `compile` |
@@ -66,6 +68,7 @@ El servidor MCP registra las siguientes **herramientas nativas** para tu asisten
 | `iris_ccr_status` | Consulta el estado de control de cambios (CCR/Perforce) de una clase o documento (bloqueado, editable, checkout). | `server_id`, `class_name` **o** `document_name`, `namespace` (opcional) |
 | `iris_ccr_checkout` | Realiza un Checkout (bloqueo/edición) de una clase o documento bajo un identificador de CCR. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
 | `iris_ccr_undocheckout` | Revierte un Checkout en el servidor, removiendo bloqueos y deshaciendo cambios no confirmados. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
+| `iris_ccr_download_load` | Promueve un ItemSet aprobado a UAT. `verify_documents` requiere documentos ya existentes en UAT, toma snapshots antes de cargar y confirma después que cada uno cambió; no prueba igualdad contra BASE ni contra el payload. Sin esa lista, el resultado queda marcado `LOAD_REPORTED_SUCCESS_UNVERIFIED`. | `server_id`, `itemset_id`, `namespace`, `load`, `token`, `verify_documents` (array no vacío, sin duplicados case-insensitive; solo con `load=true`) |
 
 **Convención de nombres:** las herramientas `iris_*_class` reciben nombres de clase con
 el sufijo exacto `.cls` opcional. Conservan los componentes y su capitalización:
@@ -242,6 +245,59 @@ uv tool uninstall isc-ai
 isc-ai --version
 ```
 
+### Setup local de clientes
+
+`isc-ai setup` es un plan de solo lectura. `--check` es su alias explícito y
+únicamente `--apply` escribe. Por defecto prepara la entrada MCP global de
+OpenCode, el logo y el harness SDD genérico de Claude:
+
+```powershell
+isc-ai setup
+isc-ai setup --check
+isc-ai setup --apply
+isc-ai setup --apply --claude-project C:\ruta\a\proyecto
+```
+
+OpenCode se administra en `~/.config/opencode/opencode.json` (o bajo
+`XDG_CONFIG_HOME`). Si existen a la vez `opencode.json` y `opencode.jsonc`, se debe
+elegir uno con `--opencode-config`. Un archivo JSON estricto se mezcla de forma
+atómica, preservando campos desconocidos. Un JSONC o JSON comentado queda
+**byte-for-byte intacto** y el comando entrega el snippet exacto para aplicar a
+mano. Reiniciar OpenCode después de cambiar configuración o plugins.
+
+El harness se instala bajo `~/.claude/` desde un manifest versionado con SHA-256.
+Archivos ausentes se instalan; hashes iguales no cambian; versiones anteriores
+administradas se actualizan; una edición del usuario produce conflicto y nunca se
+sobrescribe. Archivos retirados del bundle se informan como obsoletos, sin borrado
+automático. El estado de propiedad vive en
+`~/.config/isc-ai/setup-state.json`. Para rollback, restaurar los archivos desde
+backup/control de versiones y eliminar solo los destinos que el informe y ese
+estado identifiquen como administrados; `setup` nunca borra obsoletos.
+Los destinos administrados deben permanecer dentro de sus raíces resueltas y no
+pueden ser symlinks. En `--apply`, las escrituras se aplican como una transacción
+local: ante un fallo se restauran los bytes previos o se eliminan los archivos que
+antes no existían, y el estado se escribe al final.
+Cada apply usa un lock exclusivo de `isc-ai`, vuelve a comprobar bytes y modo antes
+de reemplazar, conserva el modo existente cuando la plataforma lo permite y hace
+`fsync` del archivo y, en POSIX compatible, del directorio. Estas comprobaciones
+reducen carreras accidentales; la biblioteca estándar portable no puede eliminar
+un intercambio malicioso de rutas a nivel del sistema operativo entre la última
+validación y la syscall de reemplazo. No se preservan ownership ni xattrs.
+
+Opciones de exclusión: `--no-opencode`, `--no-logo`, `--no-harness`. La integración
+Claude por proyecto solo se habilita con `--claude-project DIR` y exige un
+directorio existente. `--with-opencode` requiere `--apply` y puede ejecutar el
+package manager; no usarlo en validaciones offline.
+Ese package manager se ejecuta después del preflight pero antes de las escrituras
+administradas. Si luego falla una escritura, los archivos se revierten, pero una
+instalación externa que ya terminó no es rollbackable automáticamente.
+
+Los bootstrappers `install.ps1` e `install.sh` requieren un `uv` existente y son
+dry-run por defecto. `install.sh` acepta solo cero argumentos, `--apply` o
+`--help`, y rechaza cualquier otro argumento. `-Apply` / `--apply` instala el repositorio local y luego
+delega toda configuración a `isc-ai setup --apply`; no instala Node, no edita PATH
+o perfiles y no contacta IRIS.
+
 Con la instalación editable, los cambios en `isc_ai/` se reflejan al siguiente
 arranque del proceso; el servidor MCP en ejecución debe reiniciarse (ver más abajo).
 
@@ -251,12 +307,16 @@ arranque del proceso; el servidor MCP en ejecución debe reiniciarse (ver más a
 
 ```text
 isc-ai/
-├── pyproject.toml                   # nombre isc-ai, versión 0.2.0, entry point isc-ai = isc_ai.cli:main
+├── pyproject.toml                   # nombre isc-ai, versión 0.3.0, entry point isc-ai = isc_ai.cli:main
 ├── README.md
 ├── LICENSE
 ├── isc_ai/
-│   ├── cli.py                       # CLI: mcp | init | config | servers | facility | doctor
+│   ├── cli.py                       # CLI: mcp | init | config | servers | facility | doctor | setup
 │   ├── config.py                    # dos capas de configuración, búsqueda ascendente del proyecto, {env:VAR}
+│   ├── i18n.py                      # idioma de la superficie humana de la CLI: --lang, ISC_AI_LANG, fallback
+│   ├── locales/
+│   │   ├── en.py                    # catálogo de referencia
+│   │   └── es.py                    # traducción; mismas claves y mismos {placeholders}
 │   ├── server.py                    # servidor MCP stdio, herramientas iris_* y gates
 │   ├── ccr_discovery.py             # discovery CCR parcial y política local
 │   └── resources/
@@ -266,6 +326,7 @@ isc-ai/
 └── tests/
     ├── hermetic_test_support.py
     ├── test_config.py
+    ├── test_i18n.py                 # paridad de catálogos e invariantes de contrato máquina
     ├── test_ccr_discovery.py
     ├── test_ccr_verification.py
     ├── test_ccr_controlled_mutation.py
@@ -352,13 +413,41 @@ el entorno del proceso MCP. Se aplican las mismas raíces prohibidas que en
 ### CLI
 
 ```powershell
-isc-ai [--version] <comando> [opciones]
+isc-ai [--version] [--lang en|es] <comando> [opciones]
 ```
 
-La CLI **solo edita archivos**; únicamente `isc-ai mcp` e `isc-ai facility install`
-se conectan a IRIS. Invocar `isc-ai` sin comando termina con error (no arranca el
-servidor). Los comandos `config`, `facility` y `doctor` aceptan `--project-dir DIR`;
-sin él aplican la búsqueda ascendente descrita en la Capa 1.
+La CLI no contacta IRIS salvo en `isc-ai mcp` e `isc-ai facility install`.
+`isc-ai setup --with-opencode` es la única excepción capaz de invocar un package
+manager y requiere `--apply`; el resto de `setup` solo administra archivos locales.
+Invocar `isc-ai` sin comando imprime la ayuda completa con ejemplos y termina en `0`
+(no arranca el servidor); cada comando trae sus propios ejemplos en
+`isc-ai <comando> -h`. Los comandos `config`, `facility` y `doctor` aceptan
+`--project-dir DIR`; sin él aplican la búsqueda ascendente descrita en la Capa 1.
+
+#### Idioma de la CLI
+
+`--lang es` o `ISC_AI_LANG=es` traducen **solo la superficie humana**: ayuda,
+ejemplos, confirmaciones, notas, advertencias y errores que nacen en la CLI. El flag
+vale antes o después del comando (`isc-ai --lang es doctor` o `isc-ai doctor --lang es`).
+Precedencia: `--lang` > `ISC_AI_LANG` > inglés. No hay autodetección del locale del
+sistema, a propósito: el mismo comando debe imprimir lo mismo en tu shell, en CI y en
+la documentación. Un valor no soportado no aborta nada: degrada a inglés y lo avisa.
+
+Queda **siempre en inglés**, en cualquier idioma:
+
+| Superficie | Por qué |
+| :--- | :--- |
+| Descripciones de tools y respuestas del MCP | Las lee el cliente de IA; son contrato, y codifican los gates (`READ`, `RUNTIME`, `CODE WRITE`, `is_production`). Dos redacciones del mismo gate duplican la superficie donde una diferencia de matiz cambia el comportamiento del agente. |
+| JSON de `doctor`, `config validate`, `setup`, `facility` | Lo parsean scripts. `doctor` **reporta** el idioma activo (`language`, `language_source`) pero su JSON no se traduce. |
+| Veredictos y estados | `CONTROLLED_ACTIVE`, `SUSPENDED`, `ABSENT`, `INSTALLED`, `DIFFERENT`, `UNCHANGED`, `UPGRADED`, `VERIFIED`, `PENDING_VERIFICATION`. |
+| Códigos de salida, claves de configuración, rutas punteadas, ids de servidor, namespaces, nombres de clase | Son identificadores. |
+| Errores nacidos en `config.py`, `server.py` y `ccr_discovery.py` | Son runtime: viajan al cliente de IA además de a tu terminal. En modo `es` vas a ver el marco en español con el detalle técnico en inglés. |
+
+Los catálogos viven en `isc_ai/locales/en.py` y `es.py`, con `en.py` como referencia.
+`tests/test_i18n.py` exige paridad de claves y de `{placeholders}`, que ninguna clave
+quede muerta, que el español lleve tildes y que el JSON y los exit codes sean idénticos
+en ambos idiomas. Los mensajes de argparse que no son nuestros (`unrecognized
+arguments`, `invalid choice`) pertenecen a su dominio gettext y quedan en inglés.
 
 | Comando | Efecto |
 | :--- | :--- |
@@ -373,7 +462,8 @@ sin él aplican la búsqueda ascendente descrita en la Capa 1.
 | `isc-ai servers migrate [--force]` | Copia el archivo heredado `~/.iris_mcp_servers.json` a `~/.iris-mcp/servers.json`. Falla si el destino existe, salvo `--force`. |
 | `isc-ai facility render [--output RUTA]` | Renderiza `MCP.CCRMutation` para el sitio configurado e imprime clase, SHA-256 y tamaño, sin conectarse. `--output` escribe la clase renderizada. |
 | `isc-ai facility install --server S --namespace NS --ccr CCR [--upgrade --expected-current-sha256 H]` | Instala o actualiza condicionalmente la facilidad en el `canonical_base` (ver **Guía rápida**, paso 3). `--upgrade` y `--expected-current-sha256` son obligatorios uno con otro. |
-| `isc-ai doctor` | Informe JSON de lo que resolvería este proceso: `project_dir`, rutas y presencia de `project_config` y `user_servers`, `site`, `configured`, `ccr_format`, `canonical_base`, `mutation_configured`, `servers`, `notes`, `problems`, `cwd`, variables de entorno relevantes (`IRIS_MCP_PROJECT_DIR`, `IRIS_MCP_CONFIG`, `IRIS_EXTRA_PACKAGES`, `IRIS_MCP_TIMEOUT`) y `version`. Sale con `1` si hay problemas; si no encuentra configuración de proyecto sugiere `isc-ai init` en stderr. |
+| `isc-ai doctor` | Informe JSON de lo que resolvería este proceso: `project_dir`, rutas y presencia de `project_config` y `user_servers`, `site`, `configured`, `ccr_format`, `canonical_base`, `mutation_configured`, `servers`, `notes`, `problems`, `cwd`, variables de entorno relevantes (`IRIS_MCP_PROJECT_DIR`, `IRIS_MCP_CONFIG`, `IRIS_EXTRA_PACKAGES`, `IRIS_MCP_TIMEOUT`, `ISC_AI_LANG`), `language`, `language_source` y `version`. Sale con `1` si hay problemas; si no encuentra configuración de proyecto sugiere `isc-ai init` en stderr. |
+| `isc-ai setup [--check|--apply]` | Planifica la configuración local de OpenCode, logo y harness Claude; solo `--apply` escribe. Admite `--claude-project`, `--opencode-config`, exclusiones, timeout y `--with-opencode`. |
 
 Ejemplo mínimo, ejecutado desde el directorio del despliegue:
 
@@ -399,14 +489,12 @@ conexiones, lectura de credenciales, instalación ni activación.
 ### 2. Ejecutar únicamente la suite offline explícita
 Desde la raíz del repositorio, con Python 3.11+ y después de verificar la ruta:
 ```powershell
-python -m unittest discover -s tests -t . -p "test_c*.py"
+python -m unittest discover -s tests -t . -p "test_*.py"
 ```
-La suite (234 pruebas: `test_config`, `test_ccr_discovery`, `test_ccr_verification`,
-`test_ccr_controlled_mutation`) usa datos sintéticos y bloquea red/configuración real.
-El patrón `test_c*.py` es deliberado: `tests/live_smoke_server.py` es un script en vivo
-que necesita servidores reales, alcance independiente aprobado, destinos identificados
-y revisión previa. No es una prueba local hermética y no debe incluirse en el
-descubrimiento.
+La suite usa datos sintéticos y bloquea red/configuración real. El patrón
+`test_*.py` incluye los módulos unittest herméticos; `tests/live_smoke_server.py`
+no coincide con ese patrón y sigue siendo un script en vivo que requiere alcance
+independiente aprobado. No ejecutarlo durante validación offline.
 
 ### 3. Inicializar la facilidad empaquetada cuando exista autorización remota
 
@@ -446,7 +534,8 @@ permanece en **HOLD** hasta revisión humana. Modificar el código del paquete
 (OpenCode); el proceso stdio y los recursos no se recargan en vivo, aun con
 instalación editable. Los archivos de configuración (`config.json` y
 `servers.json`) sí se releen en cada llamada. El servidor MCP se inicia solo con
-`isc-ai mcp`; `isc-ai` sin comando termina con error.
+`isc-ai mcp`; `isc-ai` sin comando imprime la ayuda completa con ejemplos y
+termina en `0`, y cada comando trae sus propios ejemplos en `isc-ai <comando> -h`.
 
 ---
 
@@ -464,21 +553,21 @@ servidor resuelve el proyecto desde su `cwd` con la búsqueda ascendente de
 ```json
 {
   "mcp": {
-    "intersystems-iris": {
+    "isc-ai": {
       "type": "local",
       "command": ["isc-ai", "mcp"],
-      "cwd": ".",
+      "enabled": true,
       "environment": { "IRIS_MCP_TIMEOUT": "1800" }
     }
   }
 }
 ```
 
-Con `"cwd": "."` el cliente lanza el proceso en el directorio de trabajo de la
-sesión; si ese directorio (o alguno de sus ancestros) contiene `.iris-mcp/config.json`,
-esa política gobierna la sesión. Sin configuración de proyecto, las herramientas
-READ/RUNTIME funcionan y las escrituras de código quedan bloqueadas. Para confirmar
-qué proyecto verá el servidor, ejecutar `isc-ai doctor` desde el mismo directorio.
+OpenCode lanza el proceso en el contexto de trabajo de la sesión; si ese directorio
+(o alguno de sus ancestros) contiene `.iris-mcp/config.json`, esa política gobierna
+la sesión. Sin configuración de proyecto, las herramientas READ/RUNTIME funcionan y
+las escrituras de código quedan bloqueadas. Para confirmar qué proyecto verá el
+servidor, ejecutar `isc-ai doctor` desde el mismo directorio.
 
 ---
 

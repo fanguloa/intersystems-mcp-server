@@ -576,16 +576,57 @@ class ConfigCliTests(FilesystemTestCase):
         self.assertIn("mutation", err)
 
     def test_config_without_subcommand_and_unknown_paths_fail_cleanly(self):
-        with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
             _parse_cli_args(["config"])
-        with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-            _parse_cli_args([])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("a config sub-command is required", stderr.getvalue())
+        self.assertIn("isc-ai config show --servers", stderr.getvalue())  # examples, not just usage
         code, _, err = self.run_cli("show")
         self.assertEqual(code, 0)  # missing project file shows {} with a note
         self.assertIn("No project configuration", err)
         code, _, err = self.run_cli("set", "site.name", "x")
         self.assertEqual(code, 1)
         self.assertIn("isc-ai init", err)
+
+    def test_bare_invocation_prints_full_help_and_exits_zero(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", stdout), patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
+            _parse_cli_args([])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        help_text = stdout.getvalue()
+        for expected in ("mcp", "init", "config", "servers", "facility", "doctor", "setup",
+                         "examples:", "isc-ai doctor", "isc-ai <command> -h"):
+            self.assertIn(expected, help_text)
+
+    def test_help_banner_is_plain_ascii_unless_the_stream_is_a_terminal(self):
+        from isc_ai import __version__, cli
+        stdout = io.StringIO()  # not a TTY: a pipe or a captured test stream
+        with patch.dict(os.environ, {}, clear=False), patch("sys.stdout", stdout), self.assertRaises(SystemExit):
+            os.environ.pop("FORCE_COLOR", None)
+            _parse_cli_args([])
+        help_text = stdout.getvalue()
+        self.assertIn("|___||___/ \\___|", help_text)  # the ISC-AI logo leads the help
+        self.assertIn(f"v{__version__}", help_text)
+        self.assertNotIn("\033[", help_text)  # never leak ANSI into pipes, files or docs
+        self.assertTrue(help_text.startswith(" ___"), "the banner must precede argparse's usage line")
+        with patch.dict(os.environ, {"FORCE_COLOR": "1"}, clear=False):
+            self.assertIn("\033[38;5;33m", cli._banner(io.StringIO()))
+        with patch.dict(os.environ, {"NO_COLOR": "1", "FORCE_COLOR": "1"}, clear=False):
+            self.assertNotIn("\033[", cli._banner(io.StringIO()))
+
+    def test_every_command_exposes_its_own_examples(self):
+        for argv in (["mcp"], ["init"], ["config"], ["config", "show"], ["config", "set"],
+                     ["config", "add-server"], ["config", "validate"], ["servers"],
+                     ["servers", "migrate"], ["facility"], ["facility", "render"],
+                     ["facility", "install"], ["doctor"], ["setup"]):
+            stdout = io.StringIO()
+            with self.subTest(argv=argv), patch("sys.stdout", stdout), self.assertRaises(SystemExit):
+                _parse_cli_args(argv + ["-h"])
+            text = stdout.getvalue()
+            self.assertIn("examples:", text)
+            self.assertIn(f"isc-ai {' '.join(argv)}", text)
 
     def test_facility_install_honours_project_dir_flag(self):
         # The installer must load the policy of --project-dir, not of the shell's cwd.

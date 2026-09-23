@@ -141,9 +141,9 @@ def clean_to_ascii(content_str):
 
 def _is_sql_read_only(sql_query):
     """
-    Determina de manera robusta si una consulta SQL es puramente de lectura (SELECT, WITH, etc.).
-    Remueve comentarios de línea (--), comentarios de bloque (/* ... */) y verifica que el comando
-    no contenga cláusulas de mutación (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, etc.).
+    Robustly determine whether an SQL query is purely a read (SELECT, WITH, etc.).
+    Strips line comments (--) and block comments (/* ... */) and verifies that the statement
+    carries no mutating clause (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, etc.).
     """
     if not sql_query:
         return True
@@ -151,7 +151,7 @@ def _is_sql_read_only(sql_query):
     # 1. Remover comentarios de bloque /* ... */
     sql_clean = re.sub(r'/\*.*?\*/', '', sql_query, flags=re.DOTALL)
     
-    # 2. Remover comentarios de línea (-- ... y // ...)
+    # 2. Strip line comments (-- ... and // ...)
     lines = []
     for line in sql_clean.splitlines():
         line_clean = re.sub(r'--.*$', '', line)
@@ -168,7 +168,7 @@ def _is_sql_read_only(sql_query):
     sql_no_literals = re.sub(r"'(?:[^']|'')*'", "''", sql_clean)
     sql_upper = sql_no_literals.upper()
     
-    # 3. Validar palabras clave de modificación
+    # 3. Check for mutating keywords
     write_patterns = [
         r'\bINSERT\b',
         r'\bUPDATE\b',
@@ -225,22 +225,22 @@ def _read_sql_policy_violation(sql_query):
 def _parse_pipe_record(line, prefix):
     parts = line.split("|")
     if not parts or parts[0] != prefix:
-        raise ValueError(f"Registro {prefix} invalido")
+        raise ValueError(f"Malformed {prefix} record")
 
     fields = {}
     for part in parts[1:]:
         if not part or "=" not in part:
-            raise ValueError(f"Segmento malformado en registro {prefix}")
+            raise ValueError(f"Malformed segment in record {prefix}")
         key, value = part.split("=", 1)
         if not key or key in fields:
-            raise ValueError(f"Campo duplicado o vacio en registro {prefix}")
+            raise ValueError(f"Duplicate or empty field in record {prefix}")
         fields[key] = value
     return fields
 
 
 def _decode_record_value(value):
     if re.search(r"%(?![0-9A-Fa-f]{2})", value):
-        raise ValueError("Codificacion URL invalida")
+        raise ValueError("Invalid URL encoding")
     encoded = value.replace("+", " ")
     return urllib.parse.unquote_to_bytes(encoded).decode("utf-8", errors="strict")
 
@@ -251,53 +251,161 @@ def _classify_ccr_terminal_result(result, allowed_actions):
     if errors:
         return "error", None, errors[-1]
     if not lines:
-        return "error", None, "No se recibio un registro terminal"
+        return "error", None, "No terminal record was received"
 
     terminal = lines[-1]
     if terminal.startswith("PENDING_VERIFICATION|"):
         try:
             fields = _parse_pipe_record(terminal, "PENDING_VERIFICATION")
             if set(fields) != {"local_id", "local_name", "message"}:
-                raise ValueError("Campos PENDING_VERIFICATION invalidos")
+                raise ValueError("Campos PENDING_VERIFICATION invalids")
             if not fields["local_id"].isdigit():
-                raise ValueError("local_id invalido")
+                raise ValueError("invalid local_id")
             fields["local_name"] = _decode_record_value(fields["local_name"])
             fields["message"] = _decode_record_value(fields["message"])
             if not fields["local_name"].strip() or not fields["message"].strip():
                 raise ValueError("PENDING_VERIFICATION incompleto")
             if "DO NOT AUTO-RETRY" not in fields["message"]:
-                raise ValueError("PENDING_VERIFICATION sin instruccion de no reintento")
+                raise ValueError("PENDING_VERIFICATION without a do-not-retry instruction")
         except (UnicodeDecodeError, ValueError) as exc:
-            return "error", None, f"Registro PENDING_VERIFICATION malformado: {exc}"
+            return "error", None, f"Malformed PENDING_VERIFICATION record: {exc}"
         return "pending", fields, ""
 
     if not terminal.startswith("VERIFIED|"):
-        return "error", None, "No se recibio confirmacion VERIFIED terminal del servidor central"
+        return "error", None, "No terminal VERIFIED confirmation was received from the central server"
 
     try:
         fields = _parse_pipe_record(terminal, "VERIFIED")
         required = {"action", "local_id", "local_name", "server_id", "server_name"}
         allowed = required | {"bytes_removed", "rollback_copies"}
         if not required.issubset(fields) or not set(fields).issubset(allowed):
-            raise ValueError("Campos VERIFIED invalidos")
+            raise ValueError("Campos VERIFIED invalids")
         if fields["action"] not in allowed_actions:
-            raise ValueError("Accion VERIFIED no permitida")
+            raise ValueError("VERIFIED action not allowed")
         if not fields["local_id"].isdigit():
-            raise ValueError("local_id invalido")
+            raise ValueError("invalid local_id")
         if not fields["server_id"] or not fields["server_id"].isdigit():
-            raise ValueError("server_id debe ser numerico y no vacio")
+            raise ValueError("server_id must be numeric and non-empty")
         for optional_numeric in ("bytes_removed", "rollback_copies"):
             if optional_numeric in fields and not fields[optional_numeric].isdigit():
-                raise ValueError(f"{optional_numeric} invalido")
+                raise ValueError(f"{optional_numeric} invalid")
         fields["local_name"] = _decode_record_value(fields["local_name"])
         fields["server_name"] = _decode_record_value(fields["server_name"])
         if not fields["local_name"].strip() or not fields["server_name"].strip():
-            raise ValueError("Los nombres VERIFIED no pueden estar vacios")
+            raise ValueError("VERIFIED names cannot be empty")
         if fields["local_name"] != fields["server_name"]:
-            raise ValueError("Los nombres local y central no coinciden exactamente")
+            raise ValueError("The local and central names do not match exactly")
     except (UnicodeDecodeError, ValueError) as exc:
-        return "error", None, f"Registro VERIFIED malformado: {exc}"
+        return "error", None, f"Malformed VERIFIED record: {exc}"
     return "verified", fields, ""
+
+
+def _classify_ccr_download_load_result(result, load, expected_itemset_id):
+    lines = [line.strip() for line in str(result).splitlines() if line.strip()]
+    stages = ["DOWNLOADED", "IMPORTED"]
+    if load:
+        stages.extend(["LOADED_OS", "LOADED_NS"])
+
+    def validate_stage(line, stage, imported_id):
+        if stage == "DOWNLOADED":
+            fields = _parse_pipe_record(line, stage)
+            if (set(fields) != {"isid", "file"} or fields["isid"] != str(expected_itemset_id)
+                    or not fields["file"]):
+                raise ValueError("Malformed DOWNLOADED record or unexpected ItemSet")
+        elif stage == "IMPORTED":
+            fields = _parse_pipe_record(line, stage)
+            if set(fields) != {"local_id", "ccr", "source", "target"} or not fields["local_id"].isdigit():
+                raise ValueError("Malformed IMPORTED record")
+            imported_id = fields["local_id"]
+        elif stage == "LOADED_OS":
+            if line != "LOADED_OS":
+                raise ValueError("Malformed LOADED_OS record")
+        else:
+            fields = _parse_pipe_record(line, stage)
+            if set(fields) != {"itemset"} or fields["itemset"] != imported_id:
+                raise ValueError("Inconsistent LOADED_NS record")
+        return imported_id
+
+    error_index = next((index for index, line in enumerate(lines) if line.startswith("ERROR")), None)
+    if error_index is not None:
+        valid_stages = []
+        imported_id = None
+        for index, line in enumerate(lines[:error_index]):
+            if index >= len(stages):
+                break
+            try:
+                imported_id = validate_stage(line, stages[index], imported_id)
+            except ValueError:
+                break
+            valid_stages.append(stages[index])
+
+        error_line = lines[error_index]
+        phase_by_error = {
+            "ERROR_DOWNLOAD": ("download", 0),
+            "ERROR_IMPORT": ("import", 1),
+            "ERROR_LOADTOOS": ("load_to_os", 2),
+            "ERROR_LOADTONS": ("load_to_ns", 3),
+            "ERROR_CONTROL": ("control", 0),
+        }
+        error_code = error_line.split(":", 1)[0].split("|", 1)[0]
+        failed_phase, expected_prior = phase_by_error.get(error_code, ("unknown", None))
+        prior_is_exact = len(valid_stages) == error_index
+        if expected_prior is not None and (not prior_is_exact or len(valid_stages) != expected_prior):
+            failed_phase = "unknown"
+        load_attempted = "LOADED_OS" in valid_stages or error_code in {"ERROR_LOADTOOS", "ERROR_LOADTONS"}
+        load_may_have_started = load_attempted or (load and "IMPORTED" in valid_stages)
+        failure_state = {
+            "status": "DOWNLOAD_LOAD_FAILED",
+            "load_attempted": load_attempted,
+            "load_may_have_started": load_may_have_started,
+            "phase_reached": valid_stages[-1] if valid_stages else None,
+            "failed_phase": failed_phase,
+            "possible_partial_load": load_may_have_started,
+            "automatic_retry": False,
+        }
+        return False, lines, error_line, failure_state
+
+    phase_by_stage = {
+        "DOWNLOADED": "download",
+        "IMPORTED": "import",
+        "LOADED_OS": "load_to_os",
+        "LOADED_NS": "load_to_ns",
+    }
+    valid_stages = []
+    imported_id = None
+    failure = None
+    failed_phase = None
+    for index, stage in enumerate(stages):
+        if index >= len(lines):
+            failure = f"Output truncated before {stage}"
+            failed_phase = phase_by_stage[stage]
+            break
+        try:
+            line = lines[index]
+            imported_id = validate_stage(line, stage, imported_id)
+        except ValueError as exc:
+            failure = str(exc)
+            failed_phase = phase_by_stage[stage]
+            break
+        valid_stages.append(stage)
+
+    if failure is None and (len(lines) != len(stages) + 1 or lines[-1] != "SUCCESS"):
+        failure = "SUCCESS must be a single terminal record"
+        failed_phase = "success_terminal"
+    if failure is not None:
+        load_attempted = any(stage in valid_stages for stage in ("LOADED_OS", "LOADED_NS"))
+        load_may_have_started = load_attempted or (load and "IMPORTED" in valid_stages)
+        failure_state = {
+            "status": "DOWNLOAD_LOAD_FAILED",
+            "load_attempted": load_attempted,
+            "load_may_have_started": load_may_have_started,
+            "phase_reached": valid_stages[-1] if valid_stages else None,
+            "failed_phase": failed_phase,
+            "possible_partial_load": load_may_have_started,
+            "automatic_retry": False,
+        }
+        return False, lines, failure, failure_state
+    return True, lines, "", None
 
 
 def _parse_ccr_list_result(result):
@@ -306,15 +414,15 @@ def _parse_ccr_list_result(result):
     if errors:
         raise ValueError(errors[-1])
     if not lines or not lines[0].startswith("OK|"):
-        raise ValueError("WSList no devolvio el registro OK requerido")
+        raise ValueError("WSList did not return the required OK record")
     if sum(line.startswith("OK|") for line in lines) != 1:
         raise ValueError("WSList devolvio multiples registros OK")
     if any(not (line.startswith("OK|") or line.startswith("ITEM|")) for line in lines):
-        raise ValueError("WSList devolvio un registro desconocido")
+        raise ValueError("WSList returned an unknown record")
 
     header_fields = _parse_pipe_record(lines[0], "OK")
     if set(header_fields) != {"ccr_enc", "env_enc"}:
-        raise ValueError("Registro OK malformado")
+        raise ValueError("Malformed OK record")
     header = {
         "ccr": _decode_record_value(header_fields["ccr_enc"]),
         "env": _decode_record_value(header_fields["env_enc"]),
@@ -325,9 +433,9 @@ def _parse_ccr_list_result(result):
     for line in lines[1:]:
         fields = _parse_pipe_record(line, "ITEM")
         if set(fields) != {"id", "name_enc", "window_enc", "plan_enc"}:
-            raise ValueError("Registro ITEM malformado")
+            raise ValueError("Malformed ITEM record")
         if not fields["id"].isdigit() or fields["id"] in seen_ids:
-            raise ValueError("ServerItemSetID invalido o duplicado")
+            raise ValueError("Invalid or duplicate ServerItemSetID")
         seen_ids.add(fields["id"])
         items.append({
             "id": fields["id"],
@@ -473,8 +581,8 @@ class AtelierClient:
 
     @staticmethod
     def _escape_cos(value):
-        """Escapa un valor para incrustarlo de forma segura en un literal de cadena ObjectScript.
-        En COS las comillas dobles se escapan DUPLICANDOLAS ('' no \\'); los saltos de linea romperian el literal."""
+        """Escape a value so it can be embedded safely in an ObjectScript string literal.
+        In COS a double quote is escaped by DOUBLING it ('' not \\'); a newline would break the literal."""
         return str(value).replace('\r', ' ').replace('\n', ' ').replace('"', '""')
 
     @staticmethod
@@ -559,13 +667,13 @@ class AtelierClient:
         """Shared production block. Returns None when the target is non-production."""
         self._validate_target()
         if getattr(self, "is_production", False):
-            return "Bloqueado: el servidor está marcado como producción (is_production=true) en la configuración"
+            return "Blocked: the server is marked as production (is_production=true) in the configuration"
         ns_upper = self.namespace.upper()
         if any(marker in ns_upper for marker in self.policy.production_markers):
-            return f"Bloqueado: El namespace '{self.namespace}' parece ser un sistema de producción"
+            return f"Blocked: namespace '{self.namespace}' looks like a production system"
         role = (getattr(self, "env_role", "") or "").strip().upper()
         if role in self.policy.production_roles:
-            return f"Bloqueado: el ambiente '{role}' es de producción"
+            return f"Blocked: environment '{role}' is production"
         return None
 
     def _configured_role(self):
@@ -992,7 +1100,7 @@ class AtelierClient:
         }
         status, data = self._send_request("/action/query", method='POST', payload=payload, timeout=timeout)
         if status == 200:
-            # Validar si el envoltorio de IRIS reporta errores de sintaxis o ejecución SQL
+            # Detect SQL syntax or execution errors reported by the IRIS wrapper
             status_info = data.get("status", {}) if isinstance(data, dict) else {}
             errors = status_info.get("errors", []) if isinstance(status_info, dict) else []
             summary = status_info.get("summary", "") if isinstance(status_info, dict) else ""
@@ -1023,14 +1131,29 @@ class AtelierClient:
             "Query text and server details withheld."
         )
 
-    def get_document(self, doc_name):
+    def get_document(self, doc_name, strict=False):
         self._validate_document_name(doc_name)
         self._require_read()
         import urllib.parse
         quoted_doc = urllib.parse.quote(doc_name, safe="")
         status, data = self._send_request(f"/doc/{quoted_doc}", method='GET')
         if status == 200:
-            return data.get('result', {}).get('content', [])
+            if not strict:
+                return data.get('result', {}).get('content', [])
+            if not isinstance(data, dict):
+                raise Exception("Get document returned an invalid response envelope")
+            status_node = data.get("status")
+            if not isinstance(status_node, dict) or not isinstance(status_node.get("errors"), list):
+                raise Exception("Get document returned an invalid status envelope")
+            if status_node["errors"]:
+                raise Exception("Get document returned application errors")
+            result_node = data.get("result")
+            if not isinstance(result_node, dict) or "content" not in result_node:
+                raise Exception("Get document response is missing result.content")
+            content = result_node["content"]
+            if not isinstance(content, list) or any(not isinstance(line, str) for line in content):
+                raise Exception("Get document result.content must be an array of strings")
+            return content
         raise Exception(f"Get document failed with status {status}: {data}")
 
     def save_document(self, doc_name, content_lines, verify=False, ccr_id=None):
@@ -1051,8 +1174,8 @@ class AtelierClient:
             ok, vmsg = self.verify_document(doc_name, content_lines)
             if not ok:
                 return False, (
-                    f"Escrito por HTTP pero la VERIFICACION round-trip FALLO (NO compilar): {vmsg}. "
-                    f"Si es un falso positivo por normalizacion del servidor, reintenta con verify=false."
+                    f"Written over HTTP but the round-trip VERIFICATION FAILED (do NOT compile): {vmsg}. "
+                    f"If this is a false positive caused by server normalization, retry with verify=false."
                 )
             return True, f"Saved & verified ({vmsg})"
         return True, "Saved successfully"
@@ -1068,19 +1191,28 @@ class AtelierClient:
         normalized = [ln.strip() for ln in lines]
         return "\n".join(ln for ln in normalized if ln != "")
 
+    @classmethod
+    def _document_change_snapshot(cls, doc_name, lines):
+        if not isinstance(lines, list) or any(not isinstance(line, str) for line in lines):
+            raise ValueError("Document content must be an array of strings")
+        if doc_name.endswith(".cls"):
+            return cls._normalize_for_verify(lines)
+        content = "\n".join(lines)
+        return content[:-1] if content.endswith("\n") else content
+
     def verify_document(self, doc_name, expected_lines):
         """
-        Relee el documento recien escrito desde el servidor (GET) y lo compara
-        contra lo enviado. Cierra el agujero de duplicacion/truncacion: si se
-        duplico un bloque o se comieron lineas, el contenido del servidor no
-        matchea y se aborta ANTES de compilar. Devuelve (ok, detalle).
-        Tolera la normalizacion de formato del servidor (indentacion, lineas en blanco).
+        Reread the document just written (GET) and compare it against what was sent.
+        Closes the duplication/truncation hole: if a block was duplicated or lines were
+        swallowed, the server content does not match and the operation aborts BEFORE
+        compiling. Returns (ok, detail). Tolerates the server's own format normalization
+        (indentation, blank lines).
         """
         import hashlib
         try:
             server_lines = self.get_document(doc_name)
         except Exception as e:
-            return False, f"no se pudo releer el documento para verificar: {e}"
+            return False, f"could not reread the document to verify it: {e}"
         expected = self._normalize_for_verify(expected_lines)
         got = self._normalize_for_verify(server_lines)
         if expected == got:
@@ -1088,8 +1220,8 @@ class AtelierClient:
             n = len([ln for ln in server_lines if ln.strip() != ""]) if server_lines else 0
             reformatted = len(server_lines) != len(expected_lines) or any(
                 a != b for a, b in zip(server_lines, expected_lines))
-            note = "; formato normalizado por el servidor" if reformatted else ""
-            return True, f"{n} lineas de codigo, sha256:{digest}{note}"
+            note = "; format normalized by the server" if reformatted else ""
+            return True, f"{n} lines of code, sha256:{digest}{note}"
         exp_l = expected.split("\n")
         got_l = got.split("\n")
         diff_line = next(
@@ -1097,8 +1229,8 @@ class AtelierClient:
             min(len(exp_l), len(got_l)) + 1,
         )
         return False, (
-            f"MISMATCH de contenido: enviadas {len(exp_l)} lineas de codigo, el servidor tiene {len(got_l)}. "
-            f"Primera diferencia (sin contar indentacion ni lineas en blanco) en la linea de codigo {diff_line}."
+            f"Content MISMATCH: sent {len(exp_l)} lines of code, the server has {len(got_l)}. "
+            f"First difference (ignoring indentation and blank lines) at code line {diff_line}."
         )
 
     def compile_document(self, doc_name, ccr_id=None):
@@ -2113,13 +2245,13 @@ class AtelierClient:
 
     def dump_global(self, global_name, subscript=None, start_from=None, max_nodes=200):
         """
-        Lee/hace dump del contenido de una global (o subarbol de una global) en InterSystems IRIS.
-        Soporta paginacion via start_from, limites de nodos via max_nodes y formateo de
-        estructuras $ListBuild y valores escalares/numericos.
+        Read or dump the content of a global (or a subtree of a global) in InterSystems IRIS.
+        Supports pagination through start_from, node limits through max_nodes and formatting
+        of $ListBuild structures and scalar/numeric values.
         """
         gname = (global_name or "").strip()
         if not gname:
-            raise ValueError("El parametro 'global_name' es requerido.")
+            raise ValueError("The 'global_name' parameter is required.")
 
         if not gname.startswith("^"):
             gname = "^" + gname
@@ -2193,7 +2325,7 @@ class AtelierClient:
             '        Set currNode = curr',
             '    }',
             '    If count >= maxNodes {',
-            '        Write "=== Limite alcanzado (", maxNodes, " nodos). Usa start_from=\'", currNode, "\' para continuar ===", !',
+            '        Write "=== Limit reached (", maxNodes, " nodes). Use start_from=\'", currNode, "\' to continue ===", !',
             '        Quit',
             '    }',
             '    Set val = $Get(@currNode)',
@@ -2367,9 +2499,9 @@ class AtelierClient:
         try:
             fields = _parse_pipe_record(terminal, "VERIFIED_CHECKOUT")
             if set(fields) != {"action", "ccr_enc"}:
-                raise ValueError("Campos VERIFIED_CHECKOUT invalidos")
+                raise ValueError("Campos VERIFIED_CHECKOUT invalids")
             if fields["action"] not in {"checkout", "added", "idempotent"}:
-                raise ValueError("Accion VERIFIED_CHECKOUT no permitida")
+                raise ValueError("VERIFIED_CHECKOUT action not allowed")
             verified_ccr = _decode_record_value(fields["ccr_enc"])
         except (UnicodeDecodeError, ValueError) as exc:
             return False, f"ERROR_CHECKOUT_RESPONSE|message={exc}"
@@ -2380,9 +2512,9 @@ class AtelierClient:
                 f"expected={requested_ccr}|actual={verified_ccr}"
             )
         messages = {
-            "checkout": "Checkout completado y asociacion CCR verificada.",
-            "added": "Documento nuevo agregado y asociacion CCR verificada.",
-            "idempotent": "La fila pendiente ya estaba asociada exactamente al CCR solicitado.",
+            "checkout": "Checkout completed and CCR association verified.",
+            "added": "New document added and CCR association verified.",
+            "idempotent": "The pending row was already associated with exactly the requested CCR.",
         }
         return True, messages[fields["action"]]
 
@@ -2459,13 +2591,13 @@ class AtelierClient:
         try:
             fields = _parse_pipe_record(lines[-1], "VERIFIED_UNDOCHECKOUT")
             if set(fields) != {"ccr_enc"}:
-                raise ValueError("Campos VERIFIED_UNDOCHECKOUT invalidos")
+                raise ValueError("Campos VERIFIED_UNDOCHECKOUT invalids")
             verified_ccr = _decode_record_value(fields["ccr_enc"])
         except (UnicodeDecodeError, ValueError) as exc:
             return False, f"ERROR_UNDOCHECKOUT_RESPONSE|message={exc}"
         if verified_ccr != requested_ccr:
             return False, f"ERROR_UNDOCHECKOUT_CCR_MISMATCH|expected={requested_ccr}|actual={verified_ccr}"
-        return True, "UndoCheckout completado y asociacion CCR verificada."
+        return True, "UndoCheckout completed and CCR association verified."
 
     def ccr_commit(self, ccr_id, change_ids, upload_token):
         safe_ids = []
@@ -2474,10 +2606,10 @@ class AtelierClient:
                 try:
                     cid = int(str(cid).strip())
                 except Exception:
-                    raise ValueError(f"change_id invalido (no es entero): {cid}")
+                    raise ValueError(f"invalid change_id (not an integer): {cid}")
             safe_ids.append(cid)
         if not safe_ids:
-            raise ValueError("change_ids debe contener al menos un ID")
+            raise ValueError("change_ids must contain at least one ID")
         list_items = ",".join(str(cid) for cid in safe_ids)
         ccr_id_esc = self._escape_cos(ccr_id)
         upload_token_esc = self._escape_cos(upload_token)
@@ -2678,9 +2810,9 @@ class AtelierClient:
         return self._run_guarded_ccr_runner(code_str, tracking)
 
     def list_uncommitted_changes(self, ccr=None, limit=200):
-        """Lista la cola de cambios locales sin commitear (%Studio.SourceControl.Change).
-        Los 'ID' devueltos son los change_ids enteros que consume iris_ccr_commit.
-        Filtra por CCR/Job si se especifica. Usa el IDKEY (ORDER BY ID DESC) para evitar full scans."""
+        """List the queue of uncommitted local changes (%Studio.SourceControl.Change).
+        The returned 'ID' values are the integer change_ids that iris_ccr_commit consumes.
+        Filters by CCR/Job when given. Uses the IDKEY (ORDER BY ID DESC) to avoid full scans."""
         try:
             limit = int(limit)
         except Exception:
@@ -2698,10 +2830,11 @@ class AtelierClient:
         return self.run_query(query, params)
 
     def ccr_reupload_itemset(self, itemset_id, ccr_id, upload_token, sanitize=True):
-        """Recovery: re-sube al servidor CCR un ItemSet local ya generado, opcionalmente
-        saneando byte-a-byte sus XML (quita bytes no-ASCII que rompen el parser SAX #6301
-        del CCR central). Util cuando un upload fallo y dejo el ItemSet colgado/uncommitted,
-        bloqueando reintentos por dependencia. Limpia el archivo principal y su payload 'p.xml'."""
+        """Recovery: re-upload an already generated local ItemSet to the CCR server, optionally
+        sanitizing its XML byte by byte (drops the non-ASCII bytes that break the central CCR
+        SAX parser, #6301). Useful when an upload failed and left the ItemSet dangling and
+        uncommitted, blocking retries through dependency. Cleans the main file and its
+        'p.xml' payload."""
         itemset_id = int(itemset_id)
         ccr_esc = self._escape_cos(ccr_id)
         token_esc = self._escape_cos(upload_token)
@@ -3002,10 +3135,10 @@ class AtelierClient:
         return self._redact_secret(output, upload_token).strip()
 
     def ccr_create(self, title, description, ccr_type="", ccr_info="", site_code=None, sys_code=None):
-        """Crea un CCR nuevo en el servidor central via WSCreate (verbo SOAP 'CREATE').
-        Codes = SiteCode@SysCode e Info = Title|Description|Type|TypeInfo se arman dentro del wrapper.
-        SiteCode/SysCode por defecto salen de la rutina %buildccr (Org/Sys) del ambiente.
-        Es operacion PERSISTENTE: la regla de oro la limita a BASE (donde nace el cambio)."""
+        """Create a new CCR on the central server through WSCreate (SOAP verb 'CREATE').
+        Codes = SiteCode@SysCode and Info = Title|Description|Type|TypeInfo are assembled inside the wrapper.
+        SiteCode/SysCode default to the environment's %buildccr routine (Org/Sys).
+        PERSISTENT operation: the golden rule limits it to BASE (where the change originates)."""
         title_esc = self._escape_cos(title)
         desc_esc = self._escape_cos(description)
         type_esc = self._escape_cos(ccr_type)
@@ -3026,9 +3159,9 @@ class AtelierClient:
         return self._execute_same_process_ccr_operation(code, None).strip()
 
     def ccr_list_itemsets(self, ccr_id, env=None, token=""):
-        """Lista los ItemSets disponibles en el servidor CCR central para el ambiente (verbo 'List').
-        Read-only: no muta nada. env por defecto = $$Env^%buildccr.
-        REQUIERE access token de CCR (WSList devuelve #5001 sin token si la instancia no tiene API keys)."""
+        """List the ItemSets available on the central CCR server for this environment (verb 'List').
+        Read-only: mutates nothing. env defaults to $$Env^%buildccr.
+        REQUIRES a CCR access token (without one WSList returns #5001 unless the instance has API keys)."""
         ccr_esc = self._escape_cos(ccr_id)
         env_line = f'Set env = "{self._escape_cos(env)}"' if env else "Set env = $$Env^%buildccr"
         token_esc = self._escape_cos(token)
@@ -3071,8 +3204,8 @@ class AtelierClient:
         return self._redact_secret(output, token).strip()
 
     def ccr_can_upload(self, ccr_id, org=None, system=None):
-        """Pre-check del gate de subida en el servidor central (verbo 'CanUpload'). Read-only.
-        Devuelve si el CCR admite upload y la razon. Org/System por defecto salen de %buildccr."""
+        """Pre-check of the upload gate on the central server (verb 'CanUpload'). Read-only.
+        Returns whether the CCR accepts an upload, and why. Org/System default to %buildccr."""
         ccr_esc = self._escape_cos(ccr_id)
         org_line = f'Set org = "{self._escape_cos(org)}"' if org else "Set org = $$Org^%buildccr"
         sys_line = f'Set system = "{self._escape_cos(system)}"' if system else "Set system = $$Sys^%buildccr"
@@ -3086,13 +3219,14 @@ class AtelierClient:
         return self.execute_runtime_code(code).strip()
 
     def ccr_download_load(self, itemset_id, load=True, token=""):
-        """PROMOCION CCR: baja un ItemSet APROBADO desde el central por su ServerItemSetID y,
-        si load=1, lo carga (LoadToOS + LoadToNS). Replica el flujo de CCRItemSetTask.OnTask:
-        WSDownload -> Import -> LoadToOS -> LoadToNS. Es el canal sancionado de promocion:
-        solo baja por ISID desde el central, nunca carga un archivo local arbitrario.
+        """CCR PROMOTION: download an APPROVED ItemSet from the central server by its
+        ServerItemSetID and, when load=1, load it (LoadToOS + LoadToNS). Mirrors the
+        CCRItemSetTask.OnTask flow: WSDownload -> Import -> LoadToOS -> LoadToNS. This is the
+        sanctioned promotion channel: it only downloads by ISID from the central server and
+        never loads an arbitrary local file.
 
-        Gate propio: rol UAT configurado sobre el VIP (nunca nodo directo) y guard
-        same-process CONTROLLED_ACTIVE embebido en el mismo runner que ejecuta la carga."""
+        Its own gate: the configured UAT role on the VIP (never a direct node) and the
+        same-process CONTROLLED_ACTIVE guard embedded in the very runner that loads."""
         itemset_id = int(itemset_id)
         token_esc = self._escape_cos(token)
         do_load = "1" if load else "0"
@@ -3168,6 +3302,7 @@ class IRISMCPServer:
     # belong to exactly one category; the hermetic suite asserts the partition.
     READ_TOOLS = frozenset({
         "iris_query_sql", "iris_get_class", "iris_get_document", "iris_list_classes", "iris_get_event_logs",
+        "iris_describe_class", "iris_scan_namespace",
         "iris_get_recent_messages", "iris_get_ensemble_trace", "iris_dump_global",
         "iris_ccr_status", "iris_ccr_namespace_status", "iris_list_namespaces",
         "iris_ccr_list_uncommitted", "iris_ccr_list_itemsets", "iris_ccr_can_upload",
@@ -3411,7 +3546,7 @@ class IRISMCPServer:
         tools = [
             {
                 "name": "iris_list_servers",
-                "description": "Lista las conexiones de servidores de InterSystems IRIS disponibles y configuradas en el sistema.",
+                "description": "Lists the available InterSystems IRIS server connections configured on the system.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -3419,30 +3554,30 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_query_sql",
-                "description": "Ejecuta una consulta SQL de lectura en una instancia de InterSystems IRIS y retorna un listado de resultados estructurado. Gate READ (bloquea produccion) mas politica SQL conservadora: solo sentencias que empiezan con SELECT y sin tokens CALL/INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/CREATE/GRANT/REVOKE/BUILD/TUNE ni referencias %SYSTEM./$SYSTEM.; cualquier otra se deniega.",
+                "description": "Runs a read-only SQL query on an InterSystems IRIS instance and returns a structured result listing. READ gate (blocks production) plus a conservative SQL policy: only statements that start with SELECT, with no CALL/INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/CREATE/GRANT/REVOKE/BUILD/TUNE tokens and no %SYSTEM./$SYSTEM. references; anything else is denied.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado (ej: 'my-dev-server')."
+                            "description": "Configured server ID (e.g. 'my-dev-server')."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "query": {
                             "type": "string",
-                            "description": "Consulta SQL a ejecutar (ej: 'SELECT Name FROM %Dictionary.ClassDefinition WHERE Name LIKE \\'Custom.%\\'')."
+                            "description": "SQL query to run (e.g. 'SELECT Name FROM %Dictionary.ClassDefinition WHERE Name LIKE \\'Custom.%\\'')."
                         },
                         "parameters": {
                             "type": "array",
-                            "description": "Parámetros opcionales para la consulta parametrizada.",
+                            "description": "Optional parameters for the parameterized query.",
                             "items": {"type": "string"}
                         },
                         "timeout": {
                             "type": "number",
-                            "description": "Timeout opcional en segundos para la ejecución de la consulta."
+                            "description": "Optional timeout in seconds for query execution."
                         }
                     },
                     "required": ["server_id", "query"]
@@ -3450,21 +3585,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_get_class",
-                "description": "Recupera el código fuente ObjectScript nativo completo de una clase .cls en el servidor.",
+                "description": "Retrieves the complete native ObjectScript source of a .cls class on the server.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre de clase con sufijo exacto '.cls' opcional; preserva mayusculas y componentes (ej: '%SYSTEM.OBJ' -> '%SYSTEM.OBJ.cls'). No interpreta sufijos de rutinas."
+                            "description": "Class name with an optional exact '.cls' suffix; preserves case and components (e.g. '%SYSTEM.OBJ' -> '%SYSTEM.OBJ.cls'). Does not interpret routine suffixes."
                         }
                     },
                     "required": ["server_id", "class_name"]
@@ -3472,49 +3607,49 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_save_class",
-                "description": "Guarda/Sube el código fuente de una clase al servidor de InterSystems (Equivalente al CSP PUT) con soporte para Auto-Checkout de CCR y Normalizacion ASCII de caracteres especiales.",
+                "description": "Saves/uploads the source of a class to the InterSystems server (equivalent to the CSP PUT) with support for CCR auto-checkout and ASCII normalization of special characters.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase (ej: 'Custom.MyPackage.MyClass')."
+                            "description": "Full class name (e.g. 'Custom.MyPackage.MyClass')."
                         },
                         "content": {
                             "type": "string",
-                            "description": "Código ObjectScript completo de la clase a subir."
+                            "description": "Complete ObjectScript source of the class to upload."
                         },
                         "auto_checkout": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), realizara automaticamente un Checkout de CCR para la clase en el servidor antes de guardarla.",
+                            "description": "If true (the default), automatically performs a CCR checkout for the class on the server before saving it.",
                             "default": True
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "CCR ID opcional (ej: 'SITE0757'). Si se provee junto con auto_checkout=true, el checkout se hace bajo este CCR (runner con guard same-process CONTROLLED_ACTIVE) y el guardado queda tracked. Sin ccr_id no hay checkout: el guardado solo es admisible en un namespace con CCR ABSENT y package catalogado.",
+                            "description": "Optional CCR ID (e.g. 'SITE0757'). If provided together with auto_checkout=true, the checkout is made under this CCR (runner with the same-process CONTROLLED_ACTIVE guard) and the save is tracked. Without ccr_id there is no checkout: the save is admissible only in a namespace with CCR ABSENT and a cataloged package.",
                             "default": None
                         },
                         "clean_ascii": {
                             "type": "boolean",
-                            "description": "Si es verdadero, normaliza caracteres especiales (tildes, eñes, guiones largos) a ASCII puro antes del envio. ADVERTENCIA: es una transformación con PÉRDIDA que reescribe el código fuente (comentarios y literales en español pierden acentos). Por eso está DESACTIVADO por defecto; actívalo solo si el validador SAX/XML de Perforce/CCR falla por caracteres no válidos.",
+                            "description": "If true, normalizes special characters (accents, enyes, em dashes) to pure ASCII before sending. WARNING: this is a LOSSY transformation that rewrites the source (Spanish comments and literals lose their accents). That is why it is DISABLED by default; enable it only if the Perforce/CCR SAX/XML validator fails on invalid characters.",
                             "default": False
                         },
                         "verify": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), tras el PUT relee la clase del servidor y verifica que coincida con lo enviado (tolerando whitespace final). Si no coincide, aborta SIN compilar. Detecta duplicacion/truncacion del contenido inline. Pon en false solo si hay falsos positivos por normalizacion del servidor.",
+                            "description": "If true (the default), after the PUT it rereads the class from the server and verifies that it matches what was sent (tolerating trailing whitespace). If it does not match, it aborts WITHOUT compiling. Detects duplication/truncation of the inline content. Set to false only if there are false positives caused by server normalization.",
                             "default": True
                         },
                         "compile": {
                             "type": "boolean",
-                            "description": "Si es verdadero, compilara automaticamente la clase en el servidor inmediatamente despues de guardarla.",
+                            "description": "If true, automatically compiles the class on the server immediately after saving it.",
                             "default": False
                         }
                     },
@@ -3523,58 +3658,58 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_patch_class",
-                "description": "Aplica un parche quirurgico a una clase existente en el servidor: descarga la fuente, reemplaza EXACTAMENTE old_string por new_string (por defecto una unica ocurrencia) y guarda con auto-checkout de CCR y compilacion opcional. Usalo en vez de iris_save_class cuando solo cambias unas pocas lineas: evita subir el archivo completo inline y elimina el riesgo de doble-encoding porque el fetch/replace/put ocurren server-side sobre el UTF-8 real. Si old_string no aparece la cantidad esperada de veces, aborta SIN escribir nada.",
+                "description": "Applies a surgical patch to an existing class on the server: downloads the source, replaces old_string with new_string EXACTLY (a single occurrence by default) and saves with CCR auto-checkout and optional compilation. Use it instead of iris_save_class when you are only changing a few lines: it avoids uploading the whole file inline and removes the risk of double encoding because the fetch/replace/put happen server-side over the real UTF-8. If old_string does not appear the expected number of times, it aborts WITHOUT writing anything.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase (ej: 'Custom.MyPackage.MyClass')."
+                            "description": "Full class name (e.g. 'Custom.MyPackage.MyClass')."
                         },
                         "old_string": {
                             "type": "string",
-                            "description": "Texto literal exacto a reemplazar. Debe aparecer exactamente expected_count veces en la fuente actual del servidor (incluir suficiente contexto para que sea unico)."
+                            "description": "Exact literal text to replace. It must appear exactly expected_count times in the current server source (include enough context to make it unique)."
                         },
                         "new_string": {
                             "type": "string",
-                            "description": "Texto que reemplaza a old_string."
+                            "description": "Text that replaces old_string."
                         },
                         "expected_count": {
                             "type": "integer",
-                            "description": "Cantidad de ocurrencias esperadas de old_string. Por defecto 1. La operacion falla sin guardar si el conteo real no coincide.",
+                            "description": "Expected number of occurrences of old_string. Defaults to 1. The operation fails without saving if the real count does not match.",
                             "default": 1
                         },
                         "auto_checkout": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), realizara automaticamente un Checkout de CCR para la clase antes de guardarla.",
+                            "description": "If true (the default), automatically performs a CCR checkout for the class before saving it.",
                             "default": True
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "CCR ID opcional (ej: 'SITE0757'). Si se provee junto con auto_checkout=true, el checkout se hace bajo este CCR (runner con guard same-process CONTROLLED_ACTIVE) y el guardado queda tracked. Sin ccr_id no hay checkout: el guardado solo es admisible en un namespace con CCR ABSENT y package catalogado.",
+                            "description": "Optional CCR ID (e.g. 'SITE0757'). If provided together with auto_checkout=true, the checkout is made under this CCR (runner with the same-process CONTROLLED_ACTIVE guard) and the save is tracked. Without ccr_id there is no checkout: the save is admissible only in a namespace with CCR ABSENT and a cataloged package.",
                             "default": None
                         },
                         "clean_ascii": {
                             "type": "boolean",
-                            "description": "Si es verdadero, normaliza caracteres especiales (tildes, guiones largos) a ASCII puro antes del envio. ADVERTENCIA: transformacion con perdida que reescribe TODO el archivo (no solo las lineas parcheadas). Desactivado por defecto.",
+                            "description": "If true, normalizes special characters (accents, em dashes) to pure ASCII before sending. WARNING: lossy transformation that rewrites the WHOLE file (not only the patched lines). Disabled by default.",
                             "default": False
                         },
                         "verify": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), tras el PUT relee la clase del servidor y verifica que el resultado del parche coincida (tolerando whitespace final). Si no coincide, aborta SIN compilar. Pon en false solo si hay falsos positivos por normalizacion del servidor.",
+                            "description": "If true (the default), after the PUT it rereads the class from the server and verifies that the patch result matches (tolerating trailing whitespace). If it does not match, it aborts WITHOUT compiling. Set to false only if there are false positives caused by server normalization.",
                             "default": True
                         },
                         "compile": {
                             "type": "boolean",
-                            "description": "Si es verdadero, compilara la clase inmediatamente despues de guardarla.",
+                            "description": "If true, compiles the class immediately after saving it.",
                             "default": False
                         }
                     },
@@ -3583,21 +3718,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_compile_class",
-                "description": "Compila una clase o documento en el servidor de InterSystems IRIS y retorna el estado y errores del compilador.",
+                "description": "Compiles a class or document on the InterSystems IRIS server and returns the compiler status and errors.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Clase o documento. Solo los sufijos exactos en minusculas .cls/.mac/.int/.inc/.bas/.obj indican documento; de otro modo se agrega .cls sin cambiar mayusculas. Para la clase Custom.obj usar Custom.obj.cls."
+                            "description": "Class or document. Only the exact lowercase suffixes .cls/.mac/.int/.inc/.bas/.obj indicate a document; otherwise .cls is appended without changing case. For the class Custom.obj use Custom.obj.cls."
                         }
                     },
                     "required": ["server_id", "class_name"]
@@ -3605,21 +3740,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_delete_class",
-                "description": "Elimina de forma permanente una clase del namespace. Recibe nombre de clase con sufijo exacto .cls opcional; no interpreta componentes como sufijos de rutinas.",
+                "description": "Permanently deletes a class from the namespace. Takes a class name with an optional exact .cls suffix; it does not interpret components as routine suffixes.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase a eliminar (ej: 'Custom.Temp.MyClass.cls')."
+                            "description": "Full name of the class to delete (e.g. 'Custom.Temp.MyClass.cls')."
                         }
                     },
                     "required": ["server_id", "class_name"]
@@ -3627,21 +3762,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_list_classes",
-                "description": "Busca y lista de manera rápida clases personalizadas en el diccionario del servidor filtrando por paquete (ej: 'Custom'). Evita sobrecargar el servidor con listados pesados.",
+                "description": "Quickly searches and lists custom classes in the server dictionary, filtering by package (e.g. 'Custom'). Avoids overloading the server with heavy listings.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "package_prefix": {
                             "type": "string",
-                            "description": "Prefijo del paquete a buscar (ej: 'Custom.MyPackage', 'Logistica'). Por defecto busca clases que comiencen con 'Custom'."
+                            "description": "Package prefix to search for (e.g. 'Custom.MyPackage', 'Logistica'). By default it searches for classes starting with 'Custom'."
                         }
                     },
                     "required": ["server_id"]
@@ -3649,21 +3784,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_get_event_logs",
-                "description": "Recupera los últimos registros de eventos del log del sistema de integración de Ensemble/IRIS (Ens_Util.Log), ideal para diagnosticar errores de ejecución.",
+                "description": "Retrieves the latest event records from the Ensemble/IRIS integration system log (Ens_Util.Log), ideal for diagnosing execution errors.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Número máximo de registros a retornar (por defecto 20, máx 100)."
+                            "description": "Maximum number of records to return (default 20, max 100)."
                         }
                     },
                     "required": ["server_id"]
@@ -3671,25 +3806,25 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_get_recent_messages",
-                "description": "Recupera las últimas transacciones de mensajes del bus de integración de Ensemble/IRIS (Ens.MessageHeader) para monitorear el tráfico y resolver bloqueos.",
+                "description": "Retrieves the latest message transactions from the Ensemble/IRIS integration bus (Ens.MessageHeader) to monitor traffic and resolve blockages.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Número máximo de mensajes a retornar (por defecto 20)."
+                            "description": "Maximum number of messages to return (default 20)."
                         },
                         "only_errors": {
                             "type": "boolean",
-                            "description": "Si es verdadero, retornará solo mensajes con error o en estado suspendido."
+                            "description": "If true, returns only messages with an error or in a suspended state."
                         }
                     },
                     "required": ["server_id"]
@@ -3697,29 +3832,29 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_get_ensemble_trace",
-                "description": "Obtiene la traza completa (Visual Trace) de una ejecución de Ensemble/IRIS Interoperability por su SessionId. Recupera en orden cronológico la secuencia de mensajes (Ens.MessageHeader), el flujo entre componentes (Services, Processes, Operations), los logs asociados (Ens_Util.Log) y opcionalmente el contenido de los cuerpos de mensaje.",
+                "description": "Gets the complete trace (Visual Trace) of an Ensemble/IRIS Interoperability execution by its SessionId. Retrieves, in chronological order, the message sequence (Ens.MessageHeader), the flow between components (Services, Processes, Operations), the associated logs (Ens_Util.Log) and optionally the content of the message bodies.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "session_id": {
                             "type": ["integer", "string"],
-                            "description": "Identificador SessionId de la traza de Ensemble a inspeccionar (ej: 14789 o '14789')."
+                            "description": "SessionId identifier of the Ensemble trace to inspect (e.g. 14789 or '14789')."
                         },
                         "include_logs": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto true), incluye los registros de Ens_Util.Log asociados a la sesión."
+                            "description": "If true (default true), includes the Ens_Util.Log records associated with the session."
                         },
                         "include_bodies": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto false), inspecciona y recupera el contenido/payload de los objetos MessageBody de la traza."
+                            "description": "If true (default false), inspects and retrieves the content/payload of the MessageBody objects in the trace."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         }
                     },
                     "required": ["server_id", "session_id"]
@@ -3727,34 +3862,34 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_production_control",
-                "description": "Consulta el estado o controla la Producción de Ensemble (status, start, stop, restart).",
+                "description": "Queries the status of, or controls, the Ensemble production (status, start, stop, restart).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "action": {
                             "type": "string",
                             "enum": ["status", "start", "stop", "restart"],
-                            "description": "Acción a realizar: 'status' (consultar estado), 'start' (iniciar), 'stop' (detener), 'restart' (reiniciar)."
+                            "description": "Action to perform: 'status' (query state), 'start' (start), 'stop' (stop), 'restart' (restart)."
                         },
                         "production_name": {
                             "type": "string",
-                            "description": "Nombre de la Producción de Ensemble (opcional; si se omite, auto-detecta la producción activa)."
+                            "description": "Name of the Ensemble production (optional; if omitted, auto-detects the active production)."
                         },
                         "timeout": {
                             "type": "integer",
-                            "description": "Timeout en segundos para detener o reiniciar (por defecto 30)."
+                            "description": "Timeout in seconds for stopping or restarting (default 30)."
                         },
                         "force": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto falso), forzar detención/reinicio inmediato."
+                            "description": "If true (default false), force immediate stop/restart."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         }
                     },
                     "required": ["server_id", "action"]
@@ -3762,30 +3897,30 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_component_control",
-                "description": "Gestiona componentes individuales de la producción (Business Services, Processes, Operations): listar, habilitar, deshabilitar o reiniciar en caliente.",
+                "description": "Manages individual production components (Business Services, Processes, Operations): list, enable, disable or hot-restart.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "action": {
                             "type": "string",
                             "enum": ["list", "enable", "disable", "restart"],
-                            "description": "Acción a realizar: 'list' (listar componentes y sus estados), 'enable' (habilitar), 'disable' (deshabilitar), 'restart' (reiniciar componente)."
+                            "description": "Action to perform: 'list' (list components and their states), 'enable' (enable), 'disable' (disable), 'restart' (restart component)."
                         },
                         "component_name": {
                             "type": "string",
-                            "description": "Nombre del componente (Business Service/Process/Operation). Requerido para enable/disable/restart."
+                            "description": "Component name (Business Service/Process/Operation). Required for enable/disable/restart."
                         },
                         "production_name": {
                             "type": "string",
-                            "description": "Nombre de la Producción para filtrar en 'list' (opcional)."
+                            "description": "Production name to filter on in 'list' (optional)."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         }
                     },
                     "required": ["server_id", "action"]
@@ -3793,50 +3928,50 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_default_settings",
-                "description": "Consulta, crea, actualiza o elimina ajustes por defecto del sistema de Ensemble (Ens.Config.DefaultSettings).",
+                "description": "Queries, creates, updates or deletes Ensemble system default settings (Ens.Config.DefaultSettings).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "action": {
                             "type": "string",
                             "enum": ["list", "set", "delete"],
-                            "description": "Acción a realizar: 'list' (consultar settings), 'set' (crear o actualizar setting), 'delete' (eliminar setting)."
+                            "description": "Action to perform: 'list' (query settings), 'set' (create or update a setting), 'delete' (delete a setting)."
                         },
                         "id": {
                             "type": ["integer", "string"],
-                            "description": "ID del registro de setting (requerido para 'delete')."
+                            "description": "ID of the setting record (required for 'delete')."
                         },
                         "production_name": {
                             "type": "string",
-                            "description": "Nombre de la Producción (o '*' para todas)."
+                            "description": "Production name (or '*' for all)."
                         },
                         "item_name": {
                             "type": "string",
-                            "description": "Nombre del componente/item (o '*' para todos)."
+                            "description": "Component/item name (or '*' for all)."
                         },
                         "host_class_name": {
                             "type": "string",
-                            "description": "Nombre de la clase host (o '*' para todas)."
+                            "description": "Host class name (or '*' for all)."
                         },
                         "setting_name": {
                             "type": "string",
-                            "description": "Nombre del parámetro/setting (ej: TargetConfigNames, HTTPPort, SSLConfig)."
+                            "description": "Name of the parameter/setting (e.g. TargetConfigNames, HTTPPort, SSLConfig)."
                         },
                         "setting_value": {
                             "type": "string",
-                            "description": "Valor del parámetro/setting (requerido para 'set')."
+                            "description": "Value of the parameter/setting (required for 'set')."
                         },
                         "deployable": {
                             "type": "boolean",
-                            "description": "Si el setting es desplegable (por defecto true)."
+                            "description": "Whether the setting is deployable (default true)."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         }
                     },
                     "required": ["server_id", "action"]
@@ -3844,38 +3979,38 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_queue_control",
-                "description": "Monitorea colas de mensajes de Ensemble, lista mensajes pendientes, re-envía mensajes suspendidos o aborta/desencola mensajes atascados.",
+                "description": "Monitors Ensemble message queues, lists pending messages, resends suspended messages or aborts/dequeues stuck messages.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "action": {
                             "type": "string",
                             "enum": ["list_queues", "list_messages", "resend_message", "abort_message"],
-                            "description": "Acción a realizar: 'list_queues' (listar colas activas y número de mensajes), 'list_messages' (listar mensajes en cola), 'resend_message' (re-enviar/re-intentar mensaje), 'abort_message' (abortar/desencolar mensaje atascado)."
+                            "description": "Action to perform: 'list_queues' (list active queues and message count), 'list_messages' (list messages in a queue), 'resend_message' (resend/retry a message), 'abort_message' (abort/dequeue a stuck message)."
                         },
                         "queue_name": {
                             "type": "string",
-                            "description": "Nombre de la cola (requerido para 'list_messages')."
+                            "description": "Queue name (required for 'list_messages')."
                         },
                         "message_id": {
                             "type": ["integer", "string"],
-                            "description": "ID del mensaje (MessageHeader ID) requerido para 'resend_message' y 'abort_message'."
+                            "description": "Message ID (MessageHeader ID) required for 'resend_message' and 'abort_message'."
                         },
                         "new_target": {
                             "type": "string",
-                            "description": "Nuevo componente destino opcional al re-enviar mensaje ('resend_message'). Ej: 'HL7 Rule' para re-rutear un mensaje que fue a otro destino. Si se omite, se reenvia al destino original."
+                            "description": "Optional new target component when resending a message ('resend_message'). E.g. 'HL7 Rule' to reroute a message that went to another target. If omitted, it is resent to the original target."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Límite de mensajes a listar en 'list_messages' (por defecto 20)."
+                            "description": "Limit of messages to list in 'list_messages' (default 20)."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         }
                     },
                     "required": ["server_id", "action"]
@@ -3883,21 +4018,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_execute_objectscript",
-                "description": "Ejecuta ObjectScript mediante un runner temporal dedicado y retorna Write/output. El payload puede persistir datos. Gate RUNTIME: solo el gate de produccion (is_production, namespace/rol PROD/LIVE/PRD, nodo HA directo) y un rol no productivo configurado; el estado CCR no autoriza ni deniega esta operacion porque no es un cambio de codigo tracked. LIVE/PROD siempre bloquea. Exige borrado verificado del runner y ausencia de residuos de control de cambios.",
+                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role, direct HA node) and a configured non-production role; CCR state neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Requires verified deletion of the runner and the absence of source-control residue.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "code": {
                             "type": "string",
-                            "description": "Código ObjectScript a ejecutar (ej: 'Write \"Hello World\", !')."
+                            "description": "ObjectScript code to run (e.g. 'Write \"Hello World\", !')."
                         }
                     },
                     "required": ["server_id", "code"]
@@ -3905,33 +4040,33 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_dump_global",
-                "description": "Lee o hace dump del contenido de una global (o subarbol de una global) en InterSystems IRIS, con soporte para paginacion, limites de nodos y formateo automatico de estructuras $ListBuild y valores escalares.",
+                "description": "Reads or dumps the content of a global (or a subtree of a global) in InterSystems IRIS, with support for pagination, node limits and automatic formatting of $ListBuild structures and scalar values.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "global_name": {
                             "type": "string",
-                            "description": "Nombre de la global a leer (ej: '^PAADM', 'PAADM', '^websys.MenuD', '^||tmp', '^CT(\"SEX\")'). Puede incluir subindices directamente (ej: '^PAADM(100)')."
+                            "description": "Name of the global to read (e.g. '^PAADM', 'PAADM', '^websys.MenuD', '^||tmp', '^CT(\"SEX\")'). It may include subscripts directly (e.g. '^PAADM(100)')."
                         },
                         "subscript": {
                             "type": "string",
-                            "description": "Subindice o nodo inicial opcional si no se incluyo en global_name (ej: '100', '\"57400\"', '10,1')."
+                            "description": "Optional starting subscript or node if it was not included in global_name (e.g. '100', '\"57400\"', '10,1')."
                         },
                         "start_from": {
                             "type": "string",
-                            "description": "Referencia de nodo desde la cual iniciar o continuar la iteracion para paginacion (ej: '^PAADM(100,5)')."
+                            "description": "Node reference from which to start or continue the iteration for pagination (e.g. '^PAADM(100,5)')."
                         },
                         "max_nodes": {
                             "type": "number",
-                            "description": "Numero maximo de nodos a retornar (por defecto 200, maximo 5000)."
+                            "description": "Maximum number of nodes to return (default 200, maximum 5000)."
                         }
                     },
                     "required": ["server_id", "global_name"]
@@ -3939,25 +4074,25 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_status",
-                "description": "Obtiene el estado de control de cambios (CCR/Perforce) de una clase en el servidor (ej: si está en Checkout, Editable o quién la tiene bloqueada).",
+                "description": "Gets the change-control (CCR/Perforce) status of a class on the server (e.g. whether it is in Checkout, Editable, or who is holding the lock).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "document_name": {
                             "type": "string",
-                            "description": "Alternativa a class_name: documento exacto CON extension (ej: 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). Exactamente uno de class_name o document_name."
+                            "description": "Alternative to class_name: exact document WITH extension (e.g. 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). Exactly one of class_name or document_name."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase con o sin extensión (ej: 'Custom.Site.Integration.REST.BO.PAPerson')."
+                            "description": "Full class name with or without extension (e.g. 'Custom.Site.Integration.REST.BO.PAPerson')."
                         }
                     },
                     "required": ["server_id"]
@@ -3965,29 +4100,29 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_checkout",
-                "description": "Realiza un Checkout (bloqueo/habilitación de edición) de una clase bajo un CCR ID o descripción en el servidor con control de cambios activo.",
+                "description": "Performs a checkout (lock/enable editing) of a class under a CCR ID or description on the server with active change control.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         },
                         "document_name": {
                             "type": "string",
-                            "description": "Alternativa a class_name: documento exacto CON extension (ej: 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). Exactamente uno de class_name o document_name."
+                            "description": "Alternative to class_name: exact document WITH extension (e.g. 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). Exactly one of class_name or document_name."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase con o sin extensión."
+                            "description": "Full class name with or without extension."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "Identificador o descripción del CCR (ej: 'CCR-12345')."
+                            "description": "CCR identifier or description (e.g. 'CCR-12345')."
                         }
                     },
                     "required": ["server_id", "ccr_id"]
@@ -3995,29 +4130,29 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_undocheckout",
-                "description": "Deshace un Checkout de una clase en el servidor, liberando el bloqueo y revirtiendo cualquier cambio no confirmado. Operacion CCR-tracked: exige un ccr_id explicito y solo revierte la fila pendiente que pertenece exactamente a ese CCR; corre en un runner con guard same-process CONTROLLED_ACTIVE.",
+                "description": "Undoes a checkout of a class on the server, releasing the lock and reverting any uncommitted change. CCR-tracked operation: it requires an explicit ccr_id and reverts only the pending row that belongs to exactly that CCR; it runs in a runner with the same-process CONTROLLED_ACTIVE guard.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional."
+                            "description": "Optional namespace."
                         },
                         "document_name": {
                             "type": "string",
-                            "description": "Alternativa a class_name: documento exacto CON extension (ej: 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). Exactamente uno de class_name o document_name."
+                            "description": "Alternative to class_name: exact document WITH extension (e.g. 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). Exactly one of class_name or document_name."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase con o sin extensión."
+                            "description": "Full class name with or without extension."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "CCR al que pertenece la fila pendiente (ej: 'SITE0757'). Si se omite, se lee de la config del servidor o IRIS_CCR_ID."
+                            "description": "CCR the pending row belongs to (e.g. 'SITE0757'). If omitted, it is read from the server config or IRIS_CCR_ID."
                         }
                     },
                     "required": ["server_id"]
@@ -4025,17 +4160,17 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_namespace_status",
-                "description": "Discovery CCR parcial read-only por namespace (INFORMATIVO): motor instalado, source control generico y evidencia estructurada. UNKNOWN aqui es solo un resultado de discovery externo; NO es un veredicto de autorizacion. La autorizacion de escrituras de codigo usa el guard same-process (CONTROLLED_ACTIVE / SUSPENDED / ABSENT) dentro del runner o probe. No crea clases ni cambia configuracion.",
+                "description": "Partial read-only CCR discovery per namespace (INFORMATIONAL): installed engine, generic source control and structured evidence. UNKNOWN here is only an external discovery result; it is NOT an authorization verdict. Authorization of code writes uses the same-process guard (CONTROLLED_ACTIVE / SUSPENDED / ABSENT) inside the runner or probe. It does not create classes or change configuration.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional a evaluar (ej: 'BASE-SITE'). Si no se especifica, usa el configurado para el servidor."
+                            "description": "Optional namespace to evaluate (e.g. 'BASE-SITE'). If not specified, uses the one configured for the server."
                         }
                     },
                     "required": ["server_id"]
@@ -4043,41 +4178,41 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_create",
-                "description": "Crea un CCR nuevo en el servidor CCR central (verbo SOAP 'CREATE' via %Studio.SourceControl.ItemSet.WSCreate). Registra titulo, descripcion y tipo para dejar la documentacion prolija en la capa CCR. Operacion PERSISTENTE: la regla de oro la restringe a ambientes BASE (donde nace el cambio). SiteCode/SysCode por defecto salen de la rutina %buildccr (Org/Sys) del ambiente.",
+                "description": "Creates a new CCR on the central CCR server (SOAP verb 'CREATE' via %Studio.SourceControl.ItemSet.WSCreate). Records title, description and type to keep the documentation tidy in the CCR layer. PERSISTENT operation: the golden rule restricts it to BASE environments (where the change originates). SiteCode/SysCode default to the environment's %buildccr routine (Org/Sys).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "title": {
                             "type": "string",
-                            "description": "Titulo del CCR."
+                            "description": "CCR title."
                         },
                         "description": {
                             "type": "string",
-                            "description": "Descripcion del CCR (contexto del cambio)."
+                            "description": "CCR description (context of the change)."
                         },
                         "ccr_type": {
                             "type": "string",
-                            "description": "Tipo de CCR opcional (segun catalogo del servidor central)."
+                            "description": "Optional CCR type (according to the central server catalog)."
                         },
                         "ccr_info": {
                             "type": "string",
-                            "description": "Informacion adicional del tipo opcional (TypeInfo)."
+                            "description": "Optional additional type information (TypeInfo)."
                         },
                         "site_code": {
                             "type": "string",
-                            "description": "SiteCode opcional. Por defecto = Org de %buildccr (ej: 'SITE')."
+                            "description": "Optional SiteCode. Defaults to the Org from %buildccr (e.g. 'SITE')."
                         },
                         "sys_code": {
                             "type": "string",
-                            "description": "SysCode opcional. Por defecto = Sys de %buildccr (ej: 'T2026')."
+                            "description": "Optional SysCode. Defaults to the Sys from %buildccr (e.g. 'T2026')."
                         }
                     },
                     "required": ["server_id", "title", "description"]
@@ -4085,29 +4220,29 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_list_itemsets",
-                "description": "Consulta ItemSets del CCR central via WSList: id, nombre, ventana e implementation plan. Gate READ (bloquea produccion); el transporte crea una clase temporal bajo el gate RUNTIME (rol no productivo configurado), sin consultar el estado CCR. Requiere access token de CCR salvo API keys configuradas.",
+                "description": "Queries the central CCR ItemSets via WSList: id, name, window and implementation plan. READ gate (blocks production); the transport creates a temporary class under the RUNTIME gate (configured non-production role), without consulting CCR state. Requires a CCR access token unless API keys are configured.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "Identificador del CCR / Job a consultar (ej: 'SITE0875'). Si se omite, se lee de la config del servidor o IRIS_CCR_ID."
+                            "description": "Identifier of the CCR / Job to query (e.g. 'SITE0875'). If omitted, it is read from the server config or IRIS_CCR_ID."
                         },
                         "env": {
                             "type": "string",
-                            "description": "Ambiente CCR opcional a consultar (ej: 'BASE', 'UAT'). Por defecto = Env de %buildccr del namespace."
+                            "description": "Optional CCR environment to query (e.g. 'BASE', 'UAT'). Defaults to the namespace's Env from %buildccr."
                         },
                         "token": {
                             "type": "string",
-                            "description": "Access token de CCR (obtenido desde CCR code). Si se omite, se lee de la config del servidor ('upload_token') o de IRIS_CCR_TOKEN."
+                            "description": "CCR access token (obtained from CCR code). If omitted, it is read from the server config ('upload_token') or from IRIS_CCR_TOKEN."
                         }
                     },
                     "required": ["server_id"]
@@ -4115,29 +4250,29 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_can_upload",
-                "description": "Consulta CanUpload en el CCR central antes del commit; devuelve veredicto y razon. Gate READ (bloquea produccion); el transporte crea una clase temporal bajo el gate RUNTIME (rol no productivo configurado), sin consultar el estado CCR.",
+                "description": "Queries CanUpload on the central CCR before the commit; returns the verdict and the reason. READ gate (blocks production); the transport creates a temporary class under the RUNTIME gate (configured non-production role), without consulting CCR state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "Identificador del CCR / Job a validar (ej: 'SITE0530'). Si se omite, se lee de la config del servidor o IRIS_CCR_ID."
+                            "description": "Identifier of the CCR / Job to validate (e.g. 'SITE0530'). If omitted, it is read from the server config or IRIS_CCR_ID."
                         },
                         "org": {
                             "type": "string",
-                            "description": "Org opcional. Por defecto = Org de %buildccr."
+                            "description": "Optional Org. Defaults to the Org from %buildccr."
                         },
                         "system": {
                             "type": "string",
-                            "description": "System opcional. Por defecto = Sys de %buildccr."
+                            "description": "Optional System. Defaults to the Sys from %buildccr."
                         }
                     },
                     "required": ["server_id"]
@@ -4145,29 +4280,34 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_download_load",
-                "description": "PROMOCION CCR (gate propio): descarga por ServerItemSetID un ItemSet aprobado desde el central y, si load=true, lo carga (LoadToOS + LoadToNS). Solo sobre el rol UAT configurado en el VIP (nunca nodo HA directo) y con guard same-process CONTROLLED_ACTIVE embebido en el mismo runner que carga; SUSPENDED, ABSENT, produccion (LIVE) o cualquier error bloquean, incluso con load=false. Nunca carga archivos locales arbitrarios.",
+                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Only on the configured UAT role at the VIP (never a direct HA node) and with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, production (LIVE) or any error block, even with load=false. It never loads arbitrary local files.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'UAT-SITE')."
+                            "description": "Optional namespace (e.g. 'UAT-SITE')."
                         },
                         "itemset_id": {
                             "type": "integer",
-                            "description": "ServerItemSetID del ItemSet a bajar desde el central (obtenido de iris_ccr_list_itemsets)."
+                            "description": "ServerItemSetID of the ItemSet to download from the central server (obtained from iris_ccr_list_itemsets)."
                         },
                         "load": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), carga el ItemSet (LoadToOS + LoadToNS) tras bajarlo. Si es falso, solo baja e importa el objeto local sin cargar."
+                            "description": "If true (the default), loads the ItemSet (LoadToOS + LoadToNS) after downloading it. If false, it only downloads and imports the local object without loading."
+                        },
+                        "verify_documents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Non-empty list, without case-insensitive duplicates, of exact documents with a valid extension that must already exist in UAT. It takes snapshots before loading and checks afterwards that each document changed; it is accepted only with load=true."
                         },
                         "token": {
                             "type": "string",
-                            "description": "Session token opcional para la descarga. Por defecto vacio (descarga scopeada al ambiente)."
+                            "description": "Optional session token for the download. Empty by default (download scoped to the environment)."
                         }
                     },
                     "required": ["server_id", "itemset_id"]
@@ -4175,13 +4315,13 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_list_namespaces",
-                "description": "Obtiene la lista de todos los namespaces disponibles en la instancia de InterSystems IRIS seleccionada.",
+                "description": "Gets the list of all namespaces available on the selected InterSystems IRIS instance.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         }
                     },
                     "required": ["server_id"]
@@ -4189,21 +4329,21 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_unlock_questionnaire",
-                "description": "Desbloquea un cuestionario (UserDefWindow) en el servidor de InterSystems IRIS ejecutando las actualizaciones SQL necesarias para los controles, respuestas y el estado de generación.",
+                "description": "Unlocks a questionnaire (UserDefWindow) on the InterSystems IRIS server by running the SQL updates needed for the controls, responses and generation state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "win_code": {
                             "type": "string",
-                            "description": "Código del cuestionario/ventana a desbloquear (WIN_Code, ej: 'SITEPREANE')."
+                            "description": "Code of the questionnaire/window to unlock (WIN_Code, e.g. 'SITEPREANE')."
                         }
                     },
                     "required": ["server_id", "win_code"]
@@ -4211,29 +4351,29 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_commit",
-                "description": "Gatilla un Commit de control de cambios (CCR/Perforce), captura el ItemSet local nuevo y verifica por nombre exacto que exista en el servidor central. El Commit nativo ya sube el ItemSet; NUNCA re-sube automaticamente (evita commits duplicados en Perforce). Si el central aun no lo lista, devuelve PENDING_VERIFICATION. Solo informa exito con resultado VERIFIED.",
+                "description": "Triggers a change-control commit (CCR/Perforce), captures the new local ItemSet and verifies by exact name that it exists on the central server. The native Commit already uploads the ItemSet; it NEVER re-uploads automatically (this avoids duplicate commits in Perforce). If the central server does not list it yet, it returns PENDING_VERIFICATION. It reports success only with a VERIFIED result.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "Identificador del CCR / Job opcional (ej: 'SITE0530'). Si se omite, se leera de la configuracion del servidor o variable de entorno IRIS_CCR_ID."
+                            "description": "Optional CCR / Job identifier (e.g. 'SITE0530'). If omitted, it will be read from the server configuration or the IRIS_CCR_ID environment variable."
                         },
                         "upload_token": {
                             "type": "string",
-                            "description": "Token de acceso opcional para subir el ItemSet al servidor CCR central (ej: 'sgBhFXAfoz'). Si se omite, se leera de la configuracion del servidor o variable de entorno IRIS_CCR_TOKEN."
+                            "description": "Optional access token for uploading the ItemSet to the central CCR server (e.g. 'sgBhFXAfoz'). If omitted, it will be read from the server configuration or the IRIS_CCR_TOKEN environment variable."
                         },
                         "change_ids": {
                             "type": "array",
-                            "description": "Lista de números enteros de los IDs de cambio locales a incluir en el bundle (ej: [17427, 17429]).",
+                            "description": "List of integer numbers of the local change IDs to include in the bundle (e.g. [17427, 17429]).",
                             "items": {
                                 "type": "integer"
                             }
@@ -4244,25 +4384,25 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_list_uncommitted",
-                "description": "Lista la cola de cambios locales sin commitear (%Studio.SourceControl.Change) en el servidor. Devuelve los change_ids enteros, el documento, la accion y el CCR/Job asociado. Estos IDs son los que consume iris_ccr_commit para empaquetar el ItemSet.",
+                "description": "Lists the queue of uncommitted local changes (%Studio.SourceControl.Change) on the server. Returns the integer change_ids, the document, the action and the associated CCR/Job. These IDs are the ones iris_ccr_commit consumes to package the ItemSet.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "CCR / Job opcional para filtrar la cola (ej: 'SITE0530'). Si se omite, lista todos los cambios sin commitear."
+                            "description": "Optional CCR / Job to filter the queue (e.g. 'SITE0530'). If omitted, it lists all uncommitted changes."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximo de filas a devolver (por defecto 200)."
+                            "description": "Maximum number of rows to return (default 200)."
                         }
                     },
                     "required": ["server_id"]
@@ -4270,33 +4410,33 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_reupload_itemset",
-                "description": "Recovery de CCR: verifica por nombre exacto un ItemSet local y, solo si falta en el central, lo sanea y re-sube mediante WSUpload directo. Evita duplicados con un no-op verificado y solo informa exito con resultado VERIFIED.",
+                "description": "CCR recovery: verifies a local ItemSet by exact name and, only if it is missing on the central server, sanitizes it and re-uploads it through a direct WSUpload. It avoids duplicates with a verified no-op and reports success only with a VERIFIED result.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "itemset_id": {
                             "type": "integer",
-                            "description": "ID local del ItemSet a re-subir (ej: 734). Se obtiene del log de iris_ccr_commit o de %Studio.SourceControl.ItemSet."
+                            "description": "Local ID of the ItemSet to re-upload (e.g. 734). It is obtained from the iris_ccr_commit log or from %Studio.SourceControl.ItemSet."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "Identificador del CCR / Job (ej: 'SITE0611'). Si se omite, se lee de la config del servidor o IRIS_CCR_ID."
+                            "description": "CCR / Job identifier (e.g. 'SITE0611'). If omitted, it is read from the server config or IRIS_CCR_ID."
                         },
                         "upload_token": {
                             "type": "string",
-                            "description": "Token de acceso para subir el ItemSet al servidor CCR central. Si se omite, se lee de la config del servidor o IRIS_CCR_TOKEN."
+                            "description": "Access token for uploading the ItemSet to the central CCR server. If omitted, it is read from the server config or IRIS_CCR_TOKEN."
                         },
                         "sanitize": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), limpia byte-a-byte el XML del ItemSet y su payload antes de subir. Desactivar solo si el ItemSet ya es ASCII puro."
+                            "description": "If true (the default), cleans the ItemSet XML and its payload byte by byte before uploading. Disable only if the ItemSet is already pure ASCII."
                         }
                     },
                     "required": ["server_id", "itemset_id"]
@@ -4320,49 +4460,49 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_save_class_from_file",
-                "description": "Guarda una clase leyendo su codigo fuente DIRECTAMENTE de un archivo local (byte-a-byte) en la maquina donde corre el MCP.",
+                "description": "Saves a class by reading its source DIRECTLY from a local file (byte by byte) on the machine where the MCP runs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor."
+                            "description": "Server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."
+                            "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase (ej: 'Custom.MyPackage.MyClass')."
+                            "description": "Full class name (e.g. 'Custom.MyPackage.MyClass')."
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Ruta absoluta al archivo .cls local en la maquina donde corre el MCP. Se lee byte-a-byte en UTF-8."
+                            "description": "Absolute path to the local .cls file on the machine where the MCP runs. It is read byte by byte as UTF-8."
                         },
                         "auto_checkout": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), realizara automaticamente un Checkout de CCR para la clase antes de guardarla.",
+                            "description": "If true (the default), automatically performs a CCR checkout for the class before saving it.",
                             "default": True
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "CCR ID opcional (ej: 'SITE0757'). Si se provee, activa la ruta especializada de CCR y debe ser ASCII no vacio; auto_checkout y verify deben permanecer true.",
+                            "description": "Optional CCR ID (e.g. 'SITE0757'). If provided, it activates the specialized CCR route and must be non-empty ASCII; auto_checkout and verify must stay true.",
                             "default": None
                         },
                         "clean_ascii": {
                             "type": "boolean",
-                            "description": "Si es verdadero, normaliza caracteres especiales (tildes, guiones largos) a ASCII puro antes del envio. ADVERTENCIA: transformacion con PERDIDA. Desactivado por defecto.",
+                            "description": "If true, normalizes special characters (accents, em dashes) to pure ASCII before sending. WARNING: LOSSY transformation. Disabled by default.",
                             "default": False
                         },
                         "verify": {
                             "type": "boolean",
-                            "description": "Si es verdadero (por defecto), tras el PUT relee la clase del servidor y verifica que coincida byte-a-byte (tolerando whitespace final) con el archivo local. Si no coincide, aborta SIN compilar.",
+                            "description": "If true (the default), after the PUT it rereads the class from the server and verifies that it matches the local file byte for byte (tolerating trailing whitespace). If it does not match, it aborts WITHOUT compiling.",
                             "default": True
                         },
                         "compile": {
                             "type": "boolean",
-                            "description": "Si es verdadero, compilara la clase inmediatamente despues de guardar (solo si la verificacion paso).",
+                            "description": "If true, compiles the class immediately after saving (only if verification passed).",
                             "default": False
                         }
                     },
@@ -4371,30 +4511,30 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_checkout_ct",
-                "description": "Registra uno o mas objetos CT (Configuration Tables) de TrakCare en la cola de cambios CCR bajo un CCR explicito, generando GUIDs consistentes via el mecanismo nativo de TrakCare (TC.ChangeControl.CCR). Usar cuando los registros fueron creados via escritura directa a globals y necesitan entrar a la cola CCR para commit. Aplica a cualquier clase con GUIDENABLED=1 que extienda XML.Adaptor (epr.CTIconAssociation, epr.CTIconProfile, User.CTOverride, websys.Preferences, etc.). Corre en un runner con guard same-process CONTROLLED_ACTIVE.",
+                "description": "Registers one or more TrakCare CT (Configuration Tables) objects in the CCR change queue under an explicit CCR, generating consistent GUIDs through the native TrakCare mechanism (TC.ChangeControl.CCR). Use it when the records were created by writing directly to globals and need to enter the CCR queue for commit. It applies to any class with GUIDENABLED=1 that extends XML.Adaptor (epr.CTIconAssociation, epr.CTIconProfile, User.CTOverride, websys.Preferences, etc.). It runs in a runner with the same-process CONTROLLED_ACTIVE guard.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "server_id": {
                             "type": "string",
-                            "description": "ID del servidor configurado."
+                            "description": "Configured server ID."
                         },
                         "namespace": {
                             "type": "string",
-                            "description": "Namespace opcional (ej: 'BASE-SITE')."
+                            "description": "Optional namespace (e.g. 'BASE-SITE')."
                         },
                         "class_name": {
                             "type": "string",
-                            "description": "Nombre completo de la clase CT (ej: 'epr.CTIconAssociation', 'epr.CTIconProfile', 'User.CTOverride')."
+                            "description": "Full name of the CT class (e.g. 'epr.CTIconAssociation', 'epr.CTIconProfile', 'User.CTOverride')."
                         },
                         "ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Lista de IDs de registros a registrar en la cola CCR (ej: ['806','807','808'] o ['6'] para un solo registro). Cada ID sera procesado con TC.ChangeControl.CCR.CheckOut($lb(id, class))."
+                            "description": "List of record IDs to register in the CCR queue (e.g. ['806','807','808'] or ['6'] for a single record). Each ID will be processed with TC.ChangeControl.CCR.CheckOut($lb(id, class))."
                         },
                         "ccr_id": {
                             "type": "string",
-                            "description": "CCR explicito bajo el cual se registran los objetos (ej: 'SITE0757'). Si se omite, se lee de la config del servidor o IRIS_CCR_ID."
+                            "description": "Explicit CCR under which the objects are registered (e.g. 'SITE0757'). If omitted, it is read from the server config or IRIS_CCR_ID."
                         }
                     },
                     "required": ["server_id", "class_name", "ids"]
@@ -4402,7 +4542,213 @@ class IRISMCPServer:
             }
         ]
         tools.extend(self._document_tools())
+        tools.extend(self._dictionary_tools())
         return {"tools": tools}
+
+    @staticmethod
+    def _dictionary_tools():
+        """READ-only class dictionary introspection (%Dictionary.*). No runner, no writes."""
+        server = {"type": "string", "description": "Server ID."}
+        namespace = {"type": "string", "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."}
+        return [
+            {
+                "name": "iris_describe_class",
+                "description": (
+                    "Describes a class from the dictionary (%Dictionary): superclasses, parameters, properties "
+                    "(type, collection, required, MAXLEN), indices, methods and declared queries. READ gate; "
+                    "use it to understand a model before modifying code."),
+                "inputSchema": {"type": "object", "properties": {
+                    "server_id": server, "namespace": namespace,
+                    "class_name": {"type": "string", "description": "Full class name (without .cls), e.g. 'Custom.Site.Data.Patient'."},
+                    "include_inherited": {"type": "boolean", "default": False,
+                                          "description": "If true, includes inherited properties (%Dictionary.CompiledProperty). By default only those declared in the class."},
+                }, "required": ["server_id", "class_name"]},
+            },
+            {
+                "name": "iris_scan_namespace",
+                "description": (
+                    "READ inventory of the dictionary for a package prefix: declared class_type and a "
+                    "direct_role hint based only on known direct superclasses (it does not classify indirect inheritance), "
+                    "superclass, property count and SQL table. "
+                    "Excludes core (%, Ens, HS, CSP, INFORMATION.SCHEMA). Default limit 200 classes."),
+                "inputSchema": {"type": "object", "properties": {
+                    "server_id": server, "namespace": namespace,
+                    "package_prefix": {"type": "string", "description": "Package prefix (e.g. 'Custom.Site'). Defaults to 'Custom'."},
+                    "persistent_only": {"type": "boolean", "default": False, "description": "Only %Persistent classes (SQL tables)."},
+                    "limit": {"type": "integer", "default": 200, "description": "Maximum number of classes to return (1-1000)."},
+                }, "required": ["server_id"]},
+            },
+        ]
+
+    @staticmethod
+    def _dictionary_row(row):
+        """Normalize Atelier SQL column casing into a stable public shape."""
+        return {str(key).lower(): value for key, value in row.items()}
+
+    @staticmethod
+    def _dictionary_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+    @classmethod
+    def _describe_class(cls, client, class_name, include_inherited=False):
+        class_rows = client.run_query("""
+            SELECT Name AS name, Description AS description, Super AS superclasses,
+                   Abstract AS abstract, ClassType AS class_type,
+                   SqlTableName AS sql_table, TimeChanged AS time_changed
+            FROM %Dictionary.ClassDefinition
+            WHERE Name = ?
+        """, [class_name])
+        if not class_rows:
+            raise LocalPolicyError(f"Class not found: {class_name}")
+        definition = cls._dictionary_row(class_rows[0])
+
+        parameters = [cls._dictionary_row(row) for row in client.run_query("""
+            SELECT Name AS name, Type AS type, Default AS default_value,
+                   Description AS description
+            FROM %Dictionary.ParameterDefinition
+            WHERE parent = ?
+            ORDER BY Name
+        """, [class_name])]
+
+        property_table = "%Dictionary.CompiledProperty" if include_inherited else "%Dictionary.PropertyDefinition"
+        origin_column = "Origin" if include_inherited else "parent"
+        properties = [cls._dictionary_row(row) for row in client.run_query(f"""
+            SELECT Name AS name, {origin_column} AS origin, Type AS type,
+                   Collection AS collection, Required AS required,
+                   %Dictionary.GetParameterValue(Parameters, 'MAXLEN') AS maxlen
+            FROM {property_table}
+            WHERE parent = ?
+            ORDER BY Name
+        """, [class_name])]
+        for prop in properties:
+            prop["required"] = cls._dictionary_bool(prop.get("required"))
+
+        indices = [cls._dictionary_row(row) for row in client.run_query("""
+            SELECT Name AS name, Properties AS properties, Type AS type,
+                   _Unique AS unique_value, PrimaryKey AS primary_key
+            FROM %Dictionary.IndexDefinition
+            WHERE parent = ?
+            ORDER BY Name
+        """, [class_name])]
+        for index in indices:
+            index["unique"] = cls._dictionary_bool(index.pop("unique_value", False))
+            index["primary_key"] = cls._dictionary_bool(index.get("primary_key"))
+
+        methods = [cls._dictionary_row(row) for row in client.run_query("""
+            SELECT Name AS name, ClassMethod AS class_method, ReturnType AS return_type,
+                   FormalSpec AS formal_spec, Abstract AS abstract, SqlProc AS sql_proc
+            FROM %Dictionary.MethodDefinition
+            WHERE parent = ?
+            ORDER BY Name
+        """, [class_name])]
+        for method in methods:
+            for field in ("class_method", "abstract", "sql_proc"):
+                method[field] = cls._dictionary_bool(method.get(field))
+
+        queries = [cls._dictionary_row(row) for row in client.run_query("""
+            SELECT Name AS name, Type AS type, FormalSpec AS formal_spec,
+                   SqlProc AS sql_proc, SqlName AS sql_name
+            FROM %Dictionary.QueryDefinition
+            WHERE parent = ?
+            ORDER BY Name
+        """, [class_name])]
+        for query in queries:
+            query["sql_proc"] = cls._dictionary_bool(query.get("sql_proc"))
+
+        superclasses = [item.strip() for item in str(definition.get("superclasses") or "").split(",") if item.strip()]
+        return {
+            "name": definition.get("name") or class_name,
+            "description": definition.get("description") or "",
+            "superclasses": superclasses,
+            "abstract": cls._dictionary_bool(definition.get("abstract")),
+            "class_type": definition.get("class_type") or "",
+            "sql_table": definition.get("sql_table") or None,
+            "time_changed": definition.get("time_changed"),
+            "include_inherited": include_inherited,
+            "parameters": parameters,
+            "properties": properties,
+            "indices": indices,
+            "methods": methods,
+            "queries": queries,
+        }
+
+    @staticmethod
+    def _dictionary_direct_role(row):
+        """Return a useful direct-superclass hint, never an effective inheritance claim."""
+        supers = {item.strip() for item in str(row.get("super") or "").split(",")}
+        for superclass, role in (
+            ("Ens.Production", "production"),
+            ("Ens.DataTransformDTL", "DTL"),
+            ("Ens.BusinessService", "business service"),
+            ("Ens.BusinessProcess", "business process"),
+            ("Ens.BusinessOperation", "business operation"),
+            ("%CSP.REST", "REST"),
+        ):
+            if superclass in supers:
+                return role
+        return None
+
+    @classmethod
+    def _scan_namespace(cls, client, package_prefix, persistent_only=False, limit=200):
+        persistent_clause = " AND c.ClassType = 'persistent'" if persistent_only else ""
+        rows = client.run_query(f"""
+            SELECT TOP {limit} c.Name AS name, c.Super AS super,
+                   c.ClassType AS class_type, c.SqlTableName AS sql_table,
+                   c.TimeChanged AS time_changed,
+                   (SELECT COUNT(*) FROM %Dictionary.PropertyDefinition p
+                    WHERE p.parent = c.Name) AS property_count
+            FROM %Dictionary.ClassDefinition c
+            WHERE c.Name LIKE ?
+              AND LEFT(c.Name, 1) <> '%'
+              AND c.Name NOT LIKE 'Ens.%'
+              AND c.Name NOT LIKE 'HS.%'
+              AND c.Name NOT LIKE 'CSP.%'
+              AND c.Name NOT LIKE 'INFORMATION.SCHEMA.%'{persistent_clause}
+            ORDER BY c.Name
+        """, [package_prefix + ".%"])
+        result = []
+        for raw in rows:
+            row = cls._dictionary_row(raw)
+            result.append({
+                "name": row.get("name") or "",
+                "class_type": str(row.get("class_type") or "registered").lower(),
+                "direct_role": cls._dictionary_direct_role(row),
+                "super": row.get("super") or "",
+                "property_count": int(row.get("property_count") or 0),
+                "sql_table": row.get("sql_table") or None,
+                "time_changed": row.get("time_changed"),
+            })
+        return result
+
+    @staticmethod
+    def _render_class_description(record):
+        output = f"### Class `{record['name']}`\n\n"
+        output += f"- Tipo: `{record['class_type'] or 'registered'}`\n"
+        output += f"- Superclases: `{', '.join(record['superclasses']) or 'ninguna'}`\n"
+        output += f"- Abstracta: {'si' if record['abstract'] else 'no'}\n"
+        output += f"- Tabla SQL: `{record['sql_table'] or 'ninguna'}`\n"
+        if record["description"]:
+            output += f"- Description: {_markdown_table_cell(record['description'])}\n"
+        sections = (
+            ("Propiedades", "properties", ("name", "origin", "type", "collection", "required", "maxlen")),
+            ("Indices", "indices", ("name", "properties", "type", "unique", "primary_key")),
+            ("Metodos", "methods", ("name", "class_method", "return_type", "formal_spec", "abstract", "sql_proc")),
+            ("Queries", "queries", ("name", "type", "formal_spec", "sql_proc", "sql_name")),
+        )
+        for title, key, fields in sections:
+            output += f"\n#### {title} ({len(record[key])})\n\n"
+            if not record[key]:
+                output += "Ninguno.\n"
+                continue
+            output += "| " + " | ".join(fields) + " |\n"
+            output += "| " + " | ".join(":---" for _ in fields) + " |\n"
+            for row in record[key]:
+                output += "| " + " | ".join(_markdown_table_cell(row.get(field, "")) for field in fields) + " |\n"
+        return output
 
     @staticmethod
     def _document_tools():
@@ -4411,18 +4757,18 @@ class IRISMCPServer:
         `document_name` carries its extension (.inc/.mac/.int/.cls/.bas/.obj); nothing
         is inferred or appended. This is how include files and routines are handled.
         """
-        server = {"type": "string", "description": "ID del servidor."}
-        namespace = {"type": "string", "description": "Namespace opcional. Si no se especifica, usa el configurado para el servidor, o 'USER' por defecto."}
+        server = {"type": "string", "description": "Server ID."}
+        namespace = {"type": "string", "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."}
         document = {"type": "string", "description": (
-            "Nombre exacto del documento CON extension en minusculas: .inc (include), .mac (rutina), .int, .cls, .bas, .obj "
-            "(ej: 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). No se infiere ni se agrega ninguna extension; "
-            "para clases usa tambien las herramientas iris_*_class.")}
+            "Exact document name WITH a lowercase extension: .inc (include), .mac (routine), .int, .cls, .bas, .obj "
+            "(e.g. 'Custom.Site.Macros.inc', 'Custom.Site.Util.mac'). No extension is inferred or appended; "
+            "for classes use the iris_*_class tools as well.")}
         write_props = {
-            "auto_checkout": {"type": "boolean", "default": True, "description": "Si es verdadero (por defecto), realiza un Checkout de CCR del documento antes de guardarlo (solo con ccr_id explicito)."},
-            "ccr_id": {"type": "string", "default": None, "description": "CCR ID opcional (ej: 'SITE0757'). Con auto_checkout=true el checkout se hace bajo este CCR (guard same-process CONTROLLED_ACTIVE) y el guardado queda tracked. Sin ccr_id el guardado solo es admisible en un namespace con CCR ABSENT y package catalogado."},
-            "clean_ascii": {"type": "boolean", "default": False, "description": "Si es verdadero, normaliza caracteres especiales a ASCII puro antes del envio. ADVERTENCIA: transformacion con PERDIDA. Desactivado por defecto."},
-            "verify": {"type": "boolean", "default": True, "description": "Si es verdadero (por defecto), tras el PUT relee el documento y verifica que coincida con lo enviado (tolerando whitespace final). Si no coincide, aborta SIN compilar."},
-            "compile": {"type": "boolean", "default": False, "description": "Si es verdadero, compila el documento inmediatamente despues de guardarlo (en .inc recompila dependientes segun IRIS)."},
+            "auto_checkout": {"type": "boolean", "default": True, "description": "If true (the default), performs a CCR checkout of the document before saving it (only with an explicit ccr_id)."},
+            "ccr_id": {"type": "string", "default": None, "description": "Optional CCR ID (e.g. 'SITE0757'). With auto_checkout=true the checkout is made under this CCR (same-process CONTROLLED_ACTIVE guard) and the save is tracked. Without ccr_id the save is admissible only in a namespace with CCR ABSENT and a cataloged package."},
+            "clean_ascii": {"type": "boolean", "default": False, "description": "If true, normalizes special characters to pure ASCII before sending. WARNING: LOSSY transformation. Disabled by default."},
+            "verify": {"type": "boolean", "default": True, "description": "If true (the default), after the PUT it rereads the document and verifies that it matches what was sent (tolerating trailing whitespace). If it does not match, it aborts WITHOUT compiling."},
+            "compile": {"type": "boolean", "default": False, "description": "If true, compiles the document immediately after saving it (for .inc it recompiles dependents according to IRIS)."},
         }
 
         def tool(name, description, extra_props=None, extra_required=()):
@@ -4434,24 +4780,24 @@ class IRISMCPServer:
 
         return [
             tool("iris_get_document",
-                 "Recupera el codigo fuente de un documento por nombre exacto con extension: include files (.inc), rutinas (.mac/.int), clases (.cls). Gate READ."),
+                 "Retrieves the source of a document by exact name with extension: include files (.inc), routines (.mac/.int), classes (.cls). READ gate."),
             tool("iris_save_document",
-                 "Guarda el contenido completo de un documento (.inc/.mac/.int/.cls) con auto-checkout CCR opcional, verificacion round-trip y compilacion opcional. Mismos gates que iris_save_class; el package se evalua sobre el nombre sin extension.",
-                 {"content": {"type": "string", "description": "Contenido completo del documento."}, **write_props},
+                 "Saves the complete content of a document (.inc/.mac/.int/.cls) with optional CCR auto-checkout, round-trip verification and optional compilation. Same gates as iris_save_class; the package is evaluated on the name without the extension.",
+                 {"content": {"type": "string", "description": "Complete content of the document."}, **write_props},
                  ("content",)),
             tool("iris_save_document_from_file",
-                 "Guarda un documento (.inc/.mac/.int/.cls) leyendo su fuente byte a byte de un archivo local en la maquina del MCP.",
-                 {"file_path": {"type": "string", "description": "Ruta absoluta al archivo local (UTF-8)."}, **write_props},
+                 "Saves a document (.inc/.mac/.int/.cls) by reading its source byte by byte from a local file on the MCP machine.",
+                 {"file_path": {"type": "string", "description": "Absolute path to the local file (UTF-8)."}, **write_props},
                  ("file_path",)),
             tool("iris_patch_document",
-                 "Parche quirurgico a un documento existente (.inc/.mac/.int/.cls): descarga la fuente, reemplaza EXACTAMENTE old_string por new_string (expected_count ocurrencias) y guarda. Si el conteo no coincide aborta SIN escribir.",
-                 {"old_string": {"type": "string", "description": "Texto literal exacto a reemplazar."},
-                  "new_string": {"type": "string", "description": "Texto que reemplaza a old_string."},
-                  "expected_count": {"type": "integer", "default": 1, "description": "Ocurrencias esperadas de old_string (por defecto 1)."},
+                 "Surgical patch to an existing document (.inc/.mac/.int/.cls): downloads the source, replaces old_string with new_string EXACTLY (expected_count occurrences) and saves. If the count does not match it aborts WITHOUT writing.",
+                 {"old_string": {"type": "string", "description": "Exact literal text to replace."},
+                  "new_string": {"type": "string", "description": "Text that replaces old_string."},
+                  "expected_count": {"type": "integer", "default": 1, "description": "Expected occurrences of old_string (default 1)."},
                   **write_props},
                  ("old_string", "new_string")),
             tool("iris_delete_document",
-                 "Elimina de forma permanente un documento (.inc/.mac/.int/.cls) del namespace. CODE WRITE sin CCR: solo admisible en ruta ABSENT catalogada."),
+                 "Permanently deletes a document (.inc/.mac/.int/.cls) from the namespace. CODE WRITE without CCR: admissible only on a cataloged ABSENT route."),
         ]
 
     # ------------------------------------------------------------------
@@ -4464,18 +4810,18 @@ class IRISMCPServer:
     def _checkout_before_write(client, doc_name, arguments, failure_verb):
         """Returns (tracked_ccr, checkout_msg) or an error result dict."""
         if not arguments.get("auto_checkout", True):
-            return None, "No intentado"
+            return None, "Not attempted"
         ccr_id_param = arguments.get("ccr_id")
         if not ccr_id_param:
-            return None, "No realizado: sin ccr_id explicito no hay checkout CCR (solo ruta ABSENT catalogada)"
+            return None, "Not performed: without an explicit ccr_id there is no CCR checkout (cataloged ABSENT route only)"
         log_debug(f"Attempting CCR checkout for {doc_name} under CCR {ccr_id_param}...")
         try:
             success_co, msg_co = client.ccr_checkout(None, ccr_id_param, document_name=doc_name)
         except Exception as ce:
             log_debug(f"CCR checkout for {doc_name} under {ccr_id_param} failed: {ce}")
-            return {"isError": True, "content": [{"type": "text", "text": f"Checkout CCR fallo; no se {failure_verb} `{doc_name}`: {ce}"}]}
+            return {"isError": True, "content": [{"type": "text", "text": f"CCR checkout failed; did not {failure_verb} `{doc_name}`: {ce}"}]}
         if not success_co:
-            return {"isError": True, "content": [{"type": "text", "text": f"Checkout CCR rechazado; no se {failure_verb} `{doc_name}`: {msg_co}"}]}
+            return {"isError": True, "content": [{"type": "text", "text": f"CCR checkout rejected; did not {failure_verb} `{doc_name}`: {msg_co}"}]}
         log_debug(f"CCR checkout for {doc_name} under {ccr_id_param} succeeded.")
         return ccr_id_param, f"Exito bajo CCR {ccr_id_param}: {msg_co}"
 
@@ -4486,15 +4832,15 @@ class IRISMCPServer:
         except Exception as coe:
             return f"\n\n\u274c **Error al compilar**: {str(coe)}"
         errors = res.get("status", {}).get("errors", [])
-        summary = res.get("status", {}).get("summary", "Compilado")
+        summary = res.get("status", {}).get("summary", "Compiled")
         if errors:
-            text = f"\n\n\u26a0\ufe0f **Compilacion fallo**: {summary}\n"
+            text = f"\n\n\u26a0\ufe0f **Compilation failed**: {summary}\n"
             for err in errors:
                 text += f"- \u274c {json.dumps(err)}\n"
             return text
-        return f"\n\n\u2705 **Compilado con exito**: {summary}"
+        return f"\n\n\u2705 **Compiled successfully**: {summary}"
 
-    def _write_document(self, client, doc_name, content, arguments, failure_verb="guardo",
+    def _write_document(self, client, doc_name, content, arguments, failure_verb="save",
                         header_lines=()):
         """Save `content` (str) into doc_name through the CODE WRITE gates.
 
@@ -4518,17 +4864,17 @@ class IRISMCPServer:
 
         detail_msg = "".join(line + "\n" for line in header_lines)
         detail_msg += (
-            f"**Guardado**: {success}\n**Detalle**: {msg}\n"
-            f"**Verificacion round-trip**: {'Activada' if verify else 'Desactivada'}\n"
-            f"**Checkout CCR**: {checkout_msg}\n"
-            f"**Limpieza ASCII**: {'Aplicada' if clean_ascii else 'Desactivada'}"
+            f"**Saved**: {success}\n**Detail**: {msg}\n"
+            f"**Round-trip verification**: {'enabled' if verify else 'disabled'}\n"
+            f"**CCR checkout**: {checkout_msg}\n"
+            f"**ASCII cleanup**: {'applied' if clean_ascii else 'disabled'}"
         )
         compile_after = arguments.get("compile", False)
         if success and compile_after:
             log_debug(f"Compiling {doc_name} immediately after write...")
             detail_msg += self._compile_after_write(client, doc_name, tracked_ccr)
         elif compile_after and not success:
-            detail_msg += "\n\n\u23f9\ufe0f **Compilacion OMITIDA**: el guardado/verificacion no fue exitoso."
+            detail_msg += "\n\n\u23f9\ufe0f **Compilation SKIPPED**: the save/verification did not succeed."
         return {"isError": not success, "content": [{"type": "text", "text": detail_msg}]}
 
     def _read_local_source(self, file_path):
@@ -4541,7 +4887,7 @@ class IRISMCPServer:
             with open(file_path, "r", encoding="utf-8") as f:
                 return f.read()
         except Exception as fe:
-            return {"isError": True, "content": [{"type": "text", "text": f"\u274c No se pudo leer {file_path}: {fe}"}]}
+            return {"isError": True, "content": [{"type": "text", "text": f"\u274c Could not read {file_path}: {fe}"}]}
 
     def _patch_document(self, client, doc_name, arguments):
         old_string = arguments.get("old_string")
@@ -4554,16 +4900,16 @@ class IRISMCPServer:
         try:
             content_lines = client.get_document(doc_name)
         except Exception as ge:
-            return {"isError": True, "content": [{"type": "text", "text": f"\u274c No se pudo descargar {doc_name}: {ge}"}]}
+            return {"isError": True, "content": [{"type": "text", "text": f"\u274c Could not download {doc_name}: {ge}"}]}
         content = "\n".join(content_lines)
         actual = content.count(old_string)
         if actual != expected_count:
             return {"isError": True, "content": [{"type": "text", "text": (
-                f"\u26a0\ufe0f Parche abortado (no se guardo nada). `old_string` aparece {actual} vez/veces en {doc_name}, "
-                f"se esperaban {expected_count}. Agrega mas contexto para que sea unico o ajusta `expected_count`.")}]}
+                f"\u26a0\ufe0f Patch aborted (nothing was saved). `old_string` appears {actual} time(s) in {doc_name}, "
+                f"{expected_count} expected. Add more context to make it unique or adjust `expected_count`.")}]}
         content = content.replace(old_string, new_string)
-        return self._write_document(client, doc_name, content, arguments, failure_verb="aplico el parche a",
-                                    header_lines=(f"**Parche aplicado**: {actual} reemplazo(s)",))
+        return self._write_document(client, doc_name, content, arguments, failure_verb="patch",
+                                    header_lines=(f"**Patch applied**: {actual} replacement(s)",))
 
     def handle_tool_call(self, name, arguments):
         try:
@@ -4611,6 +4957,27 @@ class IRISMCPServer:
                         arguments["class_name"] = AtelierClient._class_document_name(arguments.get("class_name"))
                 else:
                     AtelierClient._validate_class_name(arguments.get("class_name"))
+                    if name == "iris_describe_class" and arguments["class_name"].endswith(".cls"):
+                        raise LocalPolicyError("iris_describe_class requires a class name without .cls.")
+            if name == "iris_scan_namespace":
+                package_prefix = arguments.get("package_prefix") or "Custom"
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*", package_prefix):
+                    raise LocalPolicyError("package_prefix must be a plain non-core package name.")
+                limit = arguments.get("limit", 200)
+                if type(limit) is not int or not 1 <= limit <= 1000:
+                    raise LocalPolicyError("limit must be an integer between 1 and 1000.")
+            if name == "iris_ccr_download_load" and "verify_documents" in arguments:
+                verify_documents = arguments.get("verify_documents")
+                if not verify_documents:
+                    raise LocalPolicyError("verify_documents must be a non-empty array when provided.")
+                if arguments.get("load", True) is False:
+                    raise LocalPolicyError("verify_documents requires load=true.")
+                validated_documents = [
+                    AtelierClient._validate_document_name(document)
+                    for document in verify_documents
+                ]
+                if len({document.casefold() for document in validated_documents}) != len(validated_documents):
+                    raise LocalPolicyError("verify_documents must not contain case-insensitive duplicates.")
             log_debug(f"Executing tool: {name}; arguments <redacted>")
             self.load_configuration()
             if name == "iris_list_servers":
@@ -4618,9 +4985,9 @@ class IRISMCPServer:
                 
                 output = "# Servidores InterSystems IRIS Configuraciones\n\n"
                 if not result_servers:
-                    output += "No hay servidores configurados: agrega entradas en `~/.iris-mcp/servers.json` o en `.iris-mcp/config.json` del proyecto (`isc-ai config add-server`)"
+                    output += "No servers configured: add entries to `~/.iris-mcp/servers.json` or to the project's `.iris-mcp/config.json` (`isc-ai config add-server`)"
                 else:
-                    output += "| ID | Target | Estado | Host | Puerto | Path Prefix | Namespace | Detalle |\n"
+                    output += "| ID | Target | State | Host | Port | Path prefix | Namespace | Detail |\n"
                     output += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
                     for s in result_servers:
                         fields = (s.get(key, "—") for key in (
@@ -4701,8 +5068,8 @@ class IRISMCPServer:
                 list_itemsets_ccr_id = arguments.get("ccr_id") or server_config.get("ccr_id") or os.environ.get("IRIS_CCR_ID")
                 if not list_itemsets_ccr_id:
                     raise LocalPolicyError(
-                        "El parámetro 'ccr_id' es requerido. Proporciónalo, configúralo en "
-                        "la configuracion de servidores ('config add-server') bajo 'ccr_id', o define IRIS_CCR_ID."
+                        "The 'ccr_id' parameter is required. Pass it, set it in the server "
+                        "configuration ('config add-server') under 'ccr_id', or define IRIS_CCR_ID."
                     )
             
             # Dynamic namespace check (skip for list tools)
@@ -4718,11 +5085,11 @@ class IRISMCPServer:
                         "content": [{
                             "type": "text",
                             "text": (
-                                f"⚠️ **Múltiples Namespaces de Trabajo Detectados**\n\n"
-                                f"No se ha especificado el parámetro `namespace` en la llamada a la herramienta para el servidor `{server_id}`, "
-                                f"y este servidor contiene más de un namespace de trabajo activo.\n\n"
-                                f"Por favor, selecciona uno de los siguientes namespaces para proceder:\n{ns_list_str}\n\n"
-                                f"Vuelve a ejecutar la herramienta especificando el namespace deseado en el parámetro `namespace`."
+                                f"⚠️ **Multiple working namespaces detected**\n\n"
+                                f"The tool call for server `{server_id}` did not specify the `namespace` parameter, "
+                                f"and this server holds more than one active working namespace.\n\n"
+                                f"Pick one of these namespaces to proceed:\n{ns_list_str}\n\n"
+                                f"Run the tool again with the namespace you want in the `namespace` parameter."
                             )
                         }]
                     }
@@ -4774,7 +5141,7 @@ class IRISMCPServer:
                 
                 output = f"### Resultados SQL en {server_id} ({client.namespace})\n"
                 if not results:
-                    output += "La consulta se ejecutó con éxito pero no devolvió filas.\n"
+                    output += "The query ran successfully but returned no rows.\n"
                 else:
                     headers = list(results[0].keys())
                     output += "\n| " + " | ".join(headers) + " |\n"
@@ -4789,7 +5156,7 @@ class IRISMCPServer:
                                 cells.append(str(val).replace("|", "\\|").replace("\n", " "))
                         output += "| " + " | ".join(cells) + " |\n"
                     if len(results) > 100:
-                        output += f"\n*(Mostrando las primeras 100 de {len(results)} filas devueltas)*\n"
+                        output += f"\n*(Showing the first 100 of {len(results)} filas devueltas)*\n"
                 return {"content": [{"type": "text", "text": output}]}
                 
             elif name == "iris_get_class":
@@ -4829,7 +5196,7 @@ class IRISMCPServer:
                 content = self._read_local_source(file_path)
                 if isinstance(content, dict):
                     return content
-                header = (f"**Origen**: `{file_path}` ({len(content.splitlines())} lineas)",)
+                header = (f"**Source**: `{file_path}` ({len(content.splitlines())} lineas)",)
                 return self._write_document(client, class_name, content, arguments, header_lines=header)
 
             elif name == "iris_patch_class":
@@ -4840,24 +5207,24 @@ class IRISMCPServer:
                 
                 res = client.compile_document(class_name)
                 errors = res.get("status", {}).get("errors", [])
-                summary = res.get("status", {}).get("summary", "Compilado")
+                summary = res.get("status", {}).get("summary", "Compiled")
                 console = res.get("console", [])
                 
-                output = f"### Compilación de {class_name} en {server_id}\n"
+                output = f"### Compilation of {class_name} on {server_id}\n"
                 output += f"**Resumen**: {summary}\n"
                 if errors:
-                    output += "\n#### Errores de compilación:\n"
+                    output += "\n#### Compilation errors:\n"
                     for err in errors:
                         output += f"- ❌ {json.dumps(err)}\n"
                 if console:
-                    output += "\n#### Consola de compilación:\n```text\n"
+                    output += "\n#### Compilation console:\n```text\n"
                     output += "\n".join(console)
                     output += "\n```"
                 return {"content": [{"type": "text", "text": output}]}
                 
             elif name == "iris_delete_class":
                 success, msg = client.delete_document(arguments.get("class_name"))
-                return {"isError": not success, "content": [{"type": "text", "text": f"**Eliminado**: {success}\n**Detalle**: {msg}"}]}
+                return {"isError": not success, "content": [{"type": "text", "text": f"**Deleted**: {success}\n**Detalle**: {msg}"}]}
 
             elif name == "iris_get_document":
                 doc_name = arguments.get("document_name")
@@ -4874,7 +5241,7 @@ class IRISMCPServer:
                 content = self._read_local_source(file_path)
                 if isinstance(content, dict):
                     return content
-                header = (f"**Origen**: `{file_path}` ({len(content.splitlines())} lineas)",)
+                header = (f"**Source**: `{file_path}` ({len(content.splitlines())} lineas)",)
                 return self._write_document(client, doc_name, content, arguments, header_lines=header)
 
             elif name == "iris_patch_document":
@@ -4882,7 +5249,7 @@ class IRISMCPServer:
 
             elif name == "iris_delete_document":
                 success, msg = client.delete_document(arguments.get("document_name"))
-                return {"isError": not success, "content": [{"type": "text", "text": f"**Eliminado**: {success}\n**Detalle**: {msg}"}]}
+                return {"isError": not success, "content": [{"type": "text", "text": f"**Deleted**: {success}\n**Detalle**: {msg}"}]}
                 
             elif name == "iris_list_classes":
                 package_prefix = arguments.get("package_prefix", "Custom")
@@ -4894,15 +5261,37 @@ class IRISMCPServer:
                 """
                 results = client.run_query(query, [package_prefix + "%"])
                 
-                output = f"### Clases en {server_id} con prefijo `{package_prefix}`\n\n"
+                output = f"### Clases en {server_id} with prefix `{package_prefix}`\n\n"
                 if not results:
-                    output += f"No se encontraron clases personalizadas con el prefijo `{package_prefix}`."
+                    output += f"No custom classes found with prefix `{package_prefix}`."
                 else:
-                    output += "| Nombre de Clase | Abstract | Compile After | Modificado en Servidor |\n"
+                    output += "| Class name | Abstract | Compile After | Changed on server |\n"
                     output += "| :--- | :--- | :--- | :--- |\n"
                     for r in results:
                         output += f"| `{r.get('Name')}` | {'Sí' if r.get('Abstract') else 'No'} | `{r.get('CompileAfter') or ''}` | `{r.get('TimeChanged')}` |\n"
                 return {"content": [{"type": "text", "text": output}]}
+
+            elif name == "iris_describe_class":
+                class_name = arguments.get("class_name")
+                record = self._describe_class(client, class_name, bool(arguments.get("include_inherited", False)))
+                return {"structuredContent": record, "content": [{"type": "text", "text": self._render_class_description(record)}]}
+
+            elif name == "iris_scan_namespace":
+                package_prefix = arguments.get("package_prefix") or "Custom"
+                limit = arguments.get("limit", 200)
+                rows = self._scan_namespace(client, package_prefix, bool(arguments.get("persistent_only", False)), limit)
+                output = f"### Inventory of `{package_prefix}` on {server_id} ({client.namespace}): {len(rows)} class(es)\n\n"
+                if not rows:
+                    output += "No classes found with that prefix (core excluded)."
+                else:
+                    output += "| Class | Class type | Direct role | Superclass | Props | SQL table | Changed |\n| :--- | :--- | :--- | :--- | ---: | :--- | :--- |\n"
+                    for r in rows:
+                        output += "| " + " | ".join(_markdown_table_cell(r.get(k, "")) for k in (
+                            "name", "class_type", "direct_role", "super", "property_count", "sql_table", "time_changed")) + " |\n"
+                    if len(rows) >= limit:
+                        output += f"\n_Result truncated at {limit}; ajusta `package_prefix` o `limit`._"
+                return {"structuredContent": {"package_prefix": package_prefix, "classes": rows},
+                        "content": [{"type": "text", "text": output}]}
                 
             elif name == "iris_get_event_logs":
                 limit = min(int(arguments.get("limit", 20)), 100)
@@ -4914,11 +5303,11 @@ class IRISMCPServer:
                 """
                 results = client.run_query(query, [limit])
                 
-                output = f"### Últimos {limit} Errores/Advertencias en Ens_Util.Log ({server_id})\n\n"
+                output = f"### Latest {limit} errors/warnings in Ens_Util.Log ({server_id})\n\n"
                 if not results:
-                    output += "No hay errores ni advertencias registradas en el log de Ensemble recientemente."
+                    output += "No errors or warnings have been recorded in the Ensemble log recently."
                 else:
-                    output += "| ID | Fecha Log | Config Name | Tipo | Mensaje |\n"
+                    output += "| ID | Log date | Config name | Type | Message |\n"
                     output += "| :--- | :--- | :--- | :--- | :--- |\n"
                     for r in results:
                         t_val = r.get("Type")
@@ -4942,17 +5331,17 @@ class IRISMCPServer:
                 
                 results = client.run_query(sql, params)
                 
-                output = f"### Últimos {limit} mensajes del bus en Ens.MessageHeader ({server_id})\n\n"
+                output = f"### Latest {limit} bus messages in Ens.MessageHeader ({server_id})\n\n"
                 if not results:
-                    output += "No se registraron mensajes recientes en el bus."
+                    output += "No recent messages were recorded on the bus."
                 else:
-                    output += "| ID | SessionId | Fecha Creación | Origen (Source) | Destino (Target) | Estado | ¿Error? | Detalle / Descripción |\n"
+                    output += "| ID | SessionId | Created | Source | Target | State | Error? | Detail / description |\n"
                     output += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
                     for r in results:
                         err_str = r.get("Description", "")
                         if err_str and len(err_str) > 55:
                             err_str = err_str[:52] + "..."
-                        is_err = "❌ Sí" if r.get("IsError") == 1 else "✅ No"
+                        is_err = "❌ Yes" if r.get("IsError") == 1 else "✅ No"
                         st_code = r.get("Status")
                         st_label = status_map.get(st_code, str(st_code))
                         output += f"| `{r.get('ID')}` | `{r.get('SessionId')}` | `{r.get('TimeCreated')}` | `{r.get('SourceConfigName')}` | `{r.get('TargetConfigName')}` | `{st_label}` | {is_err} | {err_str} |\n"
@@ -4965,7 +5354,7 @@ class IRISMCPServer:
                 except (ValueError, TypeError):
                     return {
                         "isError": True,
-                        "content": [{"type": "text", "text": f"SessionId inválido: '{session_id}'. Debe ser un número entero."}]
+                        "content": [{"type": "text", "text": f"Invalid SessionId: '{session_id}'. It must be an integer."}]
                     }
                 
                 include_logs = arguments.get("include_logs", True)
@@ -4984,19 +5373,19 @@ class IRISMCPServer:
                     try:
                         logs = client.run_query(sql_log, [session_id_num])
                     except Exception as e:
-                        log_debug(f"Error consultando Ens_Util.Log para SessionId {session_id_num}: {e}")
+                        log_debug(f"Error querying Ens_Util.Log for SessionId {session_id_num}: {e}")
                 
                 if not messages and not logs:
                     return {
                         "content": [{
                             "type": "text",
-                            "text": f"No se encontraron mensajes ni registros de eventos en Ensemble para el `SessionId` = `{session_id_num}` en el servidor `{server_id}` ({client.namespace})."
+                            "text": f"No Ensemble messages or event records were found for `SessionId` = `{session_id_num}` on server `{server_id}` ({client.namespace})."
                         }]
                     }
                 
                 # Construccion del Reporte
                 has_errors = any(m.get("IsError") for m in messages) or any(l.get("Type") in [1, 2] for l in logs)
-                status_icon = "❌ CON ERRORES" if has_errors else "✅ COMPLETADO"
+                status_icon = "❌ CON ERRORES" if has_errors else "✅ COMPLETED"
                 
                 output = f"## 🔍 Traza Visual Ensemble (SessionId: `{session_id_num}`) - {status_icon}\n\n"
                 output += f"- **Servidor**: `{server_id}`\n"
@@ -5005,7 +5394,7 @@ class IRISMCPServer:
                 
                 if messages:
                     output += "### ✉️ Flujo de Mensajes (`Ens.MessageHeader`)\n\n"
-                    output += "| Msg ID | Hora Creación | Origen (Source) | Destino (Target) | Clase Cuerpo | Body ID | Estado | ¿Error? | Detalle / Excepción |\n"
+                    output += "| Msg ID | Created | Source | Target | Body class | Body ID | State | Error? | Detail / exception |\n"
                     output += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
                     
                     for m in messages:
@@ -5017,7 +5406,7 @@ class IRISMCPServer:
                         b_id = m.get("MessageBodyId") or ""
                         st_code = m.get("Status")
                         st_label = status_map.get(st_code, str(st_code))
-                        is_err = "❌ Sí" if m.get("IsError") else "✅ No"
+                        is_err = "❌ Yes" if m.get("IsError") else "✅ No"
                         desc = m.get("Description") or ""
                         if desc and len(desc) > 60:
                             desc = desc[:57] + "..."
@@ -5029,7 +5418,7 @@ class IRISMCPServer:
                 
                 if logs:
                     output += "### 📋 Registros del Event Log (`Ens_Util.Log`)\n\n"
-                    output += "| Log ID | Hora Log | Config Componente | Tipo | Mensaje |\n"
+                    output += "| Log ID | Log time | Component config | Type | Message |\n"
                     output += "| :--- | :--- | :--- | :--- | :--- |\n"
                     log_types = {1: "Assert ❌", 2: "Error ❌", 3: "Warning ⚠️", 4: "Info ℹ️", 5: "Trace 🔍"}
                     for l in logs:
@@ -5045,7 +5434,7 @@ class IRISMCPServer:
                 
                 # 3. Opcional: Extraer Cuerpos de Mensaje
                 if include_bodies and messages:
-                    output += "### 📦 Inspección de Cuerpos de Mensaje (`MessageBody`)\n\n"
+                    output += "### 📦 Message body inspection (`MessageBody`)\n\n"
                     fetched_bodies = 0
                     for m in messages:
                         b_class = m.get("MessageBodyClassName")
@@ -5071,17 +5460,17 @@ class IRISMCPServer:
                                 q_body = f"SELECT TOP 1 * FROM {fallback_table} WHERE ID = ?"
                                 body_rows = client.run_query(q_body, [b_id])
                             except Exception as e_body:
-                                log_debug(f"No se pudo consultar el cuerpo {b_class} ID {b_id}: {e_body}")
+                                log_debug(f"Could not query body {b_class} ID {b_id}: {e_body}")
                         
                         if body_rows:
                             fetched_bodies += 1
                             b_data = body_rows[0]
-                            output += f"#### Mensaje `{m_id}` -> Body `{b_class}` (ID `{b_id}`)\n```json\n"
+                            output += f"#### Message `{m_id}` -> Body `{b_class}` (ID `{b_id}`)\n```json\n"
                             output += json.dumps(b_data, indent=2, ensure_ascii=False, default=str)
                             output += "\n```\n\n"
                     
                     if fetched_bodies == 0:
-                        output += "*No se pudieron extraer los cuerpos de mensaje o la tabla no es directamente consultable vía SQL.*\n\n"
+                        output += "*Could not extract the message bodies, or the table is not directly queryable over SQL.*\n\n"
                 
                 return {"content": [{"type": "text", "text": output}]}
 
@@ -5097,12 +5486,12 @@ class IRISMCPServer:
                     parts = raw.split("|")
                     active_name = parts[0] if parts else ""
                     state_num = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else -1
-                    state_map = {0: "Stopped (Detenido)", 1: "Running (En Ejecución)", 2: "Suspended (Suspendido)", 3: "Troubled (Con Errores/Parcial)"}
-                    state_label = state_map.get(state_num, f"Desconocido ({state_num})")
+                    state_map = {0: "Stopped", 1: "Running", 2: "Suspended", 3: "Troubled (errors/partial)"}
+                    state_label = state_map.get(state_num, f"Unknown ({state_num})")
                     
-                    output = f"### Estado de Producción Ensemble en {server_id} ({client.namespace})\n\n"
-                    output += f"- **Producción Activa**: `{active_name or 'Ninguna'}`\n"
-                    output += f"- **Estado**: **{state_label}**\n"
+                    output = f"### Ensemble production status on {server_id} ({client.namespace})\n\n"
+                    output += f"- **Active production**: `{active_name or 'none'}`\n"
+                    output += f"- **State**: **{state_label}**\n"
                     return {"content": [{"type": "text", "text": output}]}
 
                 allowed, reason = client.is_runtime_operation_allowed()
@@ -5111,7 +5500,7 @@ class IRISMCPServer:
                         "isError": True,
                         "content": [{
                             "type": "text",
-                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Acción '{action}' denegada en la producción de '{server_id}' ({client.namespace}): {reason}."
+                            "text": f"⚠️ [PRODUCTION PROTECTION] Action '{action}' denied on the production of '{server_id}' ({client.namespace}): {reason}."
                         }]
                     }
 
@@ -5120,27 +5509,27 @@ class IRISMCPServer:
                         code_get = 'Set sc = ##class(Ens.Director).GetProductionStatus(.pName, .pState) Write pName, !'
                         prod_name = client.execute_runtime_code(code_get).strip()
                         if not prod_name:
-                            return {"isError": True, "content": [{"type": "text", "text": "No se especificó 'production_name' y no hay producción previamente registrada."}]}
+                            return {"isError": True, "content": [{"type": "text", "text": "No 'production_name' was given and no production was previously recorded."}]}
                     
                     code_start = f'Set sc = ##class(Ens.Director).StartProduction("{AtelierClient._escape_cos(prod_name)}") If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
                     res_err = client.execute_runtime_code(code_start).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error iniciando producción '{prod_name}': {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"✅ Producción '{prod_name}' iniciada con éxito en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error starting production '{prod_name}': {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"✅ Production '{prod_name}' started successfully on {server_id} ({client.namespace})."}]}
 
                 elif action == "stop":
                     code_stop = f'Set sc = ##class(Ens.Director).StopProduction({timeout_val}, {force_val}) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
                     res_err = client.execute_runtime_code(code_stop).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error deteniendo producción: {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"🛑 Producción detenida con éxito en {server_id} ({client.namespace}) (Timeout: {timeout_val}s, Force: {force_val})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error stopping production: {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"🛑 Production stopped successfully on {server_id} ({client.namespace}) (Timeout: {timeout_val}s, Force: {force_val})."}]}
 
                 elif action == "restart":
                     code_restart = f'Set sc = ##class(Ens.Director).RestartProduction({timeout_val}, {force_val}) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
                     res_err = client.execute_runtime_code(code_restart).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error reiniciando producción: {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"🔄 Producción reiniciada con éxito en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error restarting production: {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"🔄 Production restarted successfully on {server_id} ({client.namespace})."}]}
 
             elif name == "iris_ensemble_component_control":
                 action = arguments.get("action")
@@ -5156,19 +5545,19 @@ class IRISMCPServer:
                     sql_items += "ORDER BY Name"
                     items = client.run_query(sql_items, params)
 
-                    output = f"### Componentes de Producción en {server_id} ({client.namespace})\n\n"
+                    output = f"### Production components on {server_id} ({client.namespace})\n\n"
                     if not items:
-                        output += "No se encontraron componentes de producción registrados."
+                        output += "No registered production components were found."
                     else:
-                        output += "| Componente | Habilitado | Clase Host | Pool Size | Categoría | Producción |\n"
+                        output += "| Component | Enabled | Host class | Pool size | Category | Production |\n"
                         output += "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
                         for it in items:
-                            en_str = "✅ Sí" if it.get("Enabled") else "❌ No"
+                            en_str = "✅ Yes" if it.get("Enabled") else "❌ No"
                             output += f"| `{it.get('Name')}` | {en_str} | `{it.get('ClassName')}` | `{it.get('PoolSize')}` | `{it.get('Category') or ''}` | `{it.get('Production')}` |\n"
                     return {"content": [{"type": "text", "text": output}]}
 
                 if not comp_name:
-                    return {"isError": True, "content": [{"type": "text", "text": f"Se requiere 'component_name' para la acción '{action}'."}]}
+                    return {"isError": True, "content": [{"type": "text", "text": f"'component_name' is required for action '{action}'."}]}
 
                 allowed, reason = client.is_runtime_operation_allowed()
                 if not allowed:
@@ -5176,7 +5565,7 @@ class IRISMCPServer:
                         "isError": True,
                         "content": [{
                             "type": "text",
-                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Acción '{action}' en componente '{comp_name}' denegada en '{server_id}' ({client.namespace}): {reason}."
+                            "text": f"⚠️ [PRODUCTION PROTECTION] Action '{action}' en componente '{comp_name}' denied on '{server_id}' ({client.namespace}): {reason}."
                         }]
                     }
 
@@ -5185,22 +5574,22 @@ class IRISMCPServer:
                     code_en = f'Set sc = ##class(Ens.Director).EnableConfigItem("{escaped_comp}", 1) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
                     res_err = client.execute_runtime_code(code_en).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error habilitando componente '{comp_name}': {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"✅ Componente '{comp_name}' habilitado con éxito en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error enabling component '{comp_name}': {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"✅ Component '{comp_name}' enabled successfully on {server_id} ({client.namespace})."}]}
 
                 elif action == "disable":
                     code_dis = f'Set sc = ##class(Ens.Director).EnableConfigItem("{escaped_comp}", 0) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
                     res_err = client.execute_runtime_code(code_dis).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error deshabilitando componente '{comp_name}': {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"🛑 Componente '{comp_name}' deshabilitado con éxito en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error disabling component '{comp_name}': {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"🛑 Component '{comp_name}' disabled successfully on {server_id} ({client.namespace})."}]}
 
                 elif action == "restart":
                     code_rst = f'Set sc = ##class(Ens.Director).EnableConfigItem("{escaped_comp}", 0) If \'$$$ISOK(sc) {{ Write "disable: ", $System.Status.GetOneErrorText(sc), ! }} Hang 0.5 Set sc2 = ##class(Ens.Director).EnableConfigItem("{escaped_comp}", 1) If \'$$$ISOK(sc2) {{ Write "enable: ", $System.Status.GetOneErrorText(sc2), ! }}'
                     res_err = client.execute_runtime_code(code_rst).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error reiniciando componente '{comp_name}': {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"🔄 Componente '{comp_name}' reiniciado con éxito en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error restarting component '{comp_name}': {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"🔄 Component '{comp_name}' restarted successfully on {server_id} ({client.namespace})."}]}
 
             elif name == "iris_ensemble_default_settings":
                 action = arguments.get("action")
@@ -5233,9 +5622,9 @@ class IRISMCPServer:
 
                     output = f"### System Default Settings en {server_id} ({client.namespace})\n\n"
                     if not rows:
-                        output += "No hay configuraciones por defecto registradas que coincidan con el filtro."
+                        output += "No default settings matching the filter are registered."
                     else:
-                        output += "| ID | Producción | Componente / Item | Clase Host | Setting | Valor | Desplegable |\n"
+                        output += "| ID | Production | Component / item | Host class | Setting | Value | Deployable |\n"
                         output += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
                         for r in rows:
                             dep_str = "Sí" if r.get("Deployable") else "No"
@@ -5248,13 +5637,13 @@ class IRISMCPServer:
                         "isError": True,
                         "content": [{
                             "type": "text",
-                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Acción '{action}' en Default Settings denegada en '{server_id}' ({client.namespace}): {reason}."
+                            "text": f"⚠️ [PRODUCTION PROTECTION] Action '{action}' on default settings denied on '{server_id}' ({client.namespace}): {reason}."
                         }]
                     }
 
                 if action == "set":
                     if not setting_name or setting_val is None:
-                        return {"isError": True, "content": [{"type": "text", "text": "Se requieren 'setting_name' y 'setting_value' para guardar un Default Setting."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": "'setting_name' and 'setting_value' are required to save a default setting."}]}
                     
                     esc_p = AtelierClient._escape_cos(prod_name or "*")
                     esc_i = AtelierClient._escape_cos(item_name or "*")
@@ -5272,18 +5661,18 @@ class IRISMCPServer:
                     )
                     res_err = client.execute_runtime_code(code_set).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error guardando Default Setting: {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"✅ Default Setting `{setting_name}` = `{setting_val}` guardado con éxito para Item `{item_name}` en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error saving default setting: {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"✅ Default Setting `{setting_name}` = `{setting_val}` saved successfully for item `{item_name}` on {server_id} ({client.namespace})."}]}
 
                 elif action == "delete":
                     if not setting_id:
-                        return {"isError": True, "content": [{"type": "text", "text": "Se requiere 'id' para eliminar un Default Setting."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": "'id' is required to delete a default setting."}]}
                     
                     code_del = f'Set sc = ##class(Ens.Config.DefaultSettings).%DeleteId("{AtelierClient._escape_cos(str(setting_id))}") If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
                     res_err = client.execute_runtime_code(code_del).strip()
                     if res_err:
-                        return {"isError": True, "content": [{"type": "text", "text": f"Error eliminando Default Setting ID {setting_id}: {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"🗑️ Default Setting ID `{setting_id}` eliminado con éxito en {server_id} ({client.namespace})."}]}
+                        return {"isError": True, "content": [{"type": "text", "text": f"Error deleting default setting ID {setting_id}: {res_err}"}]}
+                    return {"content": [{"type": "text", "text": f"🗑️ Default Setting ID `{setting_id}` deleted successfully on {server_id} ({client.namespace})."}]}
 
             elif name == "iris_ensemble_queue_control":
                 action = arguments.get("action")
@@ -5303,11 +5692,11 @@ class IRISMCPServer:
                     raw_q = client.execute_runtime_code(code_q).strip()
                     lines = [l.strip() for l in raw_q.splitlines() if l.strip()]
 
-                    output = f"### Estado de Colas en Ensemble ({server_id} - {client.namespace})\n\n"
+                    output = f"### Ensemble queue status ({server_id} - {client.namespace})\n\n"
                     if not lines:
-                        output += "No hay colas activas o registradas con mensajes pendientes."
+                        output += "No active or registered queues have pending messages."
                     else:
-                        output += "| Nombre de la Cola | Mensajes Pendientes |\n"
+                        output += "| Queue name | Pending messages |\n"
                         output += "| :--- | :--- |\n"
                         for line in lines:
                             parts = line.split("|")
@@ -5328,12 +5717,12 @@ class IRISMCPServer:
                     sql_qm += "ORDER BY ID ASC"
 
                     rows = client.run_query(sql_qm, params)
-                    q_header = f" en la cola `{queue_name}`" if queue_name else " en el sistema"
+                    q_header = f" in queue `{queue_name}`" if queue_name else " in the system"
                     output = f"### Mensajes Encolados{q_header} ({server_id} - {client.namespace})\n\n"
                     if not rows:
-                        output += "No hay mensajes encolados actualmente."
+                        output += "There are no queued messages right now."
                     else:
-                        output += "| Msg ID | SessionId | Hora Creación | Origen (Source) | Destino (Target) | Estado | Descripción / Error |\n"
+                        output += "| Msg ID | SessionId | Created | Source | Target | State | Description / error |\n"
                         output += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
                         for r in rows:
                             st_code = r.get("Status")
@@ -5344,7 +5733,7 @@ class IRISMCPServer:
                     return {"content": [{"type": "text", "text": output}]}
 
                 if not msg_id:
-                    return {"isError": True, "content": [{"type": "text", "text": f"Se requiere 'message_id' para la acción '{action}'."}]}
+                    return {"isError": True, "content": [{"type": "text", "text": f"'message_id' is required for action '{action}'."}]}
 
                 allowed, reason = client.is_runtime_operation_allowed()
                 if not allowed:
@@ -5352,7 +5741,7 @@ class IRISMCPServer:
                         "isError": True,
                         "content": [{
                             "type": "text",
-                            "text": f"⚠️ [PROTECCIÓN DE PRODUCCIÓN] Acción '{action}' en mensaje ID '{msg_id}' denegada en '{server_id}' ({client.namespace}): {reason}."
+                            "text": f"⚠️ [PRODUCTION PROTECTION] Action '{action}' en mensaje ID '{msg_id}' denied on '{server_id}' ({client.namespace}): {reason}."
                         }]
                     }
 
@@ -5374,7 +5763,7 @@ class IRISMCPServer:
                         return {"isError": True, "content": [{"type": "text", "text": f"Error al re-enviar mensaje ID {msg_id_num}: {res}"}]}
                     new_id = res.split("=", 1)[1].strip()
                     target_txt = f" hacia `{new_target}`" if new_target else " (destino original)"
-                    return {"content": [{"type": "text", "text": f"✅ Mensaje ID `{msg_id_num}` re-enviado{target_txt} en {server_id} ({client.namespace}). Nuevo header: `{new_id}` (misma SessionId; usar iris_get_ensemble_trace para verificar)."}]}
+                    return {"content": [{"type": "text", "text": f"✅ Message ID `{msg_id_num}` resent{target_txt} on {server_id} ({client.namespace}). New header: `{new_id}` (same SessionId; use iris_get_ensemble_trace to verify)."}]}
 
                 elif action == "abort_message":
                     code_abort = (
@@ -5390,7 +5779,7 @@ class IRISMCPServer:
                     res_err = client.execute_runtime_code(code_abort).strip()
                     if res_err:
                         return {"isError": True, "content": [{"type": "text", "text": f"Error al abortar/desencolar mensaje ID {msg_id_num}: {res_err}"}]}
-                    return {"content": [{"type": "text", "text": f"🛑 Mensaje ID `{msg_id_num}` desencolado/abortado con éxito en {server_id} ({client.namespace})."}]}
+                    return {"content": [{"type": "text", "text": f"🛑 Message ID `{msg_id_num}` dequeued/aborted successfully on {server_id} ({client.namespace})."}]}
 
             elif name == "iris_execute_objectscript":
                 code = arguments.get("code")
@@ -5415,17 +5804,17 @@ class IRISMCPServer:
                 class_name = arguments["_document"]
                 status = client.get_ccr_status(document_name=class_name)
                 
-                output = f"### Estado de Control de Cambios (CCR) de `{class_name}` en {server_id}\n\n"
+                output = f"### Change-control (CCR) status of `{class_name}` en {server_id}\n\n"
                 if not status.get("has_sc"):
-                    output += "❌ No hay control de código de fuentes configurado en este namespace."
+                    output += "❌ No source-code control is configured in this namespace."
                 elif not status.get("instantiated"):
-                    output += "❌ El control de código de fuentes está activo pero falló la instanciación de la extensión."
+                    output += "❌ Source-code control is active but instantiating the extension failed."
                 else:
                     output += f"- **Pertenece a SC / CCR**: {'Sí' if status.get('in_sc') else 'No'}\n"
-                    output += f"- **Habilitado para Edición**: {'Sí' if status.get('editable') else 'No'}\n"
-                    output += f"- **En Estado Checkout**: {'Sí' if status.get('checked_out') else 'No'}\n"
+                    output += f"- **Editable**: {'Sí' if status.get('editable') else 'No'}\n"
+                    output += f"- **In checkout**: {'Sí' if status.get('checked_out') else 'No'}\n"
                     if status.get("user"):
-                        output += f"- **Usuario que tiene Checkout**: `{status.get('user')}`\n"
+                        output += f"- **Checkout held by**: `{status.get('user')}`\n"
                 return {"content": [{"type": "text", "text": output}]}
                 
             elif name == "iris_ccr_checkout":
@@ -5433,18 +5822,18 @@ class IRISMCPServer:
                 ccr_id = arguments.get("ccr_id") or server_config.get("ccr_id") or os.environ.get("IRIS_CCR_ID")
                 if not ccr_id:
                     raise ValueError(
-                        "El parámetro 'ccr_id' (Perforce Job) es requerido para realizar el Checkout. "
-                        "Por favor, proporciónalo en la llamada de la herramienta, configúralo en "
-                        "la configuracion de servidores ('config add-server') bajo la clave 'ccr_id' para este servidor, "
-                        "o define la variable de entorno `IRIS_CCR_ID`."
+                        "The 'ccr_id' parameter (Perforce Job) is required to perform the checkout. "
+                        "Pass it in the tool call, set it in the server "
+                        "configuration ('config add-server') under the 'ccr_id' key for this server, "
+                        "or define the `IRIS_CCR_ID` environment variable."
                     )
                 success, msg = client.ccr_checkout(None, ccr_id, document_name=class_name)
                 
                 output = f"### Solicitud de Checkout en {server_id}\n"
                 output += f"- **Documento**: `{class_name}`\n"
-                output += f"- **CCR / Descripción**: `{ccr_id}`\n"
+                output += f"- **CCR / description**: `{ccr_id}`\n"
                 if success:
-                    output += f"\n✅ **Éxito**: {msg}"
+                    output += f"\n✅ **Success**: {msg}"
                 else:
                     output += f"\n❌ **Fallo**: {msg}"
                 return {"isError": not success, "content": [{"type": "text", "text": output}]}
@@ -5454,9 +5843,9 @@ class IRISMCPServer:
                 ccr_id = arguments.get("ccr_id") or server_config.get("ccr_id") or os.environ.get("IRIS_CCR_ID")
                 if not ccr_id:
                     raise ValueError(
-                        "El parámetro 'ccr_id' es requerido para UndoCheckout: solo se revierte la fila "
-                        "pendiente que pertenece exactamente a ese CCR. Proporciónalo, configúralo en "
-                        "la configuracion de servidores ('config add-server') bajo 'ccr_id', o define IRIS_CCR_ID."
+                        "The 'ccr_id' parameter is required for UndoCheckout: only the pending row that "
+                        "belongs to exactly that CCR is reverted. Pass it, set it in the server "
+                        "configuration ('config add-server') under 'ccr_id', or define IRIS_CCR_ID."
                     )
                 success, msg = client.ccr_undocheckout(None, ccr_id, document_name=class_name)
                 
@@ -5464,7 +5853,7 @@ class IRISMCPServer:
                 output += f"- **Documento**: `{class_name}`\n"
                 output += f"- **CCR**: `{ccr_id}`\n"
                 if success:
-                    output += f"\n✅ **Éxito**: {msg}"
+                    output += f"\n✅ **Success**: {msg}"
                 else:
                     output += f"\n❌ **Fallo**: {msg}"
                 return {"isError": not success, "content": [{"type": "text", "text": output}]}
@@ -5473,12 +5862,12 @@ class IRISMCPServer:
                 ct_class = arguments.get("class_name")
                 ids = arguments.get("ids", [])
                 if not ids:
-                    return {"isError": True, "content": [{"type": "text", "text": "Se requiere al menos un ID en 'ids'."}]}
+                    return {"isError": True, "content": [{"type": "text", "text": "At least one ID is required in 'ids'."}]}
                 ccr_id = arguments.get("ccr_id") or server_config.get("ccr_id") or os.environ.get("IRIS_CCR_ID")
                 if not ccr_id or not str(ccr_id).isascii():
                     raise ValueError(
-                        "El parámetro 'ccr_id' es requerido para registrar objetos CT bajo un CCR explícito. "
-                        "Proporciónalo, configúralo en la configuracion de servidores ('config add-server') bajo 'ccr_id', o define IRIS_CCR_ID."
+                        "The 'ccr_id' parameter is required to register CT objects under an explicit CCR. "
+                        "Pass it, set it in the server configuration ('config add-server') under 'ccr_id', or define IRIS_CCR_ID."
                     )
                 
                 # TC.ChangeControl.CCR.CheckOut for each record, tracked under the explicit
@@ -5505,7 +5894,7 @@ class IRISMCPServer:
                 stripped = str(result_text).strip()
                 if not stripped.startswith("OK:"):
                     return {"isError": True, "content": [{"type": "text", "text": (
-                        f"### CheckOut CT en {server_id} ({client.namespace})\n\n❌ **Fallo**: {stripped or 'sin resultado'}"
+                        f"### CheckOut CT en {server_id} ({client.namespace})\n\n❌ **Fallo**: {stripped or 'no result'}"
                     )}]}
                 
                 # Parse result
@@ -5515,11 +5904,11 @@ class IRISMCPServer:
                 err_msgs = parts[2].replace("MSGS:", "") if len(parts) > 2 else ""
                 
                 output = f"### CheckOut CT en {server_id} ({client.namespace})\n\n"
-                output += f"- **Clase**: `{ct_class}`\n"
+                output += f"- **Class**: `{ct_class}`\n"
                 output += f"- **CCR**: `{ccr_id}`\n"
                 output += f"- **Registros procesados**: {len(ids)}\n"
                 output += f"- **Exitosos**: {ok_count}\n"
-                output += f"- **Errores**: {err_count}\n"
+                output += f"- **Errors**: {err_count}\n"
                 if err_msgs.strip():
                     output += f"\n**Errores:**\n```\n{err_msgs.strip()}\n```\n"
                 
@@ -5542,9 +5931,9 @@ class IRISMCPServer:
 
             elif name == "iris_list_namespaces":
                 namespaces = client.list_namespaces()
-                output = f"### Namespaces disponibles en `{server_id}`:\n\n"
+                output = f"### Namespaces available on `{server_id}`:\n\n"
                 if not namespaces:
-                    output += "No se pudieron recuperar los namespaces o la lista está vacía."
+                    output += "Could not retrieve the namespaces, or the list is empty."
                 else:
                     for ns in namespaces:
                         output += f"- `{ns}`\n"
@@ -5553,7 +5942,7 @@ class IRISMCPServer:
             elif name == "iris_unlock_questionnaire":
                 win_code = arguments.get("win_code")
                 if not win_code:
-                    raise ValueError("El parámetro 'win_code' es requerido.")
+                    raise ValueError("The 'win_code' parameter is required.")
                 
                 queries = [
                     ("UPDATE %notrigger SQLUser.SS_UserDefWindowControls SET CON_Generated='N' WHERE CON_ParREf->WIN_Code=?", [win_code]),
@@ -5572,7 +5961,7 @@ class IRISMCPServer:
                     except Exception:
                         results_info.append(f"Query {idx}: Error (details withheld)")
                         
-                output = f"### Desbloqueo de cuestionario `{win_code}` en {server_id} ({client.namespace})\n\n"
+                output = f"### Questionnaire unlock `{win_code}` on {server_id} ({client.namespace})\n\n"
                 output += "\n".join([f"- {res}" for res in results_info])
                 is_error = not all(res.endswith(": OK") for res in results_info)
                 return {"isError": is_error, "content": [{"type": "text", "text": output}]}
@@ -5583,22 +5972,22 @@ class IRISMCPServer:
                 
                 if not ccr_id:
                     raise ValueError(
-                        "El parámetro 'ccr_id' (Perforce Job) es requerido para realizar el Commit. "
-                        "Por favor, proporciónalo en la llamada de la herramienta, configúralo en "
-                        "la configuracion de servidores ('config add-server') bajo la clave 'ccr_id' para este servidor, "
-                        "o define la variable de entorno `IRIS_CCR_ID`."
+                        "The 'ccr_id' parameter (Perforce Job) is required to perform the commit. "
+                        "Pass it in the tool call, set it in the server "
+                        "configuration ('config add-server') under the 'ccr_id' key for this server, "
+                        "or define the `IRIS_CCR_ID` environment variable."
                     )
                 if not upload_token:
                     raise ValueError(
-                        "El parámetro 'upload_token' es requerido para realizar el Commit. "
-                        "Por favor, proporciónalo en la llamada de la herramienta, configúralo en "
-                        "la configuracion de servidores ('config add-server') bajo la clave 'upload_token' para este servidor, "
-                        "o define la variable de entorno `IRIS_CCR_TOKEN`."
+                        "The 'upload_token' parameter is required to perform the commit. "
+                        "Pass it in the tool call, set it in the server "
+                        "configuration ('config add-server') under the 'upload_token' key for this server, "
+                        "or define the `IRIS_CCR_TOKEN` environment variable."
                     )
                 
                 change_ids = arguments.get("change_ids")
                 if not isinstance(change_ids, list) or not change_ids:
-                    raise ValueError("El parámetro 'change_ids' debe ser una lista de enteros no vacía.")
+                    raise ValueError("The 'change_ids' parameter must be a non-empty list of integers.")
                 
                 log_debug(f"Triggering automated CCR Commit for Job {ccr_id} with {len(change_ids)} change IDs...")
                 try:
@@ -5608,25 +5997,25 @@ class IRISMCPServer:
                 result = AtelierClient._redact_secret(result, upload_token)
                 status, fields, detail = _classify_ccr_terminal_result(
                     result,
-                    {"commit", "direct_retry"},
+                    {"commit"},
                 )
-                output = f"### Commit CCR `{ccr_id}` en {server_id} ({client.namespace})\n\n"
+                output = f"### CCR commit `{ccr_id}` on {server_id} ({client.namespace})\n\n"
                 if status == "verified":
                     output += (
-                        "✅ **VERIFIED**: el ItemSet local aparece por nombre exacto en el central.\n\n"
-                        f"- **ItemSet local**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
+                        "✅ **VERIFIED**: the local ItemSet appears by exact name on the central server.\n\n"
+                        f"- **Local ItemSet**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
                         f"- **ItemSet central**: `{fields['server_id']}` (`{fields['server_name']}`)\n"
-                        f"- **Acción**: `{fields['action']}`"
+                        f"- **Action**: `{fields['action']}`"
                     )
                     return {"content": [{"type": "text", "text": output}]}
 
                 if status == "pending":
                     output += (
-                        "⚠️ **PENDING_VERIFICATION**: WSUpload respondió OK, pero el ItemSet aún no "
-                        "es visible en el central.\n\n"
-                        f"- **ItemSet local**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
-                        "- **NO REINTENTAR AUTOMÁTICAMENTE**: otro upload podría crear un duplicado. "
-                        "Verifica manualmente la visibilidad antes de cualquier reintento."
+                        "⚠️ **PENDING_VERIFICATION**: WSUpload replied OK, but the ItemSet is "
+                        "not visible on the central server yet.\n\n"
+                        f"- **Local ItemSet**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
+                        "- **DO NOT RETRY AUTOMATICALLY**: another upload could create a duplicate. "
+                        "Verify visibility manually before any retry."
                     )
                     return {"isError": True, "content": [{"type": "text", "text": output}]}
 
@@ -5638,26 +6027,26 @@ class IRISMCPServer:
                 limit = arguments.get("limit", 200)
                 rows = client.list_uncommitted_changes(ccr=ccr_filter, limit=limit)
 
-                header = f"### Cambios sin commitear en {server_id} ({client.namespace})"
+                header = f"### Uncommitted changes on {server_id} ({client.namespace})"
                 if ccr_filter:
-                    header += f" — filtrado por CCR `{ccr_filter}`"
+                    header += f" — filtered by CCR `{ccr_filter}`"
                 output = header + "\n\n"
                 if not rows:
-                    output += "No hay cambios sin commitear"
+                    output += "There are no uncommitted changes"
                     if ccr_filter:
-                        output += f" para el CCR `{ccr_filter}`"
+                        output += f" for CCR `{ccr_filter}`"
                     output += "."
                     return {"content": [{"type": "text", "text": output}]}
 
                 id_list = [r.get("ID") for r in rows if r.get("ID") not in (None, "")]
-                output += "| change_id | Documento | Accion | CCR | Fuente |\n"
+                output += "| change_id | Document | Action | CCR | Source |\n"
                 output += "| :--- | :--- | :--- | :--- | :--- |\n"
                 for r in rows:
                     output += (
                         f"| {r.get('ID','')} | {r.get('Name','')} | {r.get('Action','')} "
                         f"| {r.get('CCR','')} | {r.get('Source','')} |\n"
                     )
-                output += f"\n**change_ids** (para `iris_ccr_commit`): `{id_list}`"
+                output += f"\n**change_ids** (for `iris_ccr_commit`): `{id_list}`"
                 return {"content": [{"type": "text", "text": output}]}
 
             elif name == "iris_ccr_reupload_itemset":
@@ -5666,16 +6055,16 @@ class IRISMCPServer:
                 itemset_id = arguments.get("itemset_id")
 
                 if itemset_id in (None, ""):
-                    raise ValueError("El parámetro 'itemset_id' (ID local del ItemSet) es requerido.")
+                    raise ValueError("The 'itemset_id' parameter (local ItemSet ID) is required.")
                 if not ccr_id:
                     raise ValueError(
-                        "El parámetro 'ccr_id' (Perforce Job) es requerido. Proporciónalo, configúralo "
-                        "en la configuracion de servidores ('config add-server') bajo 'ccr_id', o define IRIS_CCR_ID."
+                        "The 'ccr_id' parameter (Perforce Job) is required. Pass it, set it "
+                        "in the server configuration ('config add-server') under 'ccr_id', or define IRIS_CCR_ID."
                     )
                 if not upload_token:
                     raise ValueError(
-                        "El parámetro 'upload_token' es requerido. Proporciónalo, configúralo "
-                        "en la configuracion de servidores ('config add-server') bajo 'upload_token', o define IRIS_CCR_TOKEN."
+                        "The 'upload_token' parameter is required. Pass it, set it "
+                        "in the server configuration ('config add-server') under 'upload_token', or define IRIS_CCR_TOKEN."
                     )
 
                 sanitize = arguments.get("sanitize", True)
@@ -5686,29 +6075,29 @@ class IRISMCPServer:
                     raise RuntimeError(AtelierClient._redact_secret(exc, upload_token)) from None
                 result = AtelierClient._redact_secret(result, upload_token)
 
-                output = f"### Re-subida de ItemSet `{itemset_id}` al CCR `{ccr_id}` en {server_id}\n\n"
+                output = f"### ItemSet re-upload `{itemset_id}` to CCR `{ccr_id}` on {server_id}\n\n"
                 status, fields, detail = _classify_ccr_terminal_result(
                     result,
                     {"already_present", "uploaded"},
                 )
                 if status == "verified":
                     output += (
-                        "✅ **VERIFIED**: el ItemSet local aparece por nombre exacto en el central.\n\n"
-                        f"- **ItemSet local**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
+                        "✅ **VERIFIED**: the local ItemSet appears by exact name on the central server.\n\n"
+                        f"- **Local ItemSet**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
                         f"- **ItemSet central**: `{fields['server_id']}` (`{fields['server_name']}`)\n"
-                        f"- **Acción**: `{fields['action']}`\n"
-                        f"- **Bytes no-ASCII removidos**: `{fields.get('bytes_removed', '0')}`\n"
+                        f"- **Action**: `{fields['action']}`\n"
+                        f"- **Non-ASCII bytes removed**: `{fields.get('bytes_removed', '0')}`\n"
                         f"- **Copias rollback preservadas**: `{fields.get('rollback_copies', '0')}`"
                     )
                     return {"content": [{"type": "text", "text": output}]}
 
                 if status == "pending":
                     output += (
-                        "⚠️ **PENDING_VERIFICATION**: WSUpload respondió OK, pero el ItemSet aún no "
-                        "es visible en el central.\n\n"
-                        f"- **ItemSet local**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
-                        "- **NO REINTENTAR AUTOMÁTICAMENTE**: otro upload podría crear un duplicado. "
-                        "Verifica manualmente la visibilidad antes de cualquier reintento."
+                        "⚠️ **PENDING_VERIFICATION**: WSUpload replied OK, but the ItemSet is "
+                        "not visible on the central server yet.\n\n"
+                        f"- **Local ItemSet**: `{fields['local_id']}` (`{fields['local_name']}`)\n"
+                        "- **DO NOT RETRY AUTOMATICALLY**: another upload could create a duplicate. "
+                        "Verify visibility manually before any retry."
                     )
                     return {"isError": True, "content": [{"type": "text", "text": output}]}
 
@@ -5719,9 +6108,9 @@ class IRISMCPServer:
                 title = arguments.get("title")
                 description = arguments.get("description")
                 if not title:
-                    raise ValueError("El parámetro 'title' es requerido para crear un CCR.")
+                    raise ValueError("The 'title' parameter is required to create a CCR.")
                 if not description:
-                    raise ValueError("El parámetro 'description' es requerido para crear un CCR.")
+                    raise ValueError("The 'description' parameter is required to create a CCR.")
                 ccr_type = arguments.get("ccr_type", "")
                 ccr_info = arguments.get("ccr_info", "")
                 site_code = arguments.get("site_code")
@@ -5729,12 +6118,12 @@ class IRISMCPServer:
                 log_debug(f"Creating new CCR '{title}' on central server via WSCreate...")
                 result = client.ccr_create(title, description, ccr_type, ccr_info, site_code, sys_code)
 
-                output = f"### Creación de CCR en {server_id} ({client.namespace})\n\n"
+                output = f"### CCR creation on {server_id} ({client.namespace})\n\n"
                 if result.startswith("SUCCESS"):
                     fields = dict(p.split("=", 1) for p in result.split("|")[1:] if "=" in p)
                     output += (
-                        f"✅ **CCR creado**: `{fields.get('ccr_id','?')}`\n\n"
-                        f"- **Título**: {title}\n"
+                        f"✅ **CCR created**: `{fields.get('ccr_id','?')}`\n\n"
+                        f"- **Title**: {title}\n"
                         f"- **Site/Sys**: {fields.get('site','?')}@{fields.get('sys','?')}"
                     )
                 else:
@@ -5750,19 +6139,19 @@ class IRISMCPServer:
                     raise RuntimeError(AtelierClient._redact_secret(exc, token)) from None
                 result = AtelierClient._redact_secret(result, token)
 
-                output = f"### ItemSets disponibles en el central para CCR `{list_itemsets_ccr_id}` en {server_id} ({client.namespace})\n\n"
+                output = f"### ItemSets available on the central server for CCR `{list_itemsets_ccr_id}` on {server_id} ({client.namespace})\n\n"
                 try:
                     header, items = _parse_ccr_list_result(result)
                     if header["ccr"] != str(list_itemsets_ccr_id):
-                        raise ValueError("El CCR del registro OK no coincide con el solicitado")
+                        raise ValueError("The CCR of the OK record does not match the requested one")
                 except (UnicodeDecodeError, ValueError) as exc:
-                    output += f"❌ **ERROR**: salida WSList inválida: {exc}"
+                    output += f"❌ **ERROR**: invalid WSList output: {exc}"
                     return {"isError": True, "content": [{"type": "text", "text": output}]}
 
                 if not items:
-                    output += "No hay ItemSets disponibles en el servidor central para este ambiente."
+                    output += "No ItemSets are available on the central server for this environment."
                 else:
-                    output += "| ServerItemSetID | Nombre | Ventana requerida | Implementation Plan |\n"
+                    output += "| ServerItemSetID | Name | Required window | Implementation Plan |\n"
                     output += "| :--- | :--- | :--- | :--- |\n"
                     for item in items:
                         output += (
@@ -5775,19 +6164,19 @@ class IRISMCPServer:
                 ccr_id = arguments.get("ccr_id") or server_config.get("ccr_id") or os.environ.get("IRIS_CCR_ID")
                 if not ccr_id:
                     raise ValueError(
-                        "El parámetro 'ccr_id' es requerido. Proporciónalo, configúralo en "
-                        "la configuracion de servidores ('config add-server') bajo 'ccr_id', o define IRIS_CCR_ID."
+                        "The 'ccr_id' parameter is required. Pass it, set it in the server "
+                        "configuration ('config add-server') under 'ccr_id', or define IRIS_CCR_ID."
                     )
                 org = arguments.get("org")
                 system = arguments.get("system")
                 result = client.ccr_can_upload(ccr_id, org=org, system=system)
 
-                output = f"### Pre-check de subida (CanUpload) para CCR `{ccr_id}` en {server_id}\n\n"
+                output = f"### Upload pre-check (CanUpload) for CCR `{ccr_id}` on {server_id}\n\n"
                 if result.startswith("CANUPLOAD|"):
                     f = dict(p.split("=", 1) for p in result.split("|")[1:] if "=" in p)
                     can = f.get("value", "0") == "1"
                     icon = "✅" if can else "🚫"
-                    output += f"{icon} **{'Permite subir' if can else 'NO permite subir'}**\n\n- **Razón**: {f.get('reason','')}"
+                    output += f"{icon} **{'Upload allowed' if can else 'Upload not allowed'}**\n\n- **Reason**: {f.get('reason','')}"
                 else:
                     output += f"❌ **Fallo**: {result}"
                 return {"content": [{"type": "text", "text": output}]}
@@ -5795,24 +6184,149 @@ class IRISMCPServer:
             elif name == "iris_ccr_download_load":
                 itemset_id = arguments.get("itemset_id")
                 if itemset_id in (None, ""):
-                    raise ValueError("El parámetro 'itemset_id' (ServerItemSetID) es requerido.")
+                    raise ValueError("The 'itemset_id' parameter (ServerItemSetID) is required.")
                 load = arguments.get("load", True)
+                verify_documents = arguments.get("verify_documents")
                 token = arguments.get("token") or server_config.get("upload_token") or os.environ.get("IRIS_CCR_TOKEN", "")
+                before = {}
+                if verify_documents:
+                    unreadable = []
+                    for document in verify_documents:
+                        try:
+                            before[document] = AtelierClient._document_change_snapshot(
+                                document, client.get_document(document, strict=True),
+                            )
+                        except Exception:
+                            unreadable.append(document)
+                    if unreadable:
+                        verification = {
+                            "status": "PRE_LOAD_VERIFICATION_FAILED",
+                            "itemset_id": itemset_id,
+                            "changed": [],
+                            "unchanged": [],
+                            "unreadable": unreadable,
+                            "load_attempted": False,
+                            "automatic_retry": False,
+                        }
+                        output = (
+                            f"### CCR promotion: ItemSet `{itemset_id}` on {server_id} ({client.namespace})\n\n"
+                            "❌ **PRE_LOAD_VERIFICATION_FAILED**: could not take every prior snapshot"
+                            "; the download/load never started.\n\n"
+                            f"- **Unreadable**: {', '.join(f'`{name}`' for name in unreadable)}\n"
+                            "- **NO automatic RETRY**."
+                        )
+                        return {"isError": True, "structuredContent": verification,
+                                "content": [{"type": "text", "text": output}]}
                 log_debug(f"CCR promotion: download+load ItemSet {itemset_id} (load={load}) in {client.namespace}...")
-                result = client.ccr_download_load(itemset_id, load=load, token=token)
+                output = f"### CCR promotion: ItemSet `{itemset_id}` on {server_id} ({client.namespace})\n\n"
+                try:
+                    result = client.ccr_download_load(itemset_id, load=load, token=token)
+                except Exception:
+                    failure_state = {
+                        "status": "DOWNLOAD_LOAD_FAILED",
+                        "itemset_id": itemset_id,
+                        "load_attempted": False,
+                        "load_may_have_started": bool(load),
+                        "phase_reached": None,
+                        "failed_phase": "unknown",
+                        "possible_partial_load": bool(load),
+                        "automatic_retry": False,
+                    }
+                    output += "❌ **DOWNLOAD_LOAD_FAILED**: transport or protocol failure; phase unknown."
+                    if load:
+                        output += "\n\n⚠️ **Possible partial load**. **NO automatic RETRY**."
+                    return {"isError": True, "structuredContent": failure_state,
+                            "content": [{"type": "text", "text": output}]}
 
-                output = f"### Promoción CCR: ItemSet `{itemset_id}` en {server_id} ({client.namespace})\n\n"
-                lines = [ln for ln in result.splitlines() if ln.strip()]
-                success = any(ln == "SUCCESS" for ln in lines)
+                success, lines, failure, failure_state = _classify_ccr_download_load_result(
+                    result, load, itemset_id,
+                )
                 detail = "\n".join(f"- {ln}" for ln in lines if ln != "SUCCESS")
-                if success:
-                    output += f"✅ **Completado**{' (bajado + cargado)' if load else ' (bajado, sin cargar)'}\n\n{detail}"
-                else:
-                    output += f"❌ **Fallo**\n\n{detail}"
-                return {"isError": not success, "content": [{"type": "text", "text": output}]}
+                if not success:
+                    output += f"❌ **DOWNLOAD_LOAD_FAILED**: {failure}\n\n{detail}"
+                    response = {"isError": True, "content": [{"type": "text", "text": output}]}
+                    if failure_state is not None:
+                        failure_state["itemset_id"] = itemset_id
+                        if failure_state["possible_partial_load"]:
+                            output += (
+                                "\n\n⚠️ **Possible partial load**: there is evidence that LoadToOS "
+                                "was attempted or completed. **NO automatic RETRY**."
+                            )
+                            response["content"][0]["text"] = output
+                        response["structuredContent"] = failure_state
+                    return response
+
+                if not verify_documents:
+                    verification = {
+                        "status": "LOAD_REPORTED_SUCCESS_UNVERIFIED",
+                        "itemset_id": itemset_id,
+                        "load": load,
+                        "load_attempted": load,
+                        "verification_requested": False,
+                    }
+                    if load:
+                        explanation = "Only the %Status values reported by LoadToOS/LoadToNS were validated; no documents were verified."
+                    else:
+                        explanation = "Only the reported download/import result was validated; the load did not run and no documents were verified."
+                    output += (
+                        "✅ **LOAD_REPORTED_SUCCESS_UNVERIFIED**\n\n"
+                        f"{explanation}\n\n{detail}"
+                    )
+                    return {"structuredContent": verification,
+                            "content": [{"type": "text", "text": output}]}
+
+                changed, unchanged, unreadable = [], [], []
+                for document in verify_documents:
+                    try:
+                        after = AtelierClient._document_change_snapshot(
+                            document, client.get_document(document, strict=True),
+                        )
+                    except Exception:
+                        unreadable.append(document)
+                        continue
+                    (changed if before[document] != after else unchanged).append(document)
+
+                if unchanged or unreadable:
+                    verification = {
+                        "status": "POST_LOAD_VERIFICATION_FAILED",
+                        "itemset_id": itemset_id,
+                        "changed": changed,
+                        "unchanged": unchanged,
+                        "unreadable": unreadable,
+                        "load_attempted": True,
+                        "automatic_retry": False,
+                    }
+                    output += (
+                        "❌ **POST_LOAD_VERIFICATION_FAILED**: possible partial load; at least one document "
+                        "was left unchanged or could not be reread.\n\n"
+                        f"- **Changed**: {', '.join(f'`{name}`' for name in changed) or 'ninguno'}\n"
+                        f"- **Unchanged**: {', '.join(f'`{name}`' for name in unchanged) or 'ninguno'}\n"
+                        f"- **Unreadable**: {', '.join(f'`{name}`' for name in unreadable) or 'ninguno'}\n"
+                        "- **NO automatic RETRY**."
+                    )
+                    return {"isError": True, "structuredContent": verification,
+                            "content": [{"type": "text", "text": output}]}
+
+                verification = {
+                    "status": "POST_LOAD_CHANGE_OBSERVED",
+                    "itemset_id": itemset_id,
+                    "changed": changed,
+                    "unchanged": [],
+                    "unreadable": [],
+                    "load_attempted": True,
+                    "proves_payload_equality": False,
+                }
+                output += (
+                    "✅ **POST_LOAD_CHANGE_OBSERVED**: every requested document changed relative to "
+                    "the previous UAT snapshot. This observes change, but does NOT prove equality against "
+                    "BASE or against the ItemSet payload.\n\n"
+                    f"- **Changed**: {', '.join(f'`{name}`' for name in changed)}"
+                )
+                return {"structuredContent": verification,
+                        "content": [{"type": "text", "text": output}]}
 
             else:
-                raise ValueError(f"Herramienta desconocida: {name}")
+                raise ValueError(f"Unknown tool: {name}")
                 
         except Exception as e:
             error_text = str(e) if isinstance(e, LocalPolicyError) else "Tool execution failed; details <redacted>."
@@ -5903,5 +6417,5 @@ class IRISMCPServer:
             except json.JSONDecodeError:
                 log_debug("Error decoding incoming JSON-RPC request.")
             except Exception as e:
-                log_debug(f"Main loop error (continuando): {e}")
+                log_debug(f"Main loop error (continuing): {e}")
                 continue

@@ -1394,7 +1394,13 @@ class MutationTests(HermeticTestCase):
         for state, expected_error in (("ABSENT", True), ("SUSPENDED", True), ("CONTROLLED_ACTIVE", False)):
             with self.subTest(state=state):
                 vip = synthetic_client(namespace="UAT-ACHS", role="UAT", host="10.244.20.6")
-                output = "SUCCESS" if state == "CONTROLLED_ACTIVE" else f"ERROR_CONTROL|state={state}|message=blocked"
+                output = (
+                    "DOWNLOADED|isid=7|file=item.xml\n"
+                    "IMPORTED|local_id=9|ccr=ACHS0875|source=BASE|target=UAT\n"
+                    "SUCCESS"
+                    if state == "CONTROLLED_ACTIVE"
+                    else f"ERROR_CONTROL|state={state}|message=blocked"
+                )
                 captured = script_guarded_runner(vip, output)
                 result = synthetic_server(vip).handle_tool_call("iris_ccr_download_load", {
                     "server_id": "fake", "namespace": "UAT-ACHS", "itemset_id": 7, "load": False, "token": "secret-token",
@@ -2117,7 +2123,7 @@ class DocumentBoundaryTests(HermeticTestCase):
         success, message = client.ccr_checkout(None, "ACHS0875", document_name="Custom.ACHS.Macros.inc")
         self.assertTrue(success, message)
         self.assertIn('Set className = "Custom.ACHS.Macros.inc"', captured[-1])
-        self.assertIn("Documento nuevo agregado", message)
+        self.assertIn("New document added", message)
         with self.assertRaisesRegex(LocalPolicyError, "exactly one"):
             client.ccr_checkout("Custom.ACHS.A", "ACHS0875", document_name="Custom.ACHS.Macros.inc")
         with self.assertRaisesRegex(LocalPolicyError, "exactly one"):
@@ -2193,31 +2199,31 @@ class RoundTripVerifyTests(HermeticTestCase):
     def test_identical_content_verifies(self):
         ok, msg = self.verify(list(self.SENT))
         self.assertTrue(ok, msg)
-        self.assertNotIn("formato normalizado", msg)
+        self.assertNotIn("format normalized", msg)
 
     def test_reindented_and_reblanked_content_verifies_with_note(self):
         server = ["Class X", "{", "ClassMethod A()", "{", "If x {", "    Set y = 1", "}", "}", "", "", "}", ""]
         ok, msg = self.verify(server)
         self.assertTrue(ok, msg)
-        self.assertIn("formato normalizado", msg)
+        self.assertIn("format normalized", msg)
 
     def test_duplicated_block_is_rejected(self):
         server = list(self.SENT[:7]) + ["\t\t\tSet y = 1"] + list(self.SENT[7:])
         ok, msg = self.verify(server)
         self.assertFalse(ok)
-        self.assertIn("MISMATCH de contenido", msg)
+        self.assertIn("Content MISMATCH", msg)
 
     def test_truncated_content_is_rejected(self):
         ok, msg = self.verify(list(self.SENT[:-2]))
         self.assertFalse(ok)
-        self.assertIn("MISMATCH de contenido", msg)
+        self.assertIn("Content MISMATCH", msg)
 
     def test_changed_token_inside_line_is_rejected(self):
         server = list(self.SENT)
         server[6] = "\t\t\tSet y = 2"
         ok, msg = self.verify(server)
         self.assertFalse(ok)
-        self.assertIn("linea de codigo 6", msg)
+        self.assertIn("code line 6", msg)
 
 
 class SqlDiagnosticTests(HermeticTestCase):

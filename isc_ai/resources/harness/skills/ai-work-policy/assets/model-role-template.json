@@ -1,0 +1,29 @@
+{
+  "format": "ai-work-policy.future-configurator.model-roles",
+  "schema_version": 1,
+  "native_harness_config": false,
+  "runtime_applied": false,
+  "selection": {
+    "provider_id": null,
+    "model_id": null,
+    "status": "unselected",
+    "availability": "unverified"
+  },
+  "fallback": "explicitly-approved-available-model-only",
+  "role_defaults": {
+    "default": "sonnet-preference",
+    "sdd-explore": "sonnet-preference",
+    "sdd-propose": "sonnet-preference",
+    "sdd-spec": "sonnet-preference",
+    "sdd-design": "sonnet-preference",
+    "sdd-tasks": "sonnet-preference",
+    "sdd-apply": "sonnet-preference",
+    "sdd-verify": "sonnet-preference",
+    "sdd-archive": "haiku-preference",
+    "fresh-review": "sonnet-preference"
+  },
+  "profiles": {
+    "sonnet-preference": {"intended_family": "sonnet", "provider_id": null, "model_id": null, "availability": "unverified"},
+    "haiku-preference": {"intended_family": "haiku", "provider_id": null, "model_id": null, "availability": "unverified"}
+  }
+}

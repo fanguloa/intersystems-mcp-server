@@ -25,6 +25,7 @@ with (patch.dict(os.environ, {}, clear=True),
     from isc_ai import config as iris_mcp_config
     from isc_ai.config import CanonicalBase, PackageGrant, SitePolicy, WriteException
 
+from isc_ai import i18n
 from isc_ai.ccr_discovery import (
     ACTIVE_NODE_SQL, CLASS_SQL, ENGINE_SQL, IDENTITY_SQL, METHOD_SQL, PROJECTION_SQL,
 )
@@ -121,6 +122,11 @@ def policy_with(**changes):
 class HermeticTestCase(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        # Language is process-wide state: reset it so a test that runs --lang es
+        # cannot change what the next test asserts.
+        previous_language = i18n.current()
+        self.addCleanup(i18n.set_language, previous_language)
+        i18n.set_language(i18n.LanguageChoice())
         patches = (
             patch.dict(os.environ, {"HOME": "HERMETIC-NO-HOME", "USERPROFILE": "HERMETIC-NO-HOME"}, clear=True),
             patch("builtins.open", side_effect=AssertionError("Test file/config access forbidden")),
