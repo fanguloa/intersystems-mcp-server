@@ -14,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -148,6 +149,27 @@ def _fsync_directory(directory: Path) -> None:
             os.close(descriptor)
 
 
+def _replace_with_retry(tmp: Path, path: Path, attempts: int = 6, delay: float = 0.05) -> None:
+    """Commit the replacement, retrying the Windows sharing races.
+
+    `os.replace` is atomic but not immune to another process holding a handle: on Windows
+    an antivirus or the search indexer routinely opens a file microseconds after it is
+    created, and the call fails with access denied (5) or a sharing violation (32). It is
+    transient, so a bounded retry is the difference between a command that works and one
+    that fails once every few runs. Anything else, and the last attempt of these, is
+    raised for the caller to roll back.
+    """
+    transient = {5, 32, 33}
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in transient or attempt == attempts - 1:
+                raise
+            time.sleep(delay * (2 ** attempt))
+
+
 def _replace_file(
     path: Path,
     content: bytes,
@@ -186,7 +208,7 @@ def _replace_file(
             os.chmod(tmp, mode)
         committed = FileState(content, stat.S_IMODE(tmp.stat(follow_symlinks=False).st_mode))
         _managed_target(root, path)
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
         if on_replaced is not None:
             on_replaced(committed)
         _fsync_directory(path.parent)

@@ -74,9 +74,18 @@ def _normalize_name(name):
 
 
 def load_suite(path=None):
-    data, _, _ = load_json_file(Path(path) if path else SUITE_RESOURCE)
-    if not data.get("servers") or not data.get("clients"):
-        raise isc_config.ConfigError(f"{path or SUITE_RESOURCE} is not a suite baseline.")
+    """Read the baseline and check its shape, not its size.
+
+    An empty `servers` or `clients` section is a valid baseline: a deployment may declare
+    only the clients it manages. What is not valid is a missing or non-object section, so
+    the check is structural.
+    """
+    resolved = Path(path) if path else SUITE_RESOURCE
+    data, _, _ = load_json_file(resolved)
+    for section in ("servers", "clients"):
+        if not isinstance(data.get(section), dict):
+            raise isc_config.ConfigError(
+                f"{resolved} is not a suite baseline: '{section}' must be an object.")
     return data
 
 

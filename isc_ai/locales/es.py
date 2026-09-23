@@ -302,6 +302,24 @@ MESSAGES = {
     "flag.toggle.apply": "escribe los cambios",
     "flag.toggle.client": "limita a un cliente: opencode, vscode, claude",
 
+    # -- clients ---------------------------------------------------------
+    "cmd.clients.help": "reporta qué clientes de IA están instalados e instala el que falte",
+    "cmd.clients.examples": (
+        "isc-ai clients                         estado de cada cliente, sin ejecutar nada\n"
+        "isc-ai clients --apply vscode          pregunta una vez y corre la receta\n"
+        "isc-ai clients --apply --yes opencode  para un script, donde no hay dónde preguntar\n"
+        "\n"
+        "Es el único comando que cambia el sistema fuera de archivos de configuración, así que\n"
+        "es el más explícito. La receta sale del baseline y su gestor de paquetes ya tiene que\n"
+        "estar en el PATH. Un cliente instalado no se toca nunca, y el resultado se verifica\n"
+        "preguntándole la versión al programa en vez de confiar en un código de salida.\n"
+        "\n"
+        "La confirmación es interactiva solo en una terminal. Este mismo binario sirve MCP por\n"
+        "stdio, así que nunca pregunta en un pipe: sin terminal, pasá --yes."
+    ),
+    "flag.clients.apply": "corre la receta para los clientes que falten",
+    "flag.clients.yes": "confirma sin preguntar, para uso no interactivo",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "muestra el proyecto, los archivos y los servidores que resuelve este proceso",
     "cmd.doctor.examples": (

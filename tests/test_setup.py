@@ -521,6 +521,48 @@ class SetupTestCase(unittest.TestCase):
         self.assertEqual(actions[str(target)], "noop")
         self.assertEqual(again["conflicts"], [])
 
+    def test_a_transient_sharing_violation_is_retried_instead_of_failing(self):
+        """Windows raises access denied when another process holds the file for an instant.
+
+        An antivirus or the search indexer opening the temporary file microseconds after it
+        is created made one run in six fail before this retry existed. The failure is
+        transient, so it is retried; anything that is not transient still propagates.
+        """
+        target = self.root / "retry.json"
+        attempts = []
+        real_replace = os.replace
+
+        def flaky(source, destination):
+            attempts.append(destination)
+            if len(attempts) < 3:
+                error = PermissionError("Access is denied")
+                error.winerror = 5
+                raise error
+            return real_replace(source, destination)
+
+        with mock.patch("isc_ai.setup.os.replace", side_effect=flaky), \
+             mock.patch("isc_ai.setup.time.sleep"):
+            setup._atomic_write(target, b"written")
+        self.assertEqual(target.read_bytes(), b"written")
+        self.assertEqual(len(attempts), 3, "it must retry, not give up on the first refusal")
+
+    def test_a_permission_error_that_is_not_transient_is_not_retried(self):
+        target = self.root / "hard-fail.json"
+        attempts = []
+
+        def denied(source, destination):
+            attempts.append(destination)
+            error = PermissionError("not a sharing problem")
+            error.winerror = 1314  # a privilege the process does not hold
+            raise error
+
+        with mock.patch("isc_ai.setup.os.replace", side_effect=denied), \
+             mock.patch("isc_ai.setup.time.sleep"):
+            with self.assertRaises(PermissionError):
+                setup._atomic_write(target, b"written")
+        self.assertEqual(len(attempts), 1, "retrying a real permission problem only hides it")
+        self.assertFalse(target.exists())
+
     def test_install_sh_documents_flags_and_rejects_unknown_arguments_before_uv(self):
         text = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
         self.assertIn("Usage: ./install.sh [--apply]", text)

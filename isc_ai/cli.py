@@ -31,6 +31,7 @@ from isc_ai import __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
 from isc_ai import agents as isc_agents
+from isc_ai import clients as isc_clients
 from isc_ai import secrets as isc_secrets
 from isc_ai import toggle as isc_toggle
 from isc_ai import docs as isc_docs
@@ -326,6 +327,15 @@ def _parse_cli_args(argv):
                                    choices=("opencode", "vscode", "claude"),
                                    help=t("flag.toggle.client"))
         parser_toggle.add_argument("--suite", help=t("flag.audit.suite"))
+
+    p_clients = _add_parser(sub, "clients", "cmd.clients.help", "cmd.clients.examples")
+    # No argparse `choices` here on purpose: the baseline is what declares which clients
+    # exist, so hardcoding them would make the data file unable to grow. An unknown name
+    # is refused at runtime with the real list.
+    p_clients.add_argument("client", nargs="*", metavar="<client>", help=t("flag.suite.client"))
+    p_clients.add_argument("--apply", action="store_true", help=t("flag.clients.apply"))
+    p_clients.add_argument("--yes", action="store_true", help=t("flag.clients.yes"))
+    p_clients.add_argument("--suite", help=t("flag.audit.suite"))
 
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
@@ -638,6 +648,15 @@ def _run_audit(args):
     return 2 if summary["warnings"] or summary["info"] else 0
 
 
+def _run_clients(args):
+    """Nothing is executed without --apply, and nothing is confirmed on a pipe."""
+    report = isc_clients.install(names=args.client or None, suite_path=args.suite,
+                                assume_yes=args.yes, apply_changes=args.apply)
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    blocked = [item for item in report["results"] if item["action"] in {"failed", "blocked"}]
+    return 1 if blocked else 0
+
+
 def _run_secrets(args):
     """The store never prints a value, and never reads one from argv."""
     project_dir = getattr(args, "project_dir", None)
@@ -784,6 +803,8 @@ def main(argv=None):
             return _run_facility(args)
         if args.command == "audit":
             return _run_audit(args)
+        if args.command == "clients":
+            return _run_clients(args)
         if args.command == "secrets":
             return _run_secrets(args)
         if args.command in ("enable", "disable"):
