@@ -263,6 +263,45 @@ MESSAGES = {
     "flag.agents.check": "imprime el plan sin escribir (por defecto)",
     "flag.agents.no_verify": "no le pregunta al cliente qué modelos hay disponibles",
 
+    # -- secrets ---------------------------------------------------------
+    "cmd.secrets.help": "guarda las credenciales que los archivos de configuración no deben contener",
+    "cmd.secrets.examples": (
+        "isc-ai secrets list                    qué claves existen y dónde, nunca un valor\n"
+        "isc-ai secrets set JIRA_API_TOKEN      pregunta sin eco\n"
+        "isc-ai secrets set P4CLIENT --scope project\n"
+        "type token.txt | isc-ai secrets set JIRA_API_TOKEN\n"
+        "isc-ai secrets unset JIRA_API_TOKEN\n"
+        "\n"
+        "Dos scopes: ~/.iris-mcp/secrets.json para lo que es tuyo (un Jira, una contraseña)\n"
+        "y <proyecto>/.iris-mcp/secrets.json para lo que cambia por despliegue, que se agrega\n"
+        "al .gitignore en la primera escritura.\n"
+        "\n"
+        "El valor nunca se toma de la línea de comandos: quedaría en el historial del shell,\n"
+        "en la lista de procesos y en cualquier grabación de terminal. Se lee de un prompt o\n"
+        "de stdin. Resolución al expandir una referencia {{env:VAR}}: primero el entorno del\n"
+        "proceso, así un override del shell o de CI siempre gana, después el store del\n"
+        "proyecto y al final el global."
+    ),
+    "flag.secrets.scope": "en qué store escribir: global (por defecto) o project",
+
+    # -- mcp toggle ------------------------------------------------------
+    "cmd.enable.help": "habilita un servidor de la suite en cada cliente que lo conoce",
+    "cmd.disable.help": "deshabilita un servidor de la suite en cada cliente que lo conoce",
+    "cmd.toggle.examples": (
+        "isc-ai disable playwright              qué cambiaría, sin escribir nada\n"
+        "isc-ai disable playwright --apply\n"
+        "isc-ai enable playwright --apply --client opencode\n"
+        "\n"
+        "Los tres clientes expresan el \"apagado\" distinto y el comando usa el mecanismo\n"
+        "nativo de cada uno: OpenCode pone enabled=false, Claude Code lista el nombre bajo\n"
+        "projects.<ruta>.disabledMcpjsonServers, y VS Code no tiene ese campo, así que ahí\n"
+        "deshabilitar quita la entrada y habilitar la vuelve a escribir desde el baseline.\n"
+        "Se reporta qué mecanismo se usó, porque quitar una entrada no es lo mismo que\n"
+        "cambiar una bandera."
+    ),
+    "flag.toggle.apply": "escribe los cambios",
+    "flag.toggle.client": "limita a un cliente: opencode, vscode, claude",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "muestra el proyecto, los archivos y los servidores que resuelve este proceso",
     "cmd.doctor.examples": (
@@ -302,6 +341,7 @@ MESSAGES = {
     # -- validación de comandos ------------------------------------------
     "error.subcommand.config": "se requiere un subcomando de config",
     "error.subcommand.servers": "se requiere un subcomando de servers",
+    "error.subcommand.secrets": "se requiere un subcomando de secrets: list, set o unset",
     "error.subcommand.facility": "se requiere un subcomando de facility",
     "error.upgrade_requires_sha": "--upgrade requiere --expected-current-sha256",
     "error.sha_requires_upgrade": "--expected-current-sha256 requiere --upgrade",

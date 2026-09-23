@@ -31,6 +31,8 @@ from isc_ai import __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
 from isc_ai import agents as isc_agents
+from isc_ai import secrets as isc_secrets
+from isc_ai import toggle as isc_toggle
 from isc_ai import docs as isc_docs
 from isc_ai import suite as isc_suite
 from isc_ai.audit import run_audit
@@ -304,6 +306,27 @@ def _parse_cli_args(argv):
     agents_mode.add_argument("--check", action="store_true", help=t("flag.agents.check"))
     p_agents.add_argument("--no-verify-models", action="store_true", help=t("flag.agents.no_verify"))
 
+    p_secrets = _add_parser(sub, "secrets", "cmd.secrets.help", "cmd.secrets.examples")
+    _add_project_dir(p_secrets)
+    secrets_sub = p_secrets.add_subparsers(dest="secrets_command", title=t("chrome.group.subcommands"),
+                                           metavar="<sub-command>")
+    _add_parser(secrets_sub, "list", "cmd.secrets.help", "cmd.secrets.examples")
+    for action in ("set", "unset"):
+        parser_action = _add_parser(secrets_sub, action, "cmd.secrets.help", "cmd.secrets.examples")
+        parser_action.add_argument("key")
+        parser_action.add_argument("--scope", choices=("global", "project"), default="global",
+                                   help=t("flag.secrets.scope"))
+
+    for verb, help_key in (("enable", "cmd.enable.help"), ("disable", "cmd.disable.help")):
+        parser_toggle = _add_parser(sub, verb, help_key, "cmd.toggle.examples")
+        _add_project_dir(parser_toggle)
+        parser_toggle.add_argument("server")
+        parser_toggle.add_argument("--apply", action="store_true", help=t("flag.toggle.apply"))
+        parser_toggle.add_argument("--client", action="append",
+                                   choices=("opencode", "vscode", "claude"),
+                                   help=t("flag.toggle.client"))
+        parser_toggle.add_argument("--suite", help=t("flag.audit.suite"))
+
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
 
@@ -332,6 +355,8 @@ def _parse_cli_args(argv):
         _require_subcommand(p_config, t("error.subcommand.config"))
     if args.command == "servers" and not args.servers_command:
         _require_subcommand(p_servers, t("error.subcommand.servers"))
+    if args.command == "secrets" and not args.secrets_command:
+        _require_subcommand(p_secrets, t("error.subcommand.secrets"))
     if args.command == "facility":
         if not args.facility_command:
             _require_subcommand(p_facility, t("error.subcommand.facility"))
@@ -613,6 +638,30 @@ def _run_audit(args):
     return 2 if summary["warnings"] or summary["info"] else 0
 
 
+def _run_secrets(args):
+    """The store never prints a value, and never reads one from argv."""
+    project_dir = getattr(args, "project_dir", None)
+    project = Path(project_dir).resolve() if project_dir else isc_config.find_project_root(Path.cwd())
+    if args.secrets_command == "list":
+        _emit(json.dumps(isc_secrets.inventory(project_dir=project), indent=2, ensure_ascii=False))
+        return 0
+    if args.secrets_command == "set":
+        value = isc_secrets.read_value(f"value for {args.key}: ")
+        result = isc_secrets.set_secret(args.key, value, scope=args.scope, project_dir=project)
+    else:
+        result = isc_secrets.unset_secret(args.key, scope=args.scope, project_dir=project)
+    _emit(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _run_toggle(args, enable):
+    report = isc_toggle.toggle(args.server, enable, project_dir=getattr(args, "project_dir", None),
+                               suite_path=args.suite, clients=args.client,
+                               apply_changes=args.apply)
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _run_agents(args):
     """Sub-agent model assignment. Plan by default; --apply writes the OpenCode entries."""
     runner = isc_agents.apply if args.apply else isc_agents.plan
@@ -735,6 +784,10 @@ def main(argv=None):
             return _run_facility(args)
         if args.command == "audit":
             return _run_audit(args)
+        if args.command == "secrets":
+            return _run_secrets(args)
+        if args.command in ("enable", "disable"):
+            return _run_toggle(args, args.command == "enable")
         if args.command == "agents":
             return _run_agents(args)
         if args.command == "docs":

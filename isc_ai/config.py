@@ -561,7 +561,13 @@ SERVER_KEYS = {"host", "port", "path_prefix", "username", "password", "namespace
 
 
 def resolve_secret_references(value, environ):
-    """Replace {env:NAME} references inside string values. Raises on missing names."""
+    """Replace {env:NAME} references inside string values. Raises on missing names.
+
+    `environ` is already the merged view built by load_runtime_config: the process
+    environment first, then the project secret store, then the global one. A name found
+    nowhere still raises, because a missing credential must fail loudly instead of
+    silently connecting as somebody else.
+    """
     if isinstance(value, str):
         def substitute(match):
             name = match.group(1)
@@ -704,9 +710,26 @@ def load_runtime_config(project_dir=None, environ=None, home=None):
     _expect(isinstance(project_servers, dict), "servers must be an object keyed by server id.")
     servers.update(project_servers)
 
+    # The secret stores extend the environment for reference resolution, never replace
+    # it: a value exported in the shell or by CI must keep winning. Imported here to
+    # avoid a cycle, since the store reads JSON through this module.
+    from isc_ai import secrets as isc_secrets
+
+    try:
+        stored = isc_secrets.load(project_dir=project_dir, home=home)
+    except ConfigError as exc:
+        notes.append(f"Secret store ignored: {exc}")
+        stored = {}
+    if stored:
+        resolution_environ = {**stored, **environ}
+        notes.append(f"Loaded {len(stored)} value(s) from the secret store; the environment "
+                     f"still takes precedence.")
+    else:
+        resolution_environ = environ
+
     return RuntimeConfig(
         policy=policy,
-        servers=resolve_servers(servers, environ),
+        servers=resolve_servers(servers, resolution_environ),
         project_dir=project_dir,
         project_config_path=config_path,
         user_servers_path=user_path,

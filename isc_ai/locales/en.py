@@ -262,6 +262,44 @@ MESSAGES = {
     "flag.agents.check": "print the plan without writing (default)",
     "flag.agents.no_verify": "do not ask the client which models are available",
 
+    # -- secrets ---------------------------------------------------------
+    "cmd.secrets.help": "store the credentials that configuration files must not contain",
+    "cmd.secrets.examples": (
+        "isc-ai secrets list                    which keys exist and where, never a value\n"
+        "isc-ai secrets set JIRA_API_TOKEN      prompts without echo\n"
+        "isc-ai secrets set P4CLIENT --scope project\n"
+        "type token.txt | isc-ai secrets set JIRA_API_TOKEN\n"
+        "isc-ai secrets unset JIRA_API_TOKEN\n"
+        "\n"
+        "Two scopes: ~/.iris-mcp/secrets.json for what is yours (one Jira, one password)\n"
+        "and <project>/.iris-mcp/secrets.json for what differs per deployment, which is\n"
+        "added to .gitignore on first write.\n"
+        "\n"
+        "A value is never taken from the command line: it would land in shell history, in\n"
+        "the process list and in any terminal recording. It is read from a prompt or stdin.\n"
+        "Resolution when a {{env:VAR}} reference is expanded: process environment first, so a\n"
+        "shell or CI override always wins, then the project store, then the global one."
+    ),
+    "flag.secrets.scope": "which store to write: global (default) or project",
+
+    # -- mcp toggle ------------------------------------------------------
+    "cmd.enable.help": "enable a suite server in every client that knows it",
+    "cmd.disable.help": "disable a suite server in every client that knows it",
+    "cmd.toggle.examples": (
+        "isc-ai disable playwright              what would change, nothing written\n"
+        "isc-ai disable playwright --apply\n"
+        "isc-ai enable playwright --apply --client opencode\n"
+        "\n"
+        "The three clients express 'off' differently and the command uses each one's own\n"
+        "mechanism: OpenCode sets enabled=false, Claude Code lists the name under\n"
+        "projects.<path>.disabledMcpjsonServers, and VS Code has no such field at all, so\n"
+        "there disabling removes the entry and enabling writes it back from the baseline.\n"
+        "Which mechanism was used is reported, because removing an entry is not the same as\n"
+        "flipping a flag."
+    ),
+    "flag.toggle.apply": "write the changes",
+    "flag.toggle.client": "limit to one client: opencode, vscode, claude",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "show the project, files and servers this process resolves",
     "cmd.doctor.examples": (
@@ -301,6 +339,7 @@ MESSAGES = {
     # -- command validation ----------------------------------------------
     "error.subcommand.config": "a config sub-command is required",
     "error.subcommand.servers": "a servers sub-command is required",
+    "error.subcommand.secrets": "a secrets sub-command is required: list, set or unset",
     "error.subcommand.facility": "a facility sub-command is required",
     "error.upgrade_requires_sha": "--upgrade requires --expected-current-sha256",
     "error.sha_requires_upgrade": "--expected-current-sha256 requires --upgrade",
