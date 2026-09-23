@@ -30,6 +30,7 @@ from pathlib import Path
 from isc_ai import __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
+from isc_ai import suite as isc_suite
 from isc_ai.audit import run_audit
 from isc_ai.ccr_discovery import LocalPolicyError
 from isc_ai.config import ConfigError
@@ -276,6 +277,16 @@ def _parse_cli_args(argv):
     _add_project_dir(p_audit)
     p_audit.add_argument("--errors-only", action="store_true", help=t("flag.audit.errors_only"))
     p_audit.add_argument("--suite", help=t("flag.audit.suite"))
+
+    p_suite = _add_parser(sub, "suite", "cmd.suite.help", "cmd.suite.examples")
+    _add_project_dir(p_suite)
+    suite_mode = p_suite.add_mutually_exclusive_group()
+    suite_mode.add_argument("--apply", action="store_true", help=t("flag.suite.apply"))
+    suite_mode.add_argument("--check", action="store_true", help=t("flag.suite.check"))
+    p_suite.add_argument("--client", action="append", choices=("opencode", "vscode", "claude"),
+                         help=t("flag.suite.client"))
+    p_suite.add_argument("--server", action="append", help=t("flag.suite.server"))
+    p_suite.add_argument("--suite", help=t("flag.audit.suite"))
 
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
@@ -586,6 +597,16 @@ def _run_audit(args):
     return 2 if summary["warnings"] or summary["info"] else 0
 
 
+def _run_suite(args):
+    """Plan by default; --apply writes every file in one transaction or none."""
+    runner = isc_suite.apply if args.apply else isc_suite.plan
+    result = runner(project_dir=getattr(args, "project_dir", None), suite_path=args.suite,
+                    clients=args.client, servers=args.server)
+    report = result[0] if isinstance(result, tuple) else result
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _run_servers(args):
     if args.servers_command == "migrate":
         legacy = isc_config.legacy_user_servers_path()
@@ -674,6 +695,8 @@ def main(argv=None):
             return _run_facility(args)
         if args.command == "audit":
             return _run_audit(args)
+        if args.command == "suite":
+            return _run_suite(args)
         if args.command == "doctor":
             return _run_doctor(args)
         if args.command == "setup":

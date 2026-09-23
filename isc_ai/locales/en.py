@@ -197,6 +197,26 @@ MESSAGES = {
     "flag.audit.errors_only": "print only findings with severity error",
     "flag.audit.suite": "alternative suite baseline file",
 
+    # -- suite -----------------------------------------------------------
+    "cmd.suite.help": "write the recommended MCP suite into the AI clients",
+    "cmd.suite.examples": (
+        "isc-ai suite                           what would change, nothing written\n"
+        "isc-ai suite --apply\n"
+        "isc-ai suite --apply --client vscode   one client only\n"
+        "isc-ai suite --apply --server perforce-mcp-server\n"
+        "\n"
+        "Normalizes shape, never invents values: a hostname or workspace name that already\n"
+        "exists is preserved, and a value present in one client is propagated to another\n"
+        "instead of guessed. Secrets are never written as literals: each client gets a\n"
+        "reference in its own syntax, and VS Code gets a native `inputs` entry with\n"
+        "password:true so the editor stores it. Entries outside the suite are left alone.\n"
+        "All files are written in one transaction, or none is."
+    ),
+    "flag.suite.apply": "write the changes",
+    "flag.suite.check": "print the plan without writing (default)",
+    "flag.suite.client": "limit to one client: opencode, vscode, claude",
+    "flag.suite.server": "limit to one server of the suite",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "show the project, files and servers this process resolves",
     "cmd.doctor.examples": (
