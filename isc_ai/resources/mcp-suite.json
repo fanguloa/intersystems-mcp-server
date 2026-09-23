@@ -1,0 +1,154 @@
+{
+  "$comment": [
+    "Recommended MCP suite. This file is the single declaration of what a correctly",
+    "configured workstation looks like: which servers belong to the suite, how each one",
+    "is launched, which settings it needs, and where each setting legitimately lives.",
+    "",
+    "It is a baseline for auditing, not a lock: `isc-ai mcp audit` compares the three",
+    "clients against it and reports drift; nothing is written unless you ask for it.",
+    "",
+    "credentials.scope decides where a value is read from and written to:",
+    "  project  <project>/.iris-mcp/  - differs per deployment (IRIS namespaces, CCR)",
+    "  global   ~/.iris-mcp/          - one per person (Jira token, Perforce identity)",
+    "Secret values never go in a committable file: config.json holds {env:VAR}",
+    "references, secrets.json holds the literals and is gitignored.",
+    "",
+    "aliases lists the names these servers are known by in existing configurations, so",
+    "the audit can tell 'registered under another name' apart from 'missing'."
+  ],
+  "version": 1,
+  "clients": {
+    "$comment": [
+      "The AI clients the suite configures. Paths use placeholders resolved at runtime:",
+      "{home}, {config_home} (XDG_CONFIG_HOME or ~/.config), {appdata}, {project}.",
+      "",
+      "install is a recipe, never a default action: the audit reports the command and the",
+      "package manager it needs, and running it requires --apply plus a confirmation.",
+      "Installing a client is the only thing in this CLI that touches the system outside",
+      "configuration files, so it stays explicit and one client at a time."
+    ],
+    "opencode": {
+      "summary": "OpenCode TUI.",
+      "binary": "opencode",
+      "version_argv": ["--version"],
+      "config": {
+        "user": "{config_home}/opencode/opencode.json",
+        "alternatives": ["{config_home}/opencode/opencode.jsonc"],
+        "mcp_key": "mcp",
+        "entry_style": "opencode"
+      },
+      "install": { "manager": "npm", "argv": ["npm", "install", "-g", "opencode-ai"] }
+    },
+    "vscode": {
+      "summary": "Visual Studio Code with MCP support.",
+      "binary": "code",
+      "version_argv": ["--version"],
+      "config": {
+        "user": "{appdata}/Code/User/mcp.json",
+        "project": "{project}/.vscode/mcp.json",
+        "mcp_key": "servers",
+        "entry_style": "vscode"
+      },
+      "install": { "manager": "winget", "argv": ["winget", "install", "--exact", "--id", "Microsoft.VisualStudioCode"] }
+    },
+    "claude": {
+      "summary": "Claude Code CLI.",
+      "binary": "claude",
+      "version_argv": ["--version"],
+      "config": {
+        "user": "{home}/.claude.json",
+        "project": "{project}/.mcp.json",
+        "mcp_key": "mcpServers",
+        "entry_style": "claude",
+        "notes": "The global file also carries per-directory overrides under projects.<path>.mcpServers, which is where stale entries survive unnoticed."
+      },
+      "install": { "manager": "npm", "argv": ["npm", "install", "-g", "@anthropic-ai/claude-code"] }
+    }
+  },
+  "servers": {
+    "intersystems-iris": {
+      "summary": "IRIS/TrakCare tools with CCR-aware write gates (this package).",
+      "transport": "stdio",
+      "launch": { "command": "isc-ai", "args": ["mcp"] },
+      "requires": { "on_path": ["isc-ai"] },
+      "aliases": ["intersystems_iris", "iris-mcp", "intersystems-iris-mcp"],
+      "settings": {
+        "IRIS_MCP_TIMEOUT": { "scope": "project", "secret": false, "required": false, "default": "1800" }
+      },
+      "notes": "Site policy and server connections are not settings of this entry: they live in .iris-mcp/config.json and ~/.iris-mcp/servers.json.",
+      "verify": { "min_tools": 30 }
+    },
+    "perforce-mcp-server": {
+      "summary": "Narrowly scoped, read-only Perforce access (version 2).",
+      "transport": "stdio",
+      "launch": { "command": "perforce-mcp-server", "args": ["--readonly"] },
+      "requires": { "on_path": ["perforce-mcp-server", "p4"] },
+      "aliases": ["perforce-p4-mcp", "p4-mcp-server", "perforce"],
+      "settings": {
+        "P4PORT": { "scope": "global", "secret": false, "required": true },
+        "P4USER": { "scope": "global", "secret": false, "required": true },
+        "P4CLIENT": { "scope": "project", "secret": false, "required": true }
+      },
+      "notes": "Replaces the versioned absolute path of the 1.x binary: the 2.0.0 entry point is installed on PATH. P4CLIENT is per project because the workspace maps one deployment.",
+      "verify": { "min_tools": 5 }
+    },
+    "atlassian-cloud": {
+      "summary": "Jira and Confluence over the Atlassian Cloud API.",
+      "transport": "stdio",
+      "launch": { "command": "uvx", "args": ["mcp-atlassian"] },
+      "requires": { "on_path": ["uvx"] },
+      "aliases": ["jira", "atlassian", "mcp-atlassian", "confluence"],
+      "settings": {
+        "JIRA_URL": { "scope": "global", "secret": false, "required": true },
+        "JIRA_USERNAME": { "scope": "global", "secret": false, "required": true },
+        "JIRA_API_TOKEN": { "scope": "global", "secret": true, "required": true }
+      },
+      "notes": "The Claude entry named 'jira' uses ATLASSIAN_* variable names for the same three values; the audit reports that as a naming drift, not as a second server.",
+      "verify": { "min_tools": 5 }
+    },
+    "engram": {
+      "summary": "Persistent memory across sessions.",
+      "transport": "stdio",
+      "launch": { "command": "engram", "args": ["mcp", "--tools=agent"] },
+      "requires": { "on_path": ["engram"] },
+      "aliases": ["engram-fixed", "engram-memory"],
+      "settings": {},
+      "verify": { "min_tools": 5 }
+    },
+    "context7": {
+      "summary": "Up-to-date library documentation.",
+      "transport": "http",
+      "launch": { "url": "https://mcp.context7.com/mcp" },
+      "aliases": ["context7-npm", "io.github.upstash/context7", "upstash-context7"],
+      "settings": {},
+      "notes": "The hosted endpoint is the recommended form: no npm package to pin and no API key to store. A local npx entry for the same server is a duplicate, not a second server.",
+      "verify": { "min_tools": 2 }
+    },
+    "markitdown": {
+      "summary": "Convert documents and URLs to Markdown.",
+      "transport": "stdio",
+      "launch": { "command": "uvx", "args": ["markitdown-mcp@0.0.1a4"] },
+      "requires": { "on_path": ["uvx"] },
+      "aliases": ["microsoft/markitdown", "markitdown-mcp"],
+      "settings": {},
+      "notes": "Version pinned on purpose: an unpinned entry changes behaviour without a change on your side.",
+      "verify": { "min_tools": 1 }
+    },
+    "playwright": {
+      "summary": "Drive a real browser for UI verification.",
+      "transport": "stdio",
+      "launch": { "command": "npx", "args": ["@playwright/mcp@latest"] },
+      "requires": { "on_path": ["npx"] },
+      "aliases": ["microsoft/playwright-mcp", "playwright-mcp"],
+      "settings": {},
+      "notes": "The only entry of the suite that is not pinned. Pinning it is recommended once a version is settled; the audit reports @latest as an advisory, not an error.",
+      "verify": { "min_tools": 10 }
+    }
+  },
+  "out_of_suite": {
+    "$comment": "Entries found in the wild that the suite does not manage. Reported so they are a decision, not a surprise.",
+    "odoo-dev-mcp": "Runs `uv run <gist URL>`: fetches and executes remote code on every start. Out of the suite until it is vendored or pinned to a reviewed artifact.",
+    "io.github.github/github-mcp-server": "Not part of this suite.",
+    "github-mcp-server": "Not part of this suite."
+  }
+}

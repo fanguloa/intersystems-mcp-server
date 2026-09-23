@@ -24,12 +24,17 @@ MESSAGES = {
 
     # -- nivel superior --------------------------------------------------
     "app.description": (
-        "Servidor MCP para InterSystems IRIS/TrakCare y configuración de proyectos.\n"
+        "Servidor MCP para InterSystems IRIS/TrakCare, la configuración por proyecto que lee\n"
+        "y la instalación local de los clientes de IA que lo consumen.\n"
         "\n"
-        "La CLI solo edita archivos de configuración: `mcp` y `facility install` son los\n"
-        "únicos comandos que hablan con IRIS. Los comandos que resuelven un proyecto\n"
-        "aceptan --project-dir; si no, gana el directorio ancestro más cercano que tenga\n"
-        ".iris-mcp/config.json, igual que git encuentra .git."
+        "Tres trabajos. `mcp` sirve las herramientas de IRIS sobre stdio. `init`, `config`,\n"
+        "`servers`, `doctor` y `facility` administran la política de sitio de un despliegue.\n"
+        "`setup` registra el MCP en OpenCode e instala el harness SDD de Claude empaquetado,\n"
+        "con sus agentes, comandos y skills, más el logo de OpenCode.\n"
+        "\n"
+        "Solo `mcp` y `facility install` hablan con IRIS. Los comandos que resuelven un\n"
+        "proyecto aceptan --project-dir; si no, gana el directorio ancestro más cercano que\n"
+        "tenga .iris-mcp/config.json, igual que git encuentra .git."
     ),
     "app.examples": (
         "isc-ai setup --check                   previsualiza la configuración del cliente de IA\n"
@@ -38,8 +43,7 @@ MESSAGES = {
         "isc-ai doctor                          qué proyecto, archivos y servidores se resuelven aquí\n"
         "isc-ai config show --servers           lista combinada de servidores, secretos redactados\n"
         "isc-ai config validate                 termina en 1 si la configuración efectiva está rota\n"
-        "isc-ai facility render                 renderiza MCP.CCRMutation e imprime su SHA-256\n"
-        "isc-ai mcp                             ejecuta el servidor MCP sobre stdio (lo hace el cliente de IA)"
+        "isc-ai facility render                 renderiza MCP.CCRMutation e imprime su SHA-256"
     ),
     "app.footer": "Ejecuta 'isc-ai <command> -h' para ver los flags y ejemplos de un solo comando.",
 
@@ -175,6 +179,25 @@ MESSAGES = {
     ),
     "flag.install.ccr": "identificador de CCR en el formato configurado del sitio (site.ccr_id)",
 
+    # -- audit -----------------------------------------------------------
+    "cmd.audit.help": "audita los clientes de IA, la suite MCP recomendada, el harness y los modelos por rol",
+    "cmd.audit.examples": (
+        "isc-ai audit                           todo, como reporte JSON\n"
+        "isc-ai audit --errors-only             solo lo que está roto\n"
+        "isc-ai audit --project-dir C:\\work\\deployments\\site\n"
+        "\n"
+        "Solo lectura: nunca escribe, nunca levanta un servidor y nunca abre una conexión.\n"
+        "Códigos de salida: 0 limpio, 1 al menos un error, 2 solo advertencias o notas.\n"
+        "Los códigos de hallazgo son estables y están siempre en inglés, para poder\n"
+        "grepearlos y afirmarlos: CLIENT_MISSING, CONFIG_AMBIGUOUS, SERVER_MISSING,\n"
+        "SERVER_ALIAS, SERVER_DRIFT, SERVER_DISABLED, SERVER_DUPLICATE, SERVER_EXTRA,\n"
+        "SECRET_LEAK, SETTING_MISSING, SETTING_UNKNOWN, COMMAND_NOT_FOUND, PATH_NOT_FOUND,\n"
+        "HARNESS_FROZEN, HARNESS_INCOMPLETE, HARNESS_OBSOLETE, MODEL_ROLES_DECLARATIVE,\n"
+        "MODEL_ROLE_UNSET, MODEL_ROLES_CLIENT_GAP, DOC_MISSING, DOC_UNMANAGED."
+    ),
+    "flag.audit.errors_only": "imprime solo los hallazgos con severidad error",
+    "flag.audit.suite": "archivo alternativo de baseline de la suite",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "muestra el proyecto, los archivos y los servidores que resuelve este proceso",
     "cmd.doctor.examples": (
@@ -187,7 +210,7 @@ MESSAGES = {
     ),
 
     # -- setup -----------------------------------------------------------
-    "cmd.setup.help": "planifica o aplica la configuración local del cliente de IA",
+    "cmd.setup.help": "planifica o aplica la instalación local del cliente de IA: entrada MCP, logo y harness SDD",
     "cmd.setup.examples": (
         "isc-ai setup                           plan de solo lectura (igual que --check)\n"
         "isc-ai setup --apply\n"

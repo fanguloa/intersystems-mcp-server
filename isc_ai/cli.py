@@ -30,6 +30,7 @@ from pathlib import Path
 from isc_ai import __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
+from isc_ai.audit import run_audit
 from isc_ai.ccr_discovery import LocalPolicyError
 from isc_ai.config import ConfigError
 from isc_ai.i18n import t
@@ -270,6 +271,11 @@ def _parse_cli_args(argv):
     p_install.add_argument("--ccr", required=True, type=_ccr_cli_value, help=t("flag.install.ccr"))
     p_install.add_argument("--upgrade", action="store_true")
     p_install.add_argument("--expected-current-sha256", type=_sha256_cli_value)
+
+    p_audit = _add_parser(sub, "audit", "cmd.audit.help", "cmd.audit.examples")
+    _add_project_dir(p_audit)
+    p_audit.add_argument("--errors-only", action="store_true", help=t("flag.audit.errors_only"))
+    p_audit.add_argument("--suite", help=t("flag.audit.suite"))
 
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
@@ -567,6 +573,18 @@ def _run_doctor(args):
     return 1 if problems else 0
 
 
+def _run_audit(args):
+    """Read-only report. Exit 1 on errors, 2 when only warnings or notes were found."""
+    report = run_audit(project_dir=getattr(args, "project_dir", None), suite_path=args.suite)
+    if args.errors_only:
+        report = dict(report, findings=[item for item in report["findings"] if item["severity"] == "error"])
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    summary = report["summary"]
+    if summary["errors"]:
+        return 1
+    return 2 if summary["warnings"] or summary["info"] else 0
+
+
 def _run_servers(args):
     if args.servers_command == "migrate":
         legacy = isc_config.legacy_user_servers_path()
@@ -652,6 +670,8 @@ def main(argv=None):
             return _run_servers(args)
         if args.command == "facility":
             return _run_facility(args)
+        if args.command == "audit":
+            return _run_audit(args)
         if args.command == "doctor":
             return _run_doctor(args)
         if args.command == "setup":

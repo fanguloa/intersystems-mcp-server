@@ -24,12 +24,17 @@ MESSAGES = {
 
     # -- top level -------------------------------------------------------
     "app.description": (
-        "InterSystems IRIS/TrakCare MCP server and project configuration.\n"
+        "InterSystems IRIS/TrakCare MCP server, the per-project configuration it reads, and\n"
+        "the local setup of the AI clients that consume it.\n"
         "\n"
-        "The CLI only edits configuration files: `mcp` and `facility install` are the only\n"
-        "commands that talk to IRIS. Commands that resolve a project accept --project-dir;\n"
-        "otherwise the nearest ancestor directory holding .iris-mcp/config.json wins, the\n"
-        "same way git finds .git."
+        "Three jobs. `mcp` serves the IRIS tools over stdio. `init`, `config`, `servers`,\n"
+        "`doctor` and `facility` manage the site policy of one deployment. `setup` registers\n"
+        "the MCP in OpenCode and installs the packaged Claude SDD harness, its agents,\n"
+        "commands and skills, plus the OpenCode logo.\n"
+        "\n"
+        "Only `mcp` and `facility install` talk to IRIS. Commands that resolve a project\n"
+        "accept --project-dir; otherwise the nearest ancestor directory holding\n"
+        ".iris-mcp/config.json wins, the same way git finds .git."
     ),
     "app.examples": (
         "isc-ai setup --check                   preview the local AI-client configuration\n"
@@ -38,8 +43,7 @@ MESSAGES = {
         "isc-ai doctor                          which project, files and servers resolve here\n"
         "isc-ai config show --servers           merged server list, secrets redacted\n"
         "isc-ai config validate                 exit 1 when the effective configuration is broken\n"
-        "isc-ai facility render                 render MCP.CCRMutation and print its SHA-256\n"
-        "isc-ai mcp                             run the MCP server over stdio (the AI client does this)"
+        "isc-ai facility render                 render MCP.CCRMutation and print its SHA-256"
     ),
     "app.footer": "Run 'isc-ai <command> -h' for the flags and examples of a single command.",
 
@@ -174,6 +178,25 @@ MESSAGES = {
     ),
     "flag.install.ccr": "CCR identifier in the configured site format (site.ccr_id)",
 
+    # -- audit -----------------------------------------------------------
+    "cmd.audit.help": "audit the AI clients, the recommended MCP suite, the harness and the model roles",
+    "cmd.audit.examples": (
+        "isc-ai audit                           everything, as a JSON report\n"
+        "isc-ai audit --errors-only             only what is broken\n"
+        "isc-ai audit --project-dir C:\\work\\deployments\\site\n"
+        "\n"
+        "Read-only: it never writes, never starts a server and never opens a connection.\n"
+        "Exit codes: 0 clean, 1 at least one error, 2 only warnings or notes.\n"
+        "Finding codes are stable and always English, so they can be grepped and asserted:\n"
+        "CLIENT_MISSING, CONFIG_AMBIGUOUS, SERVER_MISSING, SERVER_ALIAS, SERVER_DRIFT,\n"
+        "SERVER_DISABLED, SERVER_DUPLICATE, SERVER_EXTRA, SECRET_LEAK, SETTING_MISSING,\n"
+        "SETTING_UNKNOWN, COMMAND_NOT_FOUND, PATH_NOT_FOUND, HARNESS_FROZEN,\n"
+        "HARNESS_INCOMPLETE, HARNESS_OBSOLETE, MODEL_ROLES_DECLARATIVE, MODEL_ROLE_UNSET,\n"
+        "MODEL_ROLES_CLIENT_GAP, DOC_MISSING, DOC_UNMANAGED."
+    ),
+    "flag.audit.errors_only": "print only findings with severity error",
+    "flag.audit.suite": "alternative suite baseline file",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "show the project, files and servers this process resolves",
     "cmd.doctor.examples": (
@@ -186,7 +209,7 @@ MESSAGES = {
     ),
 
     # -- setup -----------------------------------------------------------
-    "cmd.setup.help": "plan or apply local AI-client configuration",
+    "cmd.setup.help": "plan or apply the local AI-client setup: MCP entry, logo and SDD harness",
     "cmd.setup.examples": (
         "isc-ai setup                           read-only plan (same as --check)\n"
         "isc-ai setup --apply\n"

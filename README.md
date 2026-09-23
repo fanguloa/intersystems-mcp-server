@@ -8,8 +8,10 @@ Un servidor de **Model Context Protocol (MCP)** para conectar asistentes de desa
 
 Se distribuye como el paquete Python instalable `isc-ai` (versión 0.3.0, solo
 biblioteca estándar, Python 3.11 o superior). El paquete expone un único binario,
-`isc-ai`, que agrupa el servidor MCP (`isc-ai mcp`) y la CLI que administra la
-configuración por proyecto (`init`, `config`, `servers`, `facility`, `doctor`, `setup`).
+`isc-ai`, que agrupa el servidor MCP (`isc-ai mcp`), la CLI que administra la
+configuración por proyecto (`init`, `config`, `servers`, `facility`, `doctor`) y la
+instalación local de los clientes de IA (`setup`: entrada MCP en OpenCode, logo y el
+harness SDD de Claude con sus agentes, comandos y skills empaquetados).
 Reemplaza al script suelto `intersystems-mcp-server/iris_mcp_server.py`.
 
 **Activación: HOLD.** El candidato local tiene discovery CCR parcial y controles
