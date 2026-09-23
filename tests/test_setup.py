@@ -147,12 +147,15 @@ class SetupTestCase(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["$schema"], setup.SCHEMA_URL)
 
     def test_malformed_shapes_are_rejected(self):
-        for data, expected in (({"mcp": []}, "'mcp' must be an object"), ({"mcp": {}, "plugin": {}}, "'plugin' must be an array")):
+        for data, expected in (({"mcp": []}, "'mcp' must be an object"),
+                               ({"mcp": {}, "plugin": {}}, "'plugin' must be an array")):
             with self.subTest(data=data):
                 with self.assertRaisesRegex(setup.SetupError, expected):
-                    setup.merge_opencode_config(data, logo_path="./plugins/isc-logo.tsx")
+                    setup.merge_opencode_config(data)
         with self.assertRaisesRegex(setup.SetupError, "environment must be an object"):
             setup.merge_opencode_config({"mcp": {"isc-ai": {"environment": []}}})
+        with self.assertRaisesRegex(setup.SetupError, "'plugin' must be an array"):
+            setup.merge_tui_config({"plugin": {}}, "logo.tsx")
 
     def test_jsonc_is_byte_preserved_and_returns_exact_manual_snippet(self):
         path = self.root / "opencode.jsonc"
@@ -191,10 +194,15 @@ class SetupTestCase(unittest.TestCase):
             apply=True, home=self.home, environ=self.environ,
             configure_opencode=True, install_logo=True, install_harness=False,
         )
-        target = setup.opencode_config_dir(self.home, self.environ) / "plugins" / "isc-logo.tsx"
+        config_dir = setup.opencode_config_dir(self.home, self.environ)
+        # TUI plugins live in tui-plugins/ and are registered in tui.json: opencode.json
+        # is for runtime plugins and its TUI would never load this file.
+        target = config_dir / "tui-plugins" / "isc-logo.tsx"
         self.assertEqual(target.read_bytes(), setup.LOGO_RESOURCE.read_bytes())
-        config = json.loads((setup.opencode_config_dir(self.home, self.environ) / "opencode.json").read_text(encoding="utf-8"))
-        self.assertIn("./plugins/isc-logo.tsx", config["plugin"])
+        tui = json.loads((config_dir / "tui.json").read_text(encoding="utf-8"))
+        self.assertIn(str(target), tui["plugin"])
+        config = json.loads((config_dir / "opencode.json").read_text(encoding="utf-8"))
+        self.assertNotIn("plugin", config, "the logo must not be registered as a runtime plugin")
         second = setup.run_setup(
             apply=True, home=self.home, environ=self.environ,
             configure_opencode=True, install_logo=True, install_harness=False,
@@ -210,9 +218,23 @@ class SetupTestCase(unittest.TestCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "user version")
         self.assertFalse(first["conflicts"])
 
+    def test_a_stale_logo_entry_in_opencode_config_is_removed(self):
+        config_dir = setup.opencode_config_dir(self.home, self.environ)
+        config_dir.mkdir(parents=True)
+        (config_dir / "opencode.json").write_text(
+            json.dumps({"plugin": ["./plugins/isc-logo.tsx", "keep-me"]}), encoding="utf-8")
+
+        setup.run_setup(
+            apply=True, home=self.home, environ=self.environ,
+            configure_opencode=True, install_logo=True, install_harness=False,
+        )
+
+        config = json.loads((config_dir / "opencode.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["plugin"], ["keep-me"], "an earlier version registered it in the wrong file")
+
     def test_conflicting_unregistered_logo_is_not_newly_registered(self):
         config_dir = setup.opencode_config_dir(self.home, self.environ)
-        target = config_dir / "plugins" / "isc-logo.tsx"
+        target = config_dir / "tui-plugins" / "isc-logo.tsx"
         target.parent.mkdir(parents=True)
         target.write_text("user version", encoding="utf-8")
 
@@ -221,15 +243,14 @@ class SetupTestCase(unittest.TestCase):
             configure_opencode=True, install_logo=True, install_harness=False,
         )
 
-        config = json.loads((config_dir / "opencode.json").read_text(encoding="utf-8"))
         self.assertIn(str(target), report["conflicts"])
-        self.assertNotIn("plugin", config)
+        self.assertFalse((config_dir / "tui.json").exists(), "a conflicting logo is not registered")
         self.assertEqual(target.read_text(encoding="utf-8"), "user version")
 
     def test_logo_content_install_requires_restart_when_config_is_unchanged(self):
         config_dir = setup.opencode_config_dir(self.home, self.environ)
         config_dir.mkdir(parents=True)
-        current, _ = setup.merge_opencode_config({}, logo_path="./plugins/isc-logo.tsx")
+        current, _ = setup.merge_opencode_config({})
         (config_dir / "opencode.json").write_text(json.dumps(current), encoding="utf-8")
 
         report = setup.run_setup(
@@ -463,6 +484,43 @@ class SetupTestCase(unittest.TestCase):
                     phase = path.stem
                     self.assertIn(f"~/.claude/skills/{phase}/SKILL.md", text)
 
+    def test_a_conflicting_harness_file_is_adopted_only_when_asked(self):
+        """A file this tool did not write is never overwritten without an explicit flag.
+
+        Adoption is the way out of a permanent conflict: the bundle wins once, its digest
+        is recorded, and later upgrades become ordinary upgrades instead of conflicts.
+        """
+        target = self.home / ".claude" / "agents" / "sdd-apply.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("installed by something else", encoding="utf-8")
+
+        plan = setup.run_setup(
+            apply=True, home=self.home, environ=self.environ,
+            configure_opencode=False, install_logo=False, install_harness=True,
+        )
+        self.assertIn(str(target), plan["conflicts"])
+        self.assertEqual(target.read_text(encoding="utf-8"), "installed by something else")
+        self.assertEqual(plan["adopted"], [])
+
+        adopted = setup.run_setup(
+            apply=True, home=self.home, environ=self.environ,
+            configure_opencode=False, install_logo=False, install_harness=True,
+            adopt_harness=True,
+        )
+        packaged = (setup.HARNESS_ROOT / "agents" / "sdd-apply.md").read_bytes()
+        self.assertIn(str(target), adopted["adopted"])
+        self.assertNotIn(str(target), adopted["conflicts"])
+        self.assertEqual(target.read_bytes(), packaged)
+
+        # The baseline is recorded, so the next run is a no-op rather than a conflict.
+        again = setup.run_setup(
+            apply=True, home=self.home, environ=self.environ,
+            configure_opencode=False, install_logo=False, install_harness=True,
+        )
+        actions = {item["target"]: item["action"] for item in again["actions"]}
+        self.assertEqual(actions[str(target)], "noop")
+        self.assertEqual(again["conflicts"], [])
+
     def test_install_sh_documents_flags_and_rejects_unknown_arguments_before_uv(self):
         text = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
         self.assertIn("Usage: ./install.sh [--apply]", text)
@@ -481,11 +539,14 @@ class SetupTestCase(unittest.TestCase):
             apply=True, home=self.home, environ=self.environ,
             configure_opencode=False, install_logo=True, install_harness=False,
         )
-        path = setup.opencode_config_dir(self.home, self.environ) / "opencode.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
+        config_dir = setup.opencode_config_dir(self.home, self.environ)
+        data = json.loads((config_dir / "opencode.json").read_text(encoding="utf-8"))
         self.assertNotIn("mcp", data)
+        self.assertNotIn("plugin", data)
         self.assertEqual(data["$schema"], setup.SCHEMA_URL)
-        self.assertEqual(data["plugin"], ["./plugins/isc-logo.tsx"])
+        tui = json.loads((config_dir / "tui.json").read_text(encoding="utf-8"))
+        self.assertEqual(tui["$schema"], setup.TUI_SCHEMA_URL)
+        self.assertEqual([Path(item).name for item in tui["plugin"]], ["isc-logo.tsx"])
 
 
 if __name__ == "__main__":

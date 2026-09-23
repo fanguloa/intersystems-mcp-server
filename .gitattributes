@@ -1,0 +1,9 @@
+# Default for source files: normalize to LF in the repository.
+* text=auto
+
+# Packaged resources are verified byte for byte against the sha256 digests recorded in
+# isc_ai/resources/harness/manifest.json. Any line-ending translation breaks that
+# verification and makes `isc-ai setup` fail on a fresh clone with
+# "harness resource hash mismatch", so git must not touch these bytes.
+# This rule is last on purpose: in .gitattributes the last matching pattern wins.
+isc_ai/resources/** -text

@@ -2,7 +2,7 @@
   "format": "ai-work-policy.future-configurator.model-roles",
   "schema_version": 1,
   "native_harness_config": false,
-  "runtime_applied": false,
+  "runtime_applied": true,
   "selection": {
     "provider_id": null,
     "model_id": null,
@@ -11,19 +11,29 @@
   },
   "fallback": "explicitly-approved-available-model-only",
   "role_defaults": {
-    "default": "sonnet-preference",
-    "sdd-explore": "sonnet-preference",
-    "sdd-propose": "sonnet-preference",
-    "sdd-spec": "sonnet-preference",
-    "sdd-design": "sonnet-preference",
-    "sdd-tasks": "sonnet-preference",
-    "sdd-apply": "sonnet-preference",
-    "sdd-verify": "sonnet-preference",
-    "sdd-archive": "haiku-preference",
-    "fresh-review": "sonnet-preference"
+    "default": "sonnet",
+    "sdd-explore": "sonnet",
+    "sdd-propose": "sonnet",
+    "sdd-spec": "sonnet",
+    "sdd-design": "sonnet",
+    "sdd-tasks": "sonnet",
+    "sdd-apply": "sonnet",
+    "sdd-verify": "sonnet",
+    "sdd-archive": "haiku",
+    "fresh-review": "sonnet"
   },
   "profiles": {
-    "sonnet-preference": {"intended_family": "sonnet", "provider_id": null, "model_id": null, "availability": "unverified"},
-    "haiku-preference": {"intended_family": "haiku", "provider_id": null, "model_id": null, "availability": "unverified"}
+    "sonnet-preference": {
+      "intended_family": "sonnet",
+      "provider_id": null,
+      "model_id": null,
+      "availability": "unverified"
+    },
+    "haiku-preference": {
+      "intended_family": "haiku",
+      "provider_id": null,
+      "model_id": null,
+      "availability": "unverified"
+    }
   }
 }

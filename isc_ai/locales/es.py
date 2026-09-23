@@ -225,6 +225,7 @@ MESSAGES = {
     "flag.setup.no_opencode": "no configura la entrada MCP de OpenCode",
     "flag.setup.no_logo": "no instala ni registra el logo de OpenCode",
     "flag.setup.no_harness": "no instala el harness genérico de Claude SDD",
+    "flag.setup.adopt_harness": "sobrescribe los archivos del harness en conflicto y registra el bundle como línea base",
     "flag.setup.timeout": "timeout de MCP en segundos",
     "flag.setup.with_opencode": "instala OpenCode con npm si falta (requiere --apply)",
 

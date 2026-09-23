@@ -21,6 +21,7 @@ from typing import Callable
 
 MCP_NAME = "isc-ai"
 SCHEMA_URL = "https://opencode.ai/config.json"
+TUI_SCHEMA_URL = "https://opencode.ai/tui.json"
 DEFAULT_TIMEOUT = 1800
 STALE_ENV_KEYS = ("IRIS_MCP_PROJECT_DIR", "IRIS_EXTRA_PACKAGES", "IRIS_MCP_CONFIG")
 RESOURCE_ROOT = Path(__file__).resolve().parent / "resources"
@@ -409,7 +410,6 @@ def claude_mcp_entry(existing=None, timeout=DEFAULT_TIMEOUT) -> dict:
 def merge_opencode_config(
     data: dict,
     timeout=DEFAULT_TIMEOUT,
-    logo_path: str | None = None,
     configure_mcp: bool = True,
 ) -> tuple[dict, bool]:
     if not isinstance(data, dict):
@@ -420,16 +420,31 @@ def merge_opencode_config(
         mcp[MCP_NAME] = opencode_mcp_entry(mcp.get(MCP_NAME), timeout)
         result["mcp"] = mcp
     result["$schema"] = SCHEMA_URL
-    if logo_path is not None:
-        plugins = _require_array(result, "plugin", Path("opencode.json"))
-        old_logo_paths = {
-            item for item in plugins
-            if isinstance(item, str) and PurePosixPath(item.replace("\\", "/")).name == LOGO_RESOURCE.name
-        }
-        plugins = [item for item in plugins if item not in old_logo_paths]
-        if logo_path not in plugins:
-            plugins.append(logo_path)
-        result["plugin"] = plugins
+    # The logo is a TUI plugin: it is registered in tui.json, never in opencode.json.
+    # An entry left here by an earlier version would make OpenCode try to load a TUI
+    # component as a runtime plugin, so it is removed on sight.
+    stale = [item for item in _require_array(result, "plugin", Path("opencode.json"))
+             if not (isinstance(item, str)
+                     and PurePosixPath(item.replace("\\", "/")).name == LOGO_RESOURCE.name)]
+    if "plugin" in result:
+        if stale:
+            result["plugin"] = stale
+        else:
+            result.pop("plugin")
+    return result, result != data
+
+
+def merge_tui_config(data: dict, logo_path: str) -> tuple[dict, bool]:
+    """Register the logo where OpenCode actually reads TUI plugins from."""
+    if not isinstance(data, dict):
+        raise SetupError("OpenCode TUI config must be an object")
+    result = dict(data)
+    result["$schema"] = TUI_SCHEMA_URL
+    plugins = [item for item in _require_array(result, "plugin", Path("tui.json"))
+               if not (isinstance(item, str)
+                       and PurePosixPath(item.replace("\\", "/")).name == LOGO_RESOURCE.name)]
+    plugins.append(logo_path)
+    result["plugin"] = plugins
     return result, result != data
 
 
@@ -615,6 +630,7 @@ def _run_setup_unlocked(
     configure_opencode: bool = True,
     install_logo: bool = True,
     install_harness: bool = True,
+    adopt_harness: bool = False,
     claude_project=None,
     opencode_config=None,
     with_opencode: bool = False,
@@ -628,7 +644,7 @@ def _run_setup_unlocked(
     timeout = _positive_timeout(timeout)
     environ = dict(os.environ if environ is None else environ)
     home = (Path.home() if home is None else Path(home)).expanduser().resolve(strict=False)
-    report = {"mode": "apply" if apply else "check", "actions": [], "conflicts": [], "manual": [], "obsolete": []}
+    report = {"mode": "apply" if apply else "check", "actions": [], "conflicts": [], "manual": [], "obsolete": [], "adopted": []}
     writes: list[ManagedWrite] = []
     config_home = _config_home(home, environ)
     state_file = _managed_target(config_home / "isc-ai", state_path(home, environ))
@@ -645,12 +661,14 @@ def _run_setup_unlocked(
         config_path = _managed_target(config_root, config_path)
 
     if install_logo:
+        # tui-plugins/ is where OpenCode loads TUI components from; plugins/ is for
+        # runtime plugins and is not read by the TUI at all.
         logo_target = _managed_target(
             config_dir,
-            config_dir / "plugins" / LOGO_RESOURCE.name,
+            config_dir / "tui-plugins" / LOGO_RESOURCE.name,
         )
         digest = _sha256(LOGO_RESOURCE.read_bytes())
-        state_key = "opencode/plugins/isc-logo.tsx"
+        state_key = "opencode/tui-plugins/isc-logo.tsx"
         logo_plan = _plan_file("logo", LOGO_RESOURCE, logo_target, digest, next_managed.get(state_key))
         report["actions"].append({"target": str(logo_plan.target), "action": logo_plan.action, "category": logo_plan.category})
         if logo_plan.action == "conflict":
@@ -659,22 +677,37 @@ def _run_setup_unlocked(
             next_managed[state_key] = digest
             if logo_plan.action in {"install", "upgrade"}:
                 writes.append(ManagedWrite(config_dir, logo_plan.target, logo_plan.source.read_bytes()))
+            # Registration lives in tui.json, next to the plugin directory.
+            tui_path = _managed_target(config_dir, config_dir / "tui.json")
+            tui_config, tui_strict, _ = load_json_file(tui_path)
+            merged_tui, tui_changed = merge_tui_config(tui_config, str(logo_target))
+            if tui_changed and not tui_strict:
+                report["manual"].append(_manual_action(
+                    tui_path,
+                    "JSONC/commented JSON is preserved byte-for-byte; merge this snippet manually",
+                    {"plugin": merged_tui["plugin"]},
+                ))
+            elif tui_changed:
+                writes.append(ManagedWrite(config_dir, tui_path, _json_bytes(merged_tui)))
+                report["actions"].append({
+                    "target": str(tui_path),
+                    "action": "update" if tui_path.exists() else "install",
+                    "category": "logo",
+                })
+            else:
+                report["actions"].append({"target": str(tui_path), "action": "noop", "category": "logo"})
 
     if configure_opencode or install_logo:
         config, strict, _ = load_json_file(config_path)
-        logo_config_path = "./plugins/isc-logo.tsx" if logo_plan and logo_plan.action != "conflict" else None
         merged, changed = merge_opencode_config(
             config,
             timeout=timeout,
-            logo_path=logo_config_path,
             configure_mcp=configure_opencode,
         )
         if changed and not strict:
             snippet = {"$schema": SCHEMA_URL}
             if configure_opencode:
                 snippet["mcp"] = {MCP_NAME: merged["mcp"][MCP_NAME]}
-            if logo_config_path is not None:
-                snippet["plugin"] = merged["plugin"]
             report["manual"].append(_manual_action(
                 config_path,
                 "JSONC/commented JSON is preserved byte-for-byte; merge this snippet manually",
@@ -712,12 +745,20 @@ def _run_setup_unlocked(
         report["obsolete"].extend(str(home / ".claude" / Path(*PurePosixPath(item).parts)) for item in obsolete)
         for plan in plans:
             relative = plan.target.relative_to(home / ".claude").as_posix()
-            report["actions"].append({"target": str(plan.target), "action": plan.action, "category": plan.category})
-            if plan.action == "conflict":
+            action = plan.action
+            if action == "conflict" and adopt_harness:
+                # The installed copy was not written by this tool and differs from the
+                # bundle. Adoption is the explicit way out: the bundle wins and its
+                # digest is recorded, so later upgrades stop being conflicts. Without
+                # this flag a conflict is never overwritten.
+                action = "adopt"
+                report["adopted"].append(str(plan.target))
+            report["actions"].append({"target": str(plan.target), "action": action, "category": plan.category})
+            if action == "conflict":
                 report["conflicts"].append(str(plan.target))
                 continue
             next_managed[relative] = plan.digest
-            if plan.action in {"install", "upgrade"}:
+            if action in {"install", "upgrade", "adopt"}:
                 writes.append(ManagedWrite(home / ".claude", plan.target, plan.source.read_bytes()))
 
     if apply:
@@ -752,6 +793,7 @@ def run_setup(
     configure_opencode: bool = True,
     install_logo: bool = True,
     install_harness: bool = True,
+    adopt_harness: bool = False,
     claude_project=None,
     opencode_config=None,
     with_opencode: bool = False,
@@ -764,7 +806,7 @@ def run_setup(
         return _run_setup_unlocked(
             apply=apply, check=check, home=resolved_home, environ=environ,
             configure_opencode=configure_opencode, install_logo=install_logo,
-            install_harness=install_harness, claude_project=claude_project,
+            install_harness=install_harness, adopt_harness=adopt_harness, claude_project=claude_project,
             opencode_config=opencode_config, with_opencode=with_opencode, timeout=timeout,
         )
     if check:
@@ -774,6 +816,6 @@ def run_setup(
         return _run_setup_unlocked(
             apply=True, check=False, home=resolved_home, environ=environ,
             configure_opencode=configure_opencode, install_logo=install_logo,
-            install_harness=install_harness, claude_project=claude_project,
+            install_harness=install_harness, adopt_harness=adopt_harness, claude_project=claude_project,
             opencode_config=opencode_config, with_opencode=with_opencode, timeout=timeout,
         )

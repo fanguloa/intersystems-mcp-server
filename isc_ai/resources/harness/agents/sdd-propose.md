@@ -1,5 +1,6 @@
 ---
 name: sdd-propose
+model: sonnet
 description: Turn approved exploration into a scoped SDD proposal.
 tools: Read, Edit, Write, Grep, Glob
 ---

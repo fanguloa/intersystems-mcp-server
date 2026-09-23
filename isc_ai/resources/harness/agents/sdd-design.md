@@ -1,5 +1,6 @@
 ---
 name: sdd-design
+model: sonnet
 description: Create the technical design for an approved SDD proposal.
 tools: Read, Edit, Write, Grep, Glob
 ---

@@ -1,6 +1,6 @@
 {
   "schema": "isc-ai.harness-manifest.v1",
-  "bundle_version": 2,
+  "bundle_version": 3,
   "reviewed": true,
   "omitted": [
     "commands/sdd-new.md",
@@ -9,43 +9,233 @@
   ],
   "omission_reason": "Meta-commands depend on ambient orchestrator instructions and are omitted rather than installing broken references.",
   "files": [
-    {"category": "agent", "source": "agents/sdd-apply.md", "destination": "agents/sdd-apply.md", "sha256": "998bdac8ff121d53c46fd426c72de8e0fe575cecb49838d5976f7b26a84f8612"},
-    {"category": "agent", "source": "agents/sdd-archive.md", "destination": "agents/sdd-archive.md", "sha256": "030168f4ed861343b5e67435294a8a4312a6c4f2e4e02c62da42acd9de690829"},
-    {"category": "agent", "source": "agents/sdd-design.md", "destination": "agents/sdd-design.md", "sha256": "7b72ab0deeb40369d299bed65d77d611ae19e327a30875aca12e0054492062dc"},
-    {"category": "agent", "source": "agents/sdd-explore.md", "destination": "agents/sdd-explore.md", "sha256": "4560eeaf4914abea942f15a72a4dabf51d15acf66d50e30680197f31177ff8dd"},
-    {"category": "agent", "source": "agents/sdd-propose.md", "destination": "agents/sdd-propose.md", "sha256": "fb35f78c0296695e837fe8a1efb1cdbf986c7419803d2f0a5c8e69228e3db307"},
-    {"category": "agent", "source": "agents/sdd-spec.md", "destination": "agents/sdd-spec.md", "sha256": "24d7439b3801fcec64499dcee54fc6dd2f1956a33b5883bd9bd0bb16e148f381"},
-    {"category": "agent", "source": "agents/sdd-tasks.md", "destination": "agents/sdd-tasks.md", "sha256": "cbded9eceddf8907f0e9581aa93aa0c0d2214884bb6e9fa5375365d23a792873"},
-    {"category": "agent", "source": "agents/sdd-verify.md", "destination": "agents/sdd-verify.md", "sha256": "6680e05b1e29cec25d33243cc11f6ca2cde79ffb9e7362cd907808813dccec53"},
-    {"category": "command", "source": "commands/sdd-apply.md", "destination": "commands/sdd-apply.md", "sha256": "47a4cd98421ade5962c56465e9ceb1b791f196b4dc4cfccc31f16da32b341399"},
-    {"category": "command", "source": "commands/sdd-archive.md", "destination": "commands/sdd-archive.md", "sha256": "2841ec625801a34b6a70ad04558605887f581919a717773bb913336ec4f9ea4d"},
-    {"category": "command", "source": "commands/sdd-explore.md", "destination": "commands/sdd-explore.md", "sha256": "d7cbef4451828afd3991e0d74906fb27f08ab7cf7e912291b3a1851a44543f24"},
-    {"category": "command", "source": "commands/sdd-init.md", "destination": "commands/sdd-init.md", "sha256": "90b5171e37fce39b22988476137aa65010d79b06b2c4f864942a1b892ac85e07"},
-    {"category": "command", "source": "commands/sdd-onboard.md", "destination": "commands/sdd-onboard.md", "sha256": "8cc2d18a986ad83bac5640b58953e2332d6d455392c96c2097a512ab4dae3921"},
-    {"category": "command", "source": "commands/sdd-verify.md", "destination": "commands/sdd-verify.md", "sha256": "cad877278367ee551bae7fb2e1227132beb58a3d6cd9fcccdb05c73c1f7e83d0"},
-    {"category": "skill", "source": "skills/_shared/openspec-convention.md", "destination": "skills/_shared/openspec-convention.md", "sha256": "726a952182c977dc5465e749ec01610beec0990832523e8902a5d89b02f5fbc3"},
-    {"category": "skill", "source": "skills/_shared/persistence-contract.md", "destination": "skills/_shared/persistence-contract.md", "sha256": "4728aac04d186ceef43c120399e8bf98b14cb54e349291607f912ccd77df469d"},
-    {"category": "skill", "source": "skills/_shared/sdd-phase-common.md", "destination": "skills/_shared/sdd-phase-common.md", "sha256": "8ac57402b626d1d70e87793af09d4e13aedcdeb1431c089da2693feed8b73538"},
-    {"category": "skill", "source": "skills/_shared/skill-resolver.md", "destination": "skills/_shared/skill-resolver.md", "sha256": "a3b0c537ce6b46ed8ac50b620e8df8807f2335041a2b2dd1498b19e5d302109e"},
-    {"category": "skill", "source": "skills/_shared/SKILL.md", "destination": "skills/_shared/SKILL.md", "sha256": "34444f649cd77ec06d313cd9e892b94ff0aa815c6778b748049dbd8db8f42973"},
-    {"category": "skill", "source": "skills/ai-work-policy/assets/model-role-template.json", "destination": "skills/ai-work-policy/assets/model-role-template.json", "sha256": "baccfb5fecbecb4f56589320918265126020969d61ca897feda04ceef3b561e5"},
-    {"category": "skill", "source": "skills/ai-work-policy/references/runtime-compatibility.md", "destination": "skills/ai-work-policy/references/runtime-compatibility.md", "sha256": "027322521609780f89ddecbb4a7bdf9cc4b4481805c291c02d8ba4e67947bd43"},
-    {"category": "skill", "source": "skills/ai-work-policy/SKILL.md", "destination": "skills/ai-work-policy/SKILL.md", "sha256": "0eb322783d7f30da5ec2c84eff40aa83bc203a707e2f180403f0b04b72a8165d"},
-    {"category": "skill", "source": "skills/coding-assistant-guidelines/SKILL.md", "destination": "skills/coding-assistant-guidelines/SKILL.md", "sha256": "efc18c8f5ec25c029fe7fda0a507cd973812948db9f7293788816f5dc86cff8a"},
-    {"category": "skill", "source": "skills/sdd-apply/SKILL.md", "destination": "skills/sdd-apply/SKILL.md", "sha256": "136806f53874637aa2ecdfb401d42148eaa386e2db725c41a6eafbd3a81ec59a"},
-    {"category": "skill", "source": "skills/sdd-apply/strict-tdd.md", "destination": "skills/sdd-apply/strict-tdd.md", "sha256": "3647fccf1e29c868a82f019950745dfd57cfbdab346ee1eb0c3ec978ecf3aa02"},
-    {"category": "skill", "source": "skills/sdd-archive/SKILL.md", "destination": "skills/sdd-archive/SKILL.md", "sha256": "fb6b8e03598e06251e9ef5c222688322eb463c195cb777a55a44761075647fbd"},
-    {"category": "skill", "source": "skills/sdd-design/SKILL.md", "destination": "skills/sdd-design/SKILL.md", "sha256": "c09c650393c3815d185b4696c8bd407f2c5368575ed2bf8c64e0b409836d7e37"},
-    {"category": "skill", "source": "skills/sdd-explore/SKILL.md", "destination": "skills/sdd-explore/SKILL.md", "sha256": "970998ec69f2d378c6bc41deb96f427b7585a1939de87634f43e096a372bc932"},
-    {"category": "skill", "source": "skills/sdd-init/references/init-details.md", "destination": "skills/sdd-init/references/init-details.md", "sha256": "0b00a16aebcfea42b53c519a61c1e72c2ef2e9513a2e0ea4904084be54fb0848"},
-    {"category": "skill", "source": "skills/sdd-init/SKILL.md", "destination": "skills/sdd-init/SKILL.md", "sha256": "000bc3e88c754052dc9b917bdf03951f2b0b8acd7cb358ce380f617cf249998c"},
-    {"category": "skill", "source": "skills/sdd-onboard/SKILL.md", "destination": "skills/sdd-onboard/SKILL.md", "sha256": "13acb53880bf328054ad17e86b8f0812d6b3ed48959f5e1cfc01b084eac047f9"},
-    {"category": "skill", "source": "skills/sdd-propose/SKILL.md", "destination": "skills/sdd-propose/SKILL.md", "sha256": "4b83be468ff9acf52821e307be87c671f037931db8ec9477f6b8b936f596c046"},
-    {"category": "skill", "source": "skills/sdd-spec/SKILL.md", "destination": "skills/sdd-spec/SKILL.md", "sha256": "540bccdcd26135c6d86a648ef97a1872728809d93a04064b93655fb6206bc2b8"},
-    {"category": "skill", "source": "skills/sdd-tasks/SKILL.md", "destination": "skills/sdd-tasks/SKILL.md", "sha256": "1d907ed885365f1d98b64f62b34a476919e05c1505c4725c92a76603ef3aeb3f"},
-    {"category": "skill", "source": "skills/sdd-verify/references/report-format.md", "destination": "skills/sdd-verify/references/report-format.md", "sha256": "52738dc10f2de58e133e485cceaf68bcc7e562481553a90557735a345fbbabc8"},
-    {"category": "skill", "source": "skills/sdd-verify/SKILL.md", "destination": "skills/sdd-verify/SKILL.md", "sha256": "e8ad2eb7f53207e9740ac9804a265bc519391628d68d9b577fec4a383ac4e38b"},
-    {"category": "skill", "source": "skills/sdd-verify/strict-tdd-verify.md", "destination": "skills/sdd-verify/strict-tdd-verify.md", "sha256": "531cb024c3d9d14d4e3f7e862449d3a1e47919a76744adb584bfdcc72c3cbde0"},
-    {"category": "skill", "source": "skills/work-unit-commits/SKILL.md", "destination": "skills/work-unit-commits/SKILL.md", "sha256": "b97e057a7b2c4e5e6b0e16df062fd19391800bfab881d78db239ff8db439db6b"}
+    {
+      "category": "agent",
+      "source": "agents/sdd-apply.md",
+      "destination": "agents/sdd-apply.md",
+      "sha256": "e8e95601b981ba33ae37277e3a4481daca1420e7fe1bdcd3a255f6d7e3daa565"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-archive.md",
+      "destination": "agents/sdd-archive.md",
+      "sha256": "e3616245a1c57c1614d7be3c203ed28763d2916a74a84fe0ac932ba891b1c5ea"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-design.md",
+      "destination": "agents/sdd-design.md",
+      "sha256": "71eac573a8dfdda1c13fa4ca056061dbac4f75fd698f307b0fbd1c802fad1ff3"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-explore.md",
+      "destination": "agents/sdd-explore.md",
+      "sha256": "d36915491c2ff31493ce4a962753ed2360882cedb9ef3f25d45a7556a250a56b"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-propose.md",
+      "destination": "agents/sdd-propose.md",
+      "sha256": "ee0c530c966c5575121223da7f88029598749127e14d67634c0c855fe0abc29d"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-spec.md",
+      "destination": "agents/sdd-spec.md",
+      "sha256": "e3dba323f58491e82d6930eba4d92145cd9699132e684690b6cb9951ef35a80e"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-tasks.md",
+      "destination": "agents/sdd-tasks.md",
+      "sha256": "3c867f542774164701c47a700b62439861c261c8acc1e67b6d2531db1591fb39"
+    },
+    {
+      "category": "agent",
+      "source": "agents/sdd-verify.md",
+      "destination": "agents/sdd-verify.md",
+      "sha256": "de881a36fe006d4fd6caafebea7638715e0d187c11c496487880951632427f31"
+    },
+    {
+      "category": "command",
+      "source": "commands/sdd-apply.md",
+      "destination": "commands/sdd-apply.md",
+      "sha256": "47a4cd98421ade5962c56465e9ceb1b791f196b4dc4cfccc31f16da32b341399"
+    },
+    {
+      "category": "command",
+      "source": "commands/sdd-archive.md",
+      "destination": "commands/sdd-archive.md",
+      "sha256": "2841ec625801a34b6a70ad04558605887f581919a717773bb913336ec4f9ea4d"
+    },
+    {
+      "category": "command",
+      "source": "commands/sdd-explore.md",
+      "destination": "commands/sdd-explore.md",
+      "sha256": "d7cbef4451828afd3991e0d74906fb27f08ab7cf7e912291b3a1851a44543f24"
+    },
+    {
+      "category": "command",
+      "source": "commands/sdd-init.md",
+      "destination": "commands/sdd-init.md",
+      "sha256": "90b5171e37fce39b22988476137aa65010d79b06b2c4f864942a1b892ac85e07"
+    },
+    {
+      "category": "command",
+      "source": "commands/sdd-onboard.md",
+      "destination": "commands/sdd-onboard.md",
+      "sha256": "8cc2d18a986ad83bac5640b58953e2332d6d455392c96c2097a512ab4dae3921"
+    },
+    {
+      "category": "command",
+      "source": "commands/sdd-verify.md",
+      "destination": "commands/sdd-verify.md",
+      "sha256": "cad877278367ee551bae7fb2e1227132beb58a3d6cd9fcccdb05c73c1f7e83d0"
+    },
+    {
+      "category": "skill",
+      "source": "skills/_shared/openspec-convention.md",
+      "destination": "skills/_shared/openspec-convention.md",
+      "sha256": "726a952182c977dc5465e749ec01610beec0990832523e8902a5d89b02f5fbc3"
+    },
+    {
+      "category": "skill",
+      "source": "skills/_shared/persistence-contract.md",
+      "destination": "skills/_shared/persistence-contract.md",
+      "sha256": "4728aac04d186ceef43c120399e8bf98b14cb54e349291607f912ccd77df469d"
+    },
+    {
+      "category": "skill",
+      "source": "skills/_shared/sdd-phase-common.md",
+      "destination": "skills/_shared/sdd-phase-common.md",
+      "sha256": "8ac57402b626d1d70e87793af09d4e13aedcdeb1431c089da2693feed8b73538"
+    },
+    {
+      "category": "skill",
+      "source": "skills/_shared/skill-resolver.md",
+      "destination": "skills/_shared/skill-resolver.md",
+      "sha256": "a3b0c537ce6b46ed8ac50b620e8df8807f2335041a2b2dd1498b19e5d302109e"
+    },
+    {
+      "category": "skill",
+      "source": "skills/_shared/SKILL.md",
+      "destination": "skills/_shared/SKILL.md",
+      "sha256": "34444f649cd77ec06d313cd9e892b94ff0aa815c6778b748049dbd8db8f42973"
+    },
+    {
+      "category": "skill",
+      "source": "skills/ai-work-policy/assets/model-role-template.json",
+      "destination": "skills/ai-work-policy/assets/model-role-template.json",
+      "sha256": "ecb434ec24b4fe91aec430e6420c69a853bbcb9ac4e77e0825d47d27614c7a0f"
+    },
+    {
+      "category": "skill",
+      "source": "skills/ai-work-policy/references/runtime-compatibility.md",
+      "destination": "skills/ai-work-policy/references/runtime-compatibility.md",
+      "sha256": "027322521609780f89ddecbb4a7bdf9cc4b4481805c291c02d8ba4e67947bd43"
+    },
+    {
+      "category": "skill",
+      "source": "skills/ai-work-policy/SKILL.md",
+      "destination": "skills/ai-work-policy/SKILL.md",
+      "sha256": "0eb322783d7f30da5ec2c84eff40aa83bc203a707e2f180403f0b04b72a8165d"
+    },
+    {
+      "category": "skill",
+      "source": "skills/coding-assistant-guidelines/SKILL.md",
+      "destination": "skills/coding-assistant-guidelines/SKILL.md",
+      "sha256": "efc18c8f5ec25c029fe7fda0a507cd973812948db9f7293788816f5dc86cff8a"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-apply/SKILL.md",
+      "destination": "skills/sdd-apply/SKILL.md",
+      "sha256": "136806f53874637aa2ecdfb401d42148eaa386e2db725c41a6eafbd3a81ec59a"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-apply/strict-tdd.md",
+      "destination": "skills/sdd-apply/strict-tdd.md",
+      "sha256": "3647fccf1e29c868a82f019950745dfd57cfbdab346ee1eb0c3ec978ecf3aa02"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-archive/SKILL.md",
+      "destination": "skills/sdd-archive/SKILL.md",
+      "sha256": "fb6b8e03598e06251e9ef5c222688322eb463c195cb777a55a44761075647fbd"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-design/SKILL.md",
+      "destination": "skills/sdd-design/SKILL.md",
+      "sha256": "c09c650393c3815d185b4696c8bd407f2c5368575ed2bf8c64e0b409836d7e37"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-explore/SKILL.md",
+      "destination": "skills/sdd-explore/SKILL.md",
+      "sha256": "970998ec69f2d378c6bc41deb96f427b7585a1939de87634f43e096a372bc932"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-init/references/init-details.md",
+      "destination": "skills/sdd-init/references/init-details.md",
+      "sha256": "0b00a16aebcfea42b53c519a61c1e72c2ef2e9513a2e0ea4904084be54fb0848"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-init/SKILL.md",
+      "destination": "skills/sdd-init/SKILL.md",
+      "sha256": "000bc3e88c754052dc9b917bdf03951f2b0b8acd7cb358ce380f617cf249998c"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-onboard/SKILL.md",
+      "destination": "skills/sdd-onboard/SKILL.md",
+      "sha256": "13acb53880bf328054ad17e86b8f0812d6b3ed48959f5e1cfc01b084eac047f9"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-propose/SKILL.md",
+      "destination": "skills/sdd-propose/SKILL.md",
+      "sha256": "4b83be468ff9acf52821e307be87c671f037931db8ec9477f6b8b936f596c046"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-spec/SKILL.md",
+      "destination": "skills/sdd-spec/SKILL.md",
+      "sha256": "540bccdcd26135c6d86a648ef97a1872728809d93a04064b93655fb6206bc2b8"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-tasks/SKILL.md",
+      "destination": "skills/sdd-tasks/SKILL.md",
+      "sha256": "1d907ed885365f1d98b64f62b34a476919e05c1505c4725c92a76603ef3aeb3f"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-verify/references/report-format.md",
+      "destination": "skills/sdd-verify/references/report-format.md",
+      "sha256": "52738dc10f2de58e133e485cceaf68bcc7e562481553a90557735a345fbbabc8"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-verify/SKILL.md",
+      "destination": "skills/sdd-verify/SKILL.md",
+      "sha256": "e8ad2eb7f53207e9740ac9804a265bc519391628d68d9b577fec4a383ac4e38b"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-verify/strict-tdd-verify.md",
+      "destination": "skills/sdd-verify/strict-tdd-verify.md",
+      "sha256": "531cb024c3d9d14d4e3f7e862449d3a1e47919a76744adb584bfdcc72c3cbde0"
+    },
+    {
+      "category": "skill",
+      "source": "skills/work-unit-commits/SKILL.md",
+      "destination": "skills/work-unit-commits/SKILL.md",
+      "sha256": "b97e057a7b2c4e5e6b0e16df062fd19391800bfab881d78db239ff8db439db6b"
+    }
   ]
 }

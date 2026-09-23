@@ -1,5 +1,6 @@
 ---
 name: sdd-archive
+model: haiku
 description: Archive a verified SDD change and preserve its traceability.
 tools: Read, Edit, Write, Glob
 ---

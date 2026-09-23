@@ -1,5 +1,6 @@
 ---
 name: sdd-spec
+model: sonnet
 description: Write testable requirements and scenarios from an SDD proposal.
 tools: Read, Edit, Write, Grep, Glob
 ---

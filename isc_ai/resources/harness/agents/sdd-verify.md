@@ -1,5 +1,6 @@
 ---
 name: sdd-verify
+model: sonnet
 description: Verify SDD implementation against requirements and runtime evidence.
 tools: Read, Grep, Glob, Bash
 ---

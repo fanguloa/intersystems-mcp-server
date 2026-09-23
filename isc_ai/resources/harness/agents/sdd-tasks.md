@@ -1,5 +1,6 @@
 ---
 name: sdd-tasks
+model: sonnet
 description: Break SDD specs and design into reviewable implementation tasks.
 tools: Read, Edit, Write, Grep, Glob
 ---

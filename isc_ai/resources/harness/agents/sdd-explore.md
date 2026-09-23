@@ -1,5 +1,6 @@
 ---
 name: sdd-explore
+model: sonnet
 description: Explore a change before proposal work begins.
 tools: Read, Grep, Glob, WebFetch, WebSearch
 ---

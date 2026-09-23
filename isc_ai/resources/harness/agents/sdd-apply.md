@@ -1,5 +1,6 @@
 ---
 name: sdd-apply
+model: sonnet
 description: Implement an assigned SDD work unit from its specs and design.
 tools: Read, Edit, Write, Glob, Grep, Bash
 ---

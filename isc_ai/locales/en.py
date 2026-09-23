@@ -224,6 +224,7 @@ MESSAGES = {
     "flag.setup.no_opencode": "do not configure the OpenCode MCP entry",
     "flag.setup.no_logo": "do not install/register the OpenCode logo",
     "flag.setup.no_harness": "do not install the generic Claude SDD harness",
+    "flag.setup.adopt_harness": "overwrite harness files that conflict and record the bundle as the baseline",
     "flag.setup.timeout": "MCP timeout in seconds",
     "flag.setup.with_opencode": "install OpenCode with npm if missing (requires --apply)",
 

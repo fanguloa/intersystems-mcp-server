@@ -289,6 +289,7 @@ def _parse_cli_args(argv):
     p_setup.add_argument("--no-opencode", action="store_true", help=t("flag.setup.no_opencode"))
     p_setup.add_argument("--no-logo", action="store_true", help=t("flag.setup.no_logo"))
     p_setup.add_argument("--no-harness", action="store_true", help=t("flag.setup.no_harness"))
+    p_setup.add_argument("--adopt-harness", action="store_true", help=t("flag.setup.adopt_harness"))
     p_setup.add_argument("--timeout", type=_positive_int, default=DEFAULT_TIMEOUT, help=t("flag.setup.timeout"))
     p_setup.add_argument("--with-opencode", action="store_true", help=t("flag.setup.with_opencode"))
 
@@ -609,6 +610,7 @@ def _run_setup(args):
         configure_opencode=not args.no_opencode,
         install_logo=not args.no_logo,
         install_harness=not args.no_harness,
+        adopt_harness=args.adopt_harness,
         claude_project=args.claude_project,
         opencode_config=args.opencode_config,
         with_opencode=args.with_opencode,
