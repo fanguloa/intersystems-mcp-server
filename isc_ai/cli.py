@@ -30,6 +30,7 @@ from pathlib import Path
 from isc_ai import __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
+from isc_ai import docs as isc_docs
 from isc_ai import suite as isc_suite
 from isc_ai.audit import run_audit
 from isc_ai.ccr_discovery import LocalPolicyError
@@ -288,6 +289,12 @@ def _parse_cli_args(argv):
     p_suite.add_argument("--server", action="append", help=t("flag.suite.server"))
     p_suite.add_argument("--prune-claude-global", action="store_true", help=t("flag.suite.prune_claude"))
     p_suite.add_argument("--suite", help=t("flag.audit.suite"))
+
+    p_docs = _add_parser(sub, "docs", "cmd.docs.help", "cmd.docs.examples")
+    _add_project_dir(p_docs)
+    docs_mode = p_docs.add_mutually_exclusive_group()
+    docs_mode.add_argument("--apply", action="store_true", help=t("flag.docs.apply"))
+    docs_mode.add_argument("--check", action="store_true", help=t("flag.docs.check"))
 
     p_doctor = _add_parser(sub, "doctor", "cmd.doctor.help", "cmd.doctor.examples")
     _add_project_dir(p_doctor)
@@ -598,6 +605,15 @@ def _run_audit(args):
     return 2 if summary["warnings"] or summary["info"] else 0
 
 
+def _run_docs(args):
+    """Refresh the managed blocks. Plan by default; --apply writes."""
+    runner = isc_docs.apply if args.apply else isc_docs.plan
+    result = runner(project_dir=getattr(args, "project_dir", None))
+    report = result[0] if isinstance(result, tuple) else result
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _run_suite(args):
     """Plan by default; --apply writes every file in one transaction or none."""
     runner = isc_suite.apply if args.apply else isc_suite.plan
@@ -701,6 +717,8 @@ def main(argv=None):
             return _run_facility(args)
         if args.command == "audit":
             return _run_audit(args)
+        if args.command == "docs":
+            return _run_docs(args)
         if args.command == "suite":
             return _run_suite(args)
         if args.command == "doctor":

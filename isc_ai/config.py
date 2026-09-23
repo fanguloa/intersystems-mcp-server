@@ -141,6 +141,9 @@ class SitePolicy:
     packages: dict = field(default_factory=dict)
     mutation_class_prefix: str = None
     mutation_source_root: Path = None
+    # Language the AI agents reply in. Not the language of this CLI (that is --lang):
+    # this one is rendered into the instruction files the agents read.
+    agent_reply_language: str = "es-CL"
 
     # -- CCR identifier -------------------------------------------------
 
@@ -488,6 +491,27 @@ def _parse_packages(data, policy_kwargs):
     policy_kwargs["packages"] = parsed
 
 
+def _parse_agents(data, policy_kwargs):
+    """Agent-facing preferences. Today only the language the agents reply in.
+
+    This is deliberately separate from the CLI's own language (--lang / ISC_AI_LANG):
+    one governs what this program prints, the other is rendered into the instruction
+    files the agents read, so it is a property of the project and of the team.
+    """
+    agents = data.get("agents")
+    if agents is None:
+        return
+    _expect(isinstance(agents, dict), "agents must be an object.")
+    unknown = set(agents) - {"reply_language"}
+    _expect(not unknown, f"Unknown keys in agents: {sorted(unknown)}.")
+    language = agents.get("reply_language")
+    if language is None:
+        return
+    _expect(isinstance(language, str) and re.fullmatch(r"[a-z]{2}(-[A-Z]{2})?", language),
+            "agents.reply_language must be a language tag such as 'es-CL', 'es' or 'en'.")
+    policy_kwargs["agent_reply_language"] = language
+
+
 def _parse_mutation(data, policy_kwargs, project_dir):
     mutation = data.get("mutation")
     if mutation is None:
@@ -504,13 +528,14 @@ def parse_policy(data, project_dir):
     _expect(isinstance(data, dict), "Project configuration must be a JSON object.")
     version = data.get("version", CONFIG_VERSION)
     _expect(version == CONFIG_VERSION, f"Unsupported configuration version {version!r}; expected {CONFIG_VERSION}.")
-    unknown = set(data) - {"version", "site", "canonical_base", "routes", "packages", "mutation", "servers", "$schema", "_comment"}
+    unknown = set(data) - {"version", "site", "canonical_base", "routes", "packages", "mutation", "agents", "servers", "$schema", "_comment"}
     _expect(not unknown, f"Unknown top-level keys: {sorted(unknown)}.")
     kwargs = {"configured": True}
     _parse_site(data, kwargs)
     _parse_canonical_base(data, kwargs)
     _parse_routes(data, kwargs)
     _parse_packages(data, kwargs)
+    _parse_agents(data, kwargs)
     _parse_mutation(data, kwargs, project_dir)
     return SitePolicy(**kwargs)
 

@@ -219,6 +219,28 @@ MESSAGES = {
     "flag.suite.prune_claude": "also repair the Claude global file: drop dead per-directory overrides, "
                               "rename aliased entries and replace literal secrets",
 
+    # -- docs ------------------------------------------------------------
+    "cmd.docs.help": "refresh the managed blocks of the deployment documentation",
+    "cmd.docs.examples": (
+        "isc-ai docs                            what would change, nothing written\n"
+        "isc-ai docs --apply\n"
+        "\n"
+        "Two blocks, delimited by <!-- isc-ai:NAME --> markers:\n"
+        "  topology  in WORKFLOW.md, derived from .iris-mcp/config.json so the documented\n"
+        "            hosts, HA nodes, VIP aliases, write exceptions, package catalog and\n"
+        "            CCR format cannot drift away from the policy that is enforced\n"
+        "  language  in AGENTS.md, the language the agents must reply in\n"
+        "\n"
+        "Nothing outside the markers is read for meaning or rewritten: annexes and\n"
+        "documented cases are yours. A document without markers gets the block appended at\n"
+        "the end, and that is reported.\n"
+        "\n"
+        "The reply language is not this CLI's language (--lang): change it with\n"
+        "`isc-ai config set agents.reply_language es-CL`."
+    ),
+    "flag.docs.apply": "write the changes",
+    "flag.docs.check": "print the plan without writing (default)",
+
     # -- doctor ----------------------------------------------------------
     "cmd.doctor.help": "show the project, files and servers this process resolves",
     "cmd.doctor.examples": (

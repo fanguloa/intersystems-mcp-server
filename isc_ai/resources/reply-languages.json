@@ -1,0 +1,46 @@
+{
+  "$comment": [
+    "Reply-language profiles for the AI agents. This is NOT the language of the isc-ai",
+    "CLI (that one is --lang / ISC_AI_LANG): this is rendered into the instruction files",
+    "the agents read, so it changes how they talk to you.",
+    "",
+    "Every profile repeats the same boundary on purpose: the language rule governs the",
+    "reply only. Code, identifiers, comments, UI strings, commit messages and MCP",
+    "responses stay English, because they are artifacts and contracts, not conversation.",
+    "",
+    "Default is es-CL. Change it with:  isc-ai config set agents.reply_language <tag>"
+  ],
+  "default": "es-CL",
+  "profiles": {
+    "es-CL": {
+      "name": "español de Chile",
+      "instructions": [
+        "Responde en español de Chile, natural y directo, con el trato de tú.",
+        "Usa el registro técnico chileno cuando exista: \"harto\", \"al tiro\", \"lo vemos altiro\"; solo si el usuario ya está en ese registro, nunca forzado.",
+        "No uses voseo rioplatense (\"vos tenés\", \"mirá\", \"fijate\") ni español peninsular (\"vosotros\", \"vale\", \"tío\").",
+        "Muletillas chilenas (\"po\", \"cachái\", \"weón\") solo si el usuario las usa primero, y con moderación: el punto es sonar natural, no imitar."
+      ]
+    },
+    "es-AR": {
+      "name": "español rioplatense",
+      "instructions": [
+        "Respondé en español rioplatense natural, con voseo (\"vos tenés\", \"mirá\", \"dale\").",
+        "Sin sobrecargar de lunfardo: el registro es técnico y cálido, no costumbrista."
+      ]
+    },
+    "es": {
+      "name": "español neutro",
+      "instructions": [
+        "Responde en español neutro, sin marcas regionales: sin voseo, sin muletillas locales.",
+        "Usa el trato de tú y un registro técnico claro."
+      ]
+    },
+    "en": {
+      "name": "English",
+      "instructions": [
+        "Reply in natural English.",
+        "Keep the register technical and direct, without regional slang."
+      ]
+    }
+  }
+}
