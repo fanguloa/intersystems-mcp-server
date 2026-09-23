@@ -32,11 +32,19 @@ MODEL_LINE = re.compile(r"(?m)^model:[^\n]*\n")
 
 
 def families(template):
-    """role -> model family, resolved through the profile table."""
+    """role -> model family, resolved through the profile table.
+
+    A preference may name a profile (`sonnet-preference`) or already be the family
+    itself, which is what it becomes after the first render. Both resolve, so the tool
+    is idempotent instead of finding nothing on a second run.
+    """
     profiles = template.get("profiles") or {}
     resolved = {}
     for role, preference in (template.get("role_defaults") or {}).items():
-        profile = profiles.get(preference) or {}
+        profile = profiles.get(preference)
+        if profile is None:
+            resolved[role] = preference
+            continue
         family = profile.get("model_id") or profile.get("intended_family")
         if family:
             resolved[role] = family

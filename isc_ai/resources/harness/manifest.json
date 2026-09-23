@@ -1,6 +1,6 @@
 {
   "schema": "isc-ai.harness-manifest.v1",
-  "bundle_version": 3,
+  "bundle_version": 4,
   "reviewed": true,
   "omitted": [
     "commands/sdd-new.md",
@@ -95,6 +95,12 @@
     },
     {
       "category": "skill",
+      "source": "skills/_shared/SKILL.md",
+      "destination": "skills/_shared/SKILL.md",
+      "sha256": "34444f649cd77ec06d313cd9e892b94ff0aa815c6778b748049dbd8db8f42973"
+    },
+    {
+      "category": "skill",
       "source": "skills/_shared/openspec-convention.md",
       "destination": "skills/_shared/openspec-convention.md",
       "sha256": "726a952182c977dc5465e749ec01610beec0990832523e8902a5d89b02f5fbc3"
@@ -119,9 +125,9 @@
     },
     {
       "category": "skill",
-      "source": "skills/_shared/SKILL.md",
-      "destination": "skills/_shared/SKILL.md",
-      "sha256": "34444f649cd77ec06d313cd9e892b94ff0aa815c6778b748049dbd8db8f42973"
+      "source": "skills/ai-work-policy/SKILL.md",
+      "destination": "skills/ai-work-policy/SKILL.md",
+      "sha256": "0eb322783d7f30da5ec2c84eff40aa83bc203a707e2f180403f0b04b72a8165d"
     },
     {
       "category": "skill",
@@ -137,15 +143,63 @@
     },
     {
       "category": "skill",
-      "source": "skills/ai-work-policy/SKILL.md",
-      "destination": "skills/ai-work-policy/SKILL.md",
-      "sha256": "0eb322783d7f30da5ec2c84eff40aa83bc203a707e2f180403f0b04b72a8165d"
+      "source": "skills/ccr-alignment/SKILL.md",
+      "destination": "skills/ccr-alignment/SKILL.md",
+      "sha256": "8e04320b94c26737997a2595d9838ae1a73dd8247d8e7619ea1572eb05777768"
+    },
+    {
+      "category": "skill",
+      "source": "skills/ccr-alignment/assets/diagnostic-queries.sql",
+      "destination": "skills/ccr-alignment/assets/diagnostic-queries.sql",
+      "sha256": "66d74aa9b4897a0157f4a57443140b28b3dfc01530369cee0485dd477ef854ca"
     },
     {
       "category": "skill",
       "source": "skills/coding-assistant-guidelines/SKILL.md",
       "destination": "skills/coding-assistant-guidelines/SKILL.md",
       "sha256": "efc18c8f5ec25c029fe7fda0a507cd973812948db9f7293788816f5dc86cff8a"
+    },
+    {
+      "category": "skill",
+      "source": "skills/intersystems-development/SKILL.md",
+      "destination": "skills/intersystems-development/SKILL.md",
+      "sha256": "96b161bddce041fdcd3e10e537967fa6018d3cc60e8c7150172980f81afbff77"
+    },
+    {
+      "category": "skill",
+      "source": "skills/intersystems-development/references/documentation-sources.md",
+      "destination": "skills/intersystems-development/references/documentation-sources.md",
+      "sha256": "721019d78fb9fa1a8e3054006a85c34a7ae5c480808a4c854f491dffc61c8ba8"
+    },
+    {
+      "category": "skill",
+      "source": "skills/intersystems-development/references/environment-package-policy.md",
+      "destination": "skills/intersystems-development/references/environment-package-policy.md",
+      "sha256": "25edfe2bfab9ff875b267ab809f79af57d71df2de3d7ace8c903feafa71335b2"
+    },
+    {
+      "category": "skill",
+      "source": "skills/review-changelist/SKILL.md",
+      "destination": "skills/review-changelist/SKILL.md",
+      "sha256": "763a932cf8bda6fffb71844f69f586ec8f12df490d459b88fb638e8da220fb08"
+    },
+    {
+      "category": "skill",
+      "source": "skills/review-changelist/assets/change-note-template.md",
+      "destination": "skills/review-changelist/assets/change-note-template.md",
+      "sha256": "ccf1c17257f80989ff255493e74bf77976069cb13e15823512461d6551a25c91"
+    },
+    {
+      "category": "skill",
+      "source": "skills/review-changelist/assets/p4-commands.md",
+      "destination": "skills/review-changelist/assets/p4-commands.md",
+      "sha256": "e02f673a9ee4fcd6bb383a3d7d42fe561d193b7cd26c0fbc188566d4661ebad1"
+    },
+    {
+      "category": "skill",
+      "source": "skills/review-changelist/references/standards-checklist.md",
+      "destination": "skills/review-changelist/references/standards-checklist.md",
+      "sha256": "cd50c58b4b2da67d068d00db7fd308d69fa547f4a56c53f384c1569f1c27371c"
     },
     {
       "category": "skill",
@@ -179,15 +233,15 @@
     },
     {
       "category": "skill",
-      "source": "skills/sdd-init/references/init-details.md",
-      "destination": "skills/sdd-init/references/init-details.md",
-      "sha256": "0b00a16aebcfea42b53c519a61c1e72c2ef2e9513a2e0ea4904084be54fb0848"
-    },
-    {
-      "category": "skill",
       "source": "skills/sdd-init/SKILL.md",
       "destination": "skills/sdd-init/SKILL.md",
       "sha256": "000bc3e88c754052dc9b917bdf03951f2b0b8acd7cb358ce380f617cf249998c"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-init/references/init-details.md",
+      "destination": "skills/sdd-init/references/init-details.md",
+      "sha256": "0b00a16aebcfea42b53c519a61c1e72c2ef2e9513a2e0ea4904084be54fb0848"
     },
     {
       "category": "skill",
@@ -215,15 +269,15 @@
     },
     {
       "category": "skill",
-      "source": "skills/sdd-verify/references/report-format.md",
-      "destination": "skills/sdd-verify/references/report-format.md",
-      "sha256": "52738dc10f2de58e133e485cceaf68bcc7e562481553a90557735a345fbbabc8"
-    },
-    {
-      "category": "skill",
       "source": "skills/sdd-verify/SKILL.md",
       "destination": "skills/sdd-verify/SKILL.md",
       "sha256": "e8ad2eb7f53207e9740ac9804a265bc519391628d68d9b577fec4a383ac4e38b"
+    },
+    {
+      "category": "skill",
+      "source": "skills/sdd-verify/references/report-format.md",
+      "destination": "skills/sdd-verify/references/report-format.md",
+      "sha256": "52738dc10f2de58e133e485cceaf68bcc7e562481553a90557735a345fbbabc8"
     },
     {
       "category": "skill",

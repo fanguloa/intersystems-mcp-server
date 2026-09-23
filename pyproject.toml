@@ -22,6 +22,9 @@ isc-ai = "isc_ai.cli:main"
 packages = ["isc_ai", "isc_ai.locales"]
 
 [tool.setuptools.package-data]
+# Globs must cover every file type the bundle actually carries: the manifest verifies
+# each one by sha256, so a resource missing from the wheel is a broken installation, not
+# a degraded one. Assets and references are matched wholesale for that reason.
 isc_ai = [
   "resources/*.json",
   "resources/MCP/*.template",
@@ -30,6 +33,6 @@ isc_ai = [
   "resources/harness/agents/*.md",
   "resources/harness/commands/*.md",
   "resources/harness/skills/*/*.md",
-  "resources/harness/skills/*/references/*.md",
-  "resources/harness/skills/*/assets/*.json",
+  "resources/harness/skills/*/references/*",
+  "resources/harness/skills/*/assets/*",
 ]

@@ -1,31 +1,22 @@
 """The packaged harness must be safe to ship to someone else.
 
-This is the permanent form of the gate in tools/pack_harness.py. That script decides
-what may be packed; this test decides what may stay packed, so a file added by hand or
-by a future repack cannot quietly carry a credential, a personal path or one client's
-identifiers into a bundle that installs on other people's machines.
+The gate itself lives in tools/bundle_gate.py and is imported here on purpose: the tools
+decide what may enter the bundle, this decides what may stay, and both must apply the
+same rule. A second copy of the rule is a second chance to disagree with it.
 """
 
+import hashlib
 import json
-import re
+import sys
 import unittest
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parent.parent / "isc_ai" / "resources" / "harness"
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))
+from bundle_gate import CLIENT_NAMES, MACHINE_PATH, gate  # noqa: E402
+
+HARNESS = REPO / "isc_ai" / "resources" / "harness"
 MANIFEST = HARNESS / "manifest.json"
-
-CREDENTIAL = re.compile(r"\b([a-z][a-z0-9._-]{2,}):([^\s|<>\"'/`]{4,})\b")
-CREDENTIAL_SAFE = re.compile(r"(?i)(https?:|isfs:|file:|env:|\{env|\$\{|\{user\}|user:pass|example|schema)")
-IN_BACKTICKS = re.compile(r"`[^`]*`")
-MACHINE_PATH = re.compile(r"(?i)([A-Za-z]:[\\/]Users[\\/][^\\/\s]+|/home/[^/\s]+|/Users/[^/\s]+)")
-CLIENT_NAMES = re.compile(r"(?i)\b(achs|clua|clme|clrs|clcb|cluc|sdsr|sdcq|sdor|sdtl|sdvn|smoc)\w*\b")
-
-
-def looks_like_a_password(value):
-    has_letter = any(char.isalpha() for char in value)
-    has_digit = any(char.isdigit() for char in value)
-    mixed_case = value != value.lower() and value != value.upper()
-    return has_letter and (has_digit or (len(value) >= 8 and mixed_case))
 
 
 class BundleSafetyTests(unittest.TestCase):
@@ -35,11 +26,9 @@ class BundleSafetyTests(unittest.TestCase):
 
     def packaged_files(self):
         for entry in self.entries:
-            path = HARNESS / entry["destination"]
-            yield entry["destination"], path
+            yield entry["destination"], HARNESS / entry["destination"]
 
     def test_the_manifest_matches_what_is_packaged(self):
-        import hashlib
         for destination, path in self.packaged_files():
             with self.subTest(file=destination):
                 self.assertTrue(path.is_file(), f"{destination} is declared but not packaged")
@@ -48,38 +37,24 @@ class BundleSafetyTests(unittest.TestCase):
                                  "the recorded digest must match the packaged bytes, or every "
                                  "installation turns into a conflict")
 
-    def test_no_packaged_file_carries_a_credential(self):
+    def test_no_packaged_file_would_pass_the_gate_with_a_problem(self):
+        problems = []
         for destination, path in self.packaged_files():
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                bare = IN_BACKTICKS.sub("``", line)
-                match = CREDENTIAL.search(bare)
-                if not match or CREDENTIAL_SAFE.search(bare):
-                    continue
-                with self.subTest(file=destination, line=number):
-                    self.assertFalse(looks_like_a_password(match.group(2)),
-                                     f"{destination}:{number} looks like a credential")
+            problems.extend(gate(destination, path.read_text(encoding="utf-8")))
+        self.assertEqual(problems, [], "the bundle ships to other people")
 
-    def test_no_packaged_file_carries_a_personal_path(self):
-        for destination, path in self.packaged_files():
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                found = MACHINE_PATH.search(line)
-                with self.subTest(file=destination, line=number):
-                    self.assertIsNone(found, f"{destination}:{number} names a personal home directory")
-
-    def test_no_packaged_file_names_a_client_site(self):
-        # The bundle is generic. Client-specific doctrine belongs in the deployment
-        # repository, not in a package that installs on someone else's machine.
-        for destination, path in self.packaged_files():
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                found = CLIENT_NAMES.search(line)
-                with self.subTest(file=destination, line=number):
-                    self.assertIsNone(found,
-                                      f"{destination}:{number} names client site {found.group(0)!r}"
-                                      if found else "")
+    def test_the_gate_recognizes_what_it_is_meant_to_catch(self):
+        # A guard is only worth what its own detection is worth.
+        self.assertTrue(gate("x", "| alias | host | someuser:hunter2x |"))
+        self.assertTrue(gate("x", "see C:/Users/someone/notes.md"))
+        self.assertTrue(gate("x", "the ACHS deployment"))
+        self.assertFalse(gate("x", "use `size:exception` when the diff is generated"))
+        self.assertFalse(gate("x", "open https://example.invalid/mcp"))
 
     def test_the_sdd_agents_declare_their_model_role(self):
         # The model line is data in the bundle, not a local edit: that is what keeps the
         # installed copies identical to the package instead of permanently in conflict.
+        import re
         agents = [entry["destination"] for entry in self.entries
                   if entry["category"] == "agent" and entry["destination"].startswith("agents/sdd-")]
         self.assertGreaterEqual(len(agents), 8)
@@ -88,6 +63,13 @@ class BundleSafetyTests(unittest.TestCase):
                 text = (HARNESS / destination).read_text(encoding="utf-8")
                 self.assertRegex(text, r"(?m)^model:\s*\S+",
                                  "a packaged sub-agent must carry its model assignment")
+
+    def test_the_doctrine_skills_travel_with_the_bundle(self):
+        # The point of genericizing them: TrakCare doctrine stops living on one machine.
+        skills = {entry["destination"].split("/")[1] for entry in self.entries
+                  if entry["category"] == "skill"}
+        for skill in ("intersystems-development", "ccr-alignment", "review-changelist"):
+            self.assertIn(skill, skills)
 
 
 if __name__ == "__main__":
