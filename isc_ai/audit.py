@@ -289,7 +289,7 @@ def _compare_launch(entry, spec):
     differences = []
     if expected_url:
         if entry.url != expected_url:
-            differences.append(f"url={entry.url or '<none>'} (recommended {expected_url})")
+            differences.append(f"url={isc_config.mask_url(entry.url) or '<none>'} (recommended {expected_url})")
         return differences
     command, args, wrapped = _unwrap(entry)
     if wrapped:
@@ -299,7 +299,10 @@ def _compare_launch(entry, spec):
         differences.append(f"command={command or '<none>'} (recommended {expected_command})")
     stripped = [arg for arg in args if arg != "-y"]
     if tuple(stripped) != expected_args:
-        differences.append(f"args={list(stripped)} (recommended {list(expected_args)})")
+        # Some servers take a credential on the command line. The report exists to show
+        # the drift, not to reprint the secret into a terminal recording.
+        differences.append(f"args={isc_config.mask_argv(stripped)} "
+                           f"(recommended {list(expected_args)})")
     return differences
 
 

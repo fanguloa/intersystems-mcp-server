@@ -826,6 +826,41 @@ def unset_path(data, dotted):
 
 SECRET_KEYS = ("password", "upload_token")
 
+# Keys this schema does not enumerate but whose value is still a credential. The CLI
+# prints configuration, findings and plans, and a value that leaks into any of them
+# outlives its usefulness in shell history, logs and terminal recordings. Enumerating
+# every possible name is a losing game, so the shape of the name is what decides.
+SECRET_KEY_PATTERN = re.compile(r"(?i)(pass(word|wd)?|pwd|token|secret|api[_-]?key|credential|auth)")
+REDACTED = "<redacted>"
+
+
+def is_secret_key(name):
+    return isinstance(name, str) and (name in SECRET_KEYS or bool(SECRET_KEY_PATTERN.search(name)))
+
+
+def mask_argv(argv):
+    """Mask the values of credential-looking flags inside a command line.
+
+    Conservative on purpose: it masks what follows a flag whose name looks like a secret,
+    and the right-hand side of `--flag=value`. It does not try to guess whether a bare
+    argument is a credential, because over-masking a command line makes a drift report
+    useless for the thing it exists to show.
+    """
+    masked, mask_next = [], False
+    for item in argv:
+        text = str(item)
+        if mask_next:
+            masked.append(REDACTED)
+            mask_next = False
+            continue
+        if text.startswith("-") and "=" in text:
+            flag, _, _value = text.partition("=")
+            masked.append(f"{flag}={REDACTED}" if is_secret_key(flag) else text)
+            continue
+        masked.append(text)
+        mask_next = text.startswith("-") and is_secret_key(text)
+    return masked
+
 
 def is_secret_reference(value):
     return isinstance(value, str) and _SECRET_REF_RE.fullmatch(value) is not None
@@ -855,15 +890,41 @@ def _redact_proxy(value):
     return f"{scheme}://<redacted>@{hostpart}" if at else value
 
 
+def mask_url(value):
+    """Mask the two places a URL hides a credential: userinfo and the query string.
+
+    The host and the path survive, because those are what a drift report is about. A URL
+    is printed by the audit, so `https://user:pass@host` and `?api_key=...` cannot go
+    through untouched.
+    """
+    if not isinstance(value, str) or "://" not in value:
+        return value
+    masked = _redact_proxy(value)
+    head, sep, query = masked.partition("?")
+    if not sep:
+        return masked
+    parts = []
+    for pair in query.split("&"):
+        name, equals, _ = pair.partition("=")
+        parts.append(f"{name}={REDACTED}" if equals and is_secret_key(name) else pair)
+    return head + "?" + "&".join(parts)
+
+
 def redact(data):
-    """Copy of a configuration mapping with secret-bearing values masked."""
+    """Copy of a configuration mapping with secret-bearing values masked.
+
+    A key is secret when it is one of the declared ones or when its name looks like a
+    credential, so a value under a name this schema never anticipated is still masked.
+    """
     if isinstance(data, dict):
         out = {}
         for key, value in data.items():
-            if key in SECRET_KEYS and isinstance(value, str) and not is_secret_reference(value):
-                out[key] = "<redacted>"
+            if is_secret_key(key) and isinstance(value, str) and not is_secret_reference(value):
+                out[key] = REDACTED
             elif key == "proxy":
                 out[key] = _redact_proxy(value)
+            elif key in ("args", "command") and isinstance(value, list):
+                out[key] = mask_argv(value)
             else:
                 out[key] = redact(value)
         return out
