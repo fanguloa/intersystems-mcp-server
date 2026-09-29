@@ -3,14 +3,48 @@
 winreg and the ctypes broadcast call are always mocked: no test may touch the real
 registry. Fixtures never assert on argument order, only on the fact that both calls
 happened, so the tests describe intent instead of implementation shape.
+
+Module-wide hermeticity guard: `setUpModule`/`tearDownModule` replace every winreg
+call osenv.py can reach (`OpenKey`, `QueryValueEx`, `SetValueEx`, `DeleteValue`) with
+a sentinel that raises `AssertionError` if actually invoked. Individual tests that
+need specific winreg behavior layer their own `patch(...)` on top (an inner `with`
+patch always wins over this outer guard for the duration of its block, and the guard
+is restored the moment that block exits) — so this guard only ever fires when a test
+forgot to mock a call path that reaches winreg, which is exactly the bug this guard
+exists to catch.
 """
 
 import unittest
+import winreg
 from unittest.mock import patch
 
 from isc_ai import osenv
 from isc_ai import config as isc_config
 from isc_ai.setup import SetupError
+
+
+def _real_winreg_call_attempted(*_args, **_kwargs):
+    raise AssertionError(
+        "a test attempted a real winreg call; mock isc_ai.osenv.winreg.* "
+        "explicitly for this test instead of relying on the real registry"
+    )
+
+
+_GUARDED_WINREG_CALLS = ("OpenKey", "QueryValueEx", "SetValueEx", "DeleteValue")
+_guard_patches = []
+
+
+def setUpModule():
+    for name in _GUARDED_WINREG_CALLS:
+        p = patch(f"isc_ai.osenv.winreg.{name}", side_effect=_real_winreg_call_attempted)
+        p.start()
+        _guard_patches.append(p)
+
+
+def tearDownModule():
+    for p in _guard_patches:
+        p.stop()
+    _guard_patches.clear()
 
 
 class SupportTests(unittest.TestCase):
@@ -47,6 +81,7 @@ class DiscoveryKeyGuardTests(unittest.TestCase):
 class ApplyWritesTheRegistryTests(unittest.TestCase):
     def test_apply_calls_set_value_and_broadcasts_for_an_allowed_key(self):
         with patch("isc_ai.osenv.winreg.OpenKey"), \
+             patch("isc_ai.osenv.winreg.QueryValueEx", side_effect=FileNotFoundError), \
              patch("isc_ai.osenv.winreg.SetValueEx") as set_value, \
              patch("isc_ai.osenv.is_supported", return_value=True), \
              patch("isc_ai.osenv.ctypes.windll.user32.SendMessageTimeoutW") as broadcast:
@@ -80,11 +115,34 @@ class PlanNeverLeaksAValueTests(unittest.TestCase):
         self.assertEqual(report["sets"], [{"name": "JIRA_API_TOKEN", "action": "unchanged"}])
 
     def test_plan_never_writes_anything(self):
-        with patch("isc_ai.osenv.winreg.SetValueEx") as set_value, \
+        with patch("isc_ai.osenv.get", return_value=None), \
+             patch("isc_ai.osenv.winreg.SetValueEx") as set_value, \
              patch("isc_ai.osenv.ctypes.windll.user32.SendMessageTimeoutW") as broadcast:
             osenv.plan({"JIRA_API_TOKEN": "value"})
         set_value.assert_not_called()
         broadcast.assert_not_called()
+
+
+class RegistryValueTypeTests(unittest.TestCase):
+    """`_set_registry_value` must preserve the existing REG_* type, not force REG_SZ."""
+
+    def test_overwriting_an_existing_reg_expand_sz_value_keeps_its_type(self):
+        with patch("isc_ai.osenv.winreg.OpenKey"), \
+             patch("isc_ai.osenv.winreg.QueryValueEx", return_value=("old", winreg.REG_EXPAND_SZ)), \
+             patch("isc_ai.osenv.winreg.SetValueEx") as set_value:
+            osenv._set_registry_value("PATH_LIKE", "%SystemRoot%\\value")
+        args = set_value.call_args[0]
+        self.assertEqual(args[3], winreg.REG_EXPAND_SZ)
+        self.assertEqual(args[4], "%SystemRoot%\\value")
+
+    def test_writing_a_brand_new_value_defaults_to_reg_sz(self):
+        with patch("isc_ai.osenv.winreg.OpenKey"), \
+             patch("isc_ai.osenv.winreg.QueryValueEx", side_effect=FileNotFoundError), \
+             patch("isc_ai.osenv.winreg.SetValueEx") as set_value:
+            osenv._set_registry_value("BRAND_NEW", "value")
+        args = set_value.call_args[0]
+        self.assertEqual(args[3], winreg.REG_SZ)
+        self.assertEqual(args[4], "value")
 
 
 class UnsetTests(unittest.TestCase):

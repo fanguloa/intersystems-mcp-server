@@ -128,8 +128,23 @@ def plan(changes):
 
 
 def _set_registry_value(name, value):
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, HKCU_ENVIRONMENT, 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    """Writes `name` to HKCU\\Environment, preserving its existing REG_* type.
+
+    A value already stored as REG_EXPAND_SZ (one containing an unexpanded
+    `%VAR%` reference) must stay REG_EXPAND_SZ when overwritten, or Windows will
+    stop expanding it and every consumer of that variable silently breaks. A
+    brand-new name (no current value) defaults to REG_SZ, matching every other
+    plain string this module writes.
+    """
+    access = winreg.KEY_READ | winreg.KEY_SET_VALUE
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, HKCU_ENVIRONMENT, 0, access) as key:
+        try:
+            _, existing_type = winreg.QueryValueEx(key, name)
+        except FileNotFoundError:
+            existing_type = winreg.REG_SZ
+        if existing_type not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+            existing_type = winreg.REG_SZ
+        winreg.SetValueEx(key, name, 0, existing_type, value)
 
 
 def _broadcast_environment_change():
