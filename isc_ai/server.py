@@ -611,7 +611,7 @@ class AtelierClient:
         '}',
     )
 
-    def __init__(self, host, port, path_prefix, namespace, username, password, is_production=False, env_role="", ccr_affected=None, proxy=None, policy=None, scheme="http", verify_ssl=True):
+    def __init__(self, host, port, path_prefix, namespace, username, password, is_production=False, env_role="", ccr_affected=None, proxy=None, policy=None, scheme="http", verify_ssl=True, production_read=False):
         namespace = validate_namespace(namespace)
         if policy is None:
             policy = SitePolicy()
@@ -635,6 +635,10 @@ class AtelierClient:
             raise LocalPolicyError("Unsupported transport scheme; use http or https.")
         self.scheme = scheme
         self.verify_ssl = bool(verify_ssl)
+        # "production_read": true is an explicit per-entry opt-in that opens ONLY the READ
+        # gate on a production target. Runtime, runners, CCR and code writes stay blocked.
+        # Identity check (not truthiness) so a stray string such as "false" never enables it.
+        self.production_read = production_read is True
         self.base_url = f"{scheme}://{host}:{port}{path_prefix}/api/atelier/v1/{namespace}"
         self.root_url = f"{scheme}://{host}:{port}{path_prefix}/api/atelier/"
         
@@ -802,8 +806,15 @@ class AtelierClient:
         return True, ""
 
     def is_read_allowed(self):
-        """READ gate: production block only. No CCR consultation, no runner."""
+        """READ gate: production block only. No CCR consultation, no runner.
+
+        An entry with production_read=true may read a production target. This opens
+        the READ gate only: every runner, RUNTIME, CCR and CODE WRITE gate evaluates
+        _production_gate_reason independently and keeps blocking production.
+        """
         reason = self._production_gate_reason()
+        if reason and getattr(self, "production_read", False) is True:
+            return True, "Read allowed on production target by explicit production_read opt-in."
         if reason:
             return False, reason
         return True, "Read allowed on non-production target."
@@ -3870,7 +3881,8 @@ class IRISMCPServer:
                 or type(config.get("is_production", False)) is not bool
                 or not isinstance(config.get("env_role", ""), str)
                 or config.get("scheme", "http") not in ("http", "https")
-                or type(config.get("verify_ssl", True)) is not bool):
+                or type(config.get("verify_ssl", True)) is not bool
+                or type(config.get("production_read", False)) is not bool):
             raise LocalPolicyError("Unresolved server target: malformed connection or policy settings.")
 
     def _server_catalog_record(self, server_id):
@@ -3906,6 +3918,7 @@ class IRISMCPServer:
             policy=self.policy,
             scheme=s.get("scheme", "http"),
             verify_ssl=s.get("verify_ssl", True),
+            production_read=s.get("production_read", False),
         )
 
     def get_client(self, server_id, namespace_override=None):

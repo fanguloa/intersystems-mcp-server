@@ -668,7 +668,7 @@ def parse_policy(data, project_dir):
 
 SERVER_KEYS = {"host", "port", "path_prefix", "username", "password", "namespace", "env_role",
                "is_production", "proxy", "ccr_id", "upload_token", "canonical_server_id", "description",
-               "scheme", "verify_ssl"}
+               "scheme", "verify_ssl", "production_read"}
 
 
 def resolve_secret_references(value, environ):

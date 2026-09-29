@@ -94,7 +94,7 @@ Ningún nombre puede ser una ruta o contener separadores codificados.
 **Contrato de aliases:** cualquier entrada con `canonical_server_id` es una
 referencia, incluso si conserva campos de conexión antiguos. Sus demás campos se
 ignoran por completo: host, puerto, prefijo, namespace predeterminado, credenciales,
-defaults CCR y controles `is_production`/`env_role` proceden solo de la entrada
+defaults CCR y controles `is_production`/`production_read`/`env_role` proceden solo de la entrada
 concreta final. No se mezclan ni heredan overrides del alias. Catálogo, cliente y
 selección de namespace usan el mismo resolver, limitado a 16 entradas por cadena.
 Targets ausentes, ciclos o configuraciones inválidas producen UNRESOLVED en el
@@ -116,6 +116,17 @@ Las escrituras y promociones están prohibidas en **Producción / Live**. El con
 usa la marca `is_production`, el rol configurado y los indicadores de producción
 del namespace. La variable `IRIS_ALLOW_PROD` no concede autorización: su antiguo
 override fue eliminado.
+
+La lectura en producción también se bloquea por defecto. Una entrada de servidor
+concreta puede declarar `"production_read": true` (booleano estricto; por defecto
+`false`) para abrir **solo** el gate READ sobre ese target: consultas REST de
+documentos y metadatos y `iris_query_sql` bajo la misma política SQL. Es un opt-in
+explícito por entrada: no existe default global, ninguna variable de entorno lo
+habilita y en un alias se ignora como cualquier otro campo hermano. Nunca habilita
+escrituras, compilación, checkout/commit/promoción CCR, runners efímeros ni el gate
+RUNTIME: las herramientas READ que usan un runner (`iris_dump_global`,
+`iris_ccr_status`, `iris_ccr_list_itemsets`, `iris_ccr_can_upload`, `status` de
+producción y `list_queues`) siguen bloqueadas en producción.
 
 La ausencia CCR requiere evidencia suficiente; un motor instalado o source control
 genérico configurado no prueba el binding TC. UNKNOWN bloquea guardado, compilación,
@@ -466,7 +477,8 @@ Este archivo es **commitable** cuando sus secretos son referencias `{env:VAR}`.
 ```
 
 Claves admitidas por entrada: `host`, `port`, `path_prefix`, `username`, `password`,
-`namespace`, `env_role`, `is_production`, `proxy`, `ccr_id`, `upload_token`,
+`namespace`, `env_role`, `is_production`, `production_read` (opt-in de solo lectura
+en producción; ver Seguridad), `proxy`, `ccr_id`, `upload_token`,
 `canonical_server_id` (alias), `description`. El archivo heredado
 `~/.iris_mcp_servers.json` sigue leyéndose como fallback (se registra una nota);
 `isc-ai servers migrate` lo copia al nuevo destino. Este archivo es **privado**:
