@@ -185,6 +185,16 @@ class WriteGuardTests(HermeticTestCase):
         self.assertIn("RUNTIME gate", description)
         self.assertIn("LIVE/PROD", description)
         self.assertNotIn("UNKNOWN", description)
+        # Documented behavior matches the code: CCR is not consulted, direct HA nodes
+        # are not blocked by the runtime gate, runner hosts and the audit file exist.
+        self.assertIn("CCR state is not consulted", description)
+        self.assertIn("Direct HA nodes are not blocked", description)
+        self.assertNotIn("namespace/role, direct HA node)", description)
+        self.assertIn("runtime.runner_hosts", description)
+        self.assertIn("runtime.jsonl", description)
+        self.assertIn("never stores connection credentials or output", description)
+        self.assertIn("secrets embedded in the code are recorded", description)
+        self.assertNotIn("never credentials", description)
         for name in ("iris_ccr_list_itemsets", "iris_ccr_can_upload", "iris_ccr_download_load"):
             self.assertNotIn("UNKNOWN", tools[name]["description"])
         self.assertIn("INFORMATIONAL", tools["iris_ccr_namespace_status"]["description"])

@@ -140,6 +140,13 @@ class HermeticTestCase(unittest.TestCase):
         for guard in patches:
             guard.start()
             self.addCleanup(guard.stop)
+        # Runtime audit records are captured in memory; tests that exercise the real
+        # writer restore it explicitly against a temporary directory.
+        self.runtime_audit_records = []
+        audit_patch = patch("isc_ai.server._append_runtime_audit",
+                            side_effect=self.runtime_audit_records.append)
+        audit_patch.start()
+        self.addCleanup(audit_patch.stop)
 
 
 def synthetic_client(namespace=REF["base_namespace"], role="BASE", engine=0, configured=0,

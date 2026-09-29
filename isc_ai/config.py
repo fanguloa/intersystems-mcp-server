@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from isc_ai.ccr_discovery import LocalPolicyError, validate_namespace
+
 CONFIG_VERSION = 1
 
 # Directory names, newest first. The tool configures the agentic environment, of which
@@ -138,6 +140,20 @@ class PackageGrant:
 
 
 @dataclass(frozen=True)
+class RunnerHost:
+    """Explicit host namespace for the ephemeral runner of a locked namespace.
+
+    The runner class is created in runner_namespace (same instance) and the payload
+    switches to namespace itself. Applies only to the configured roles and, when
+    hosts is set (lower-cased), only to targets whose host is listed.
+    """
+    namespace: str
+    runner_namespace: str
+    roles: frozenset
+    hosts: frozenset = None
+
+
+@dataclass(frozen=True)
 class SitePolicy:
     # False for the built-in default policy (no project configuration loaded).
     # CODE WRITE routes require a configured policy; READ keeps working because
@@ -156,6 +172,9 @@ class SitePolicy:
     direct_ha_nodes: frozenset = frozenset()
     alias_constraints: dict = field(default_factory=dict)
     uat_write_exceptions: tuple = ()
+    # Explicit runner host namespaces (runtime.runner_hosts). Empty: the runner is
+    # always created in the target namespace; there is never an implicit fallback.
+    runner_hosts: tuple = ()
     packages: dict = field(default_factory=dict)
     mutation_class_prefix: str = None
     mutation_source_root: Path = None
@@ -218,6 +237,24 @@ class SitePolicy:
             hosts = exception.hosts if exception.hosts is not None else self.direct_ha_nodes
             if host in hosts:
                 yield exception
+
+    def runner_host_for(self, namespace, role, host=None):
+        """The RunnerHost configured for namespace, role and host, or None.
+
+        An entry with hosts matches only a listed host (case-insensitive); an entry
+        without hosts matches any host.
+        """
+        if not isinstance(namespace, str) or not isinstance(role, str):
+            return None
+        target, normalized_role = namespace.upper(), role.strip().upper()
+        normalized_host = host.lower() if isinstance(host, str) else None
+        for entry in self.runner_hosts:
+            if entry.namespace != target or normalized_role not in entry.roles:
+                continue
+            if entry.hosts is not None and normalized_host not in entry.hosts:
+                continue
+            return entry
+        return None
 
     # -- Packages -------------------------------------------------------
 
@@ -478,6 +515,61 @@ def _parse_routes(data, policy_kwargs):
     policy_kwargs["uat_write_exceptions"] = tuple(parsed)
 
 
+def _runtime_namespace(value, path, markers):
+    try:
+        namespace = validate_namespace(value)
+    except LocalPolicyError:
+        raise ConfigError(f"{path} must be a plain namespace identifier.") from None
+    tainted = [marker for marker in markers if marker in namespace]
+    _expect(not tainted, f"{path} '{namespace}' contains a production marker {tainted}.")
+    return namespace
+
+
+def _parse_runtime(data, policy_kwargs):
+    """runtime.runner_hosts: explicit runner host namespaces, never inferred."""
+    runtime = data.get("runtime")
+    if runtime is None:
+        return
+    _expect(isinstance(runtime, dict), "runtime must be an object.")
+    unknown = set(runtime) - {"runner_hosts"}
+    _expect(not unknown, f"Unknown keys in runtime: {sorted(unknown)}.")
+    hosts = runtime.get("runner_hosts", [])
+    _expect(isinstance(hosts, list), "runtime.runner_hosts must be a list.")
+    markers = policy_kwargs.get("production_markers", SitePolicy.production_markers)
+    production = policy_kwargs.get("production_roles", SitePolicy.production_roles)
+    non_production = policy_kwargs.get("non_production_roles", SitePolicy.non_production_roles)
+    parsed, seen = [], set()
+    for index, item in enumerate(hosts):
+        path = f"runtime.runner_hosts[{index}]"
+        _expect(isinstance(item, dict), f"{path} must be an object.")
+        extra = set(item) - {"namespace", "runner_namespace", "roles", "hosts"}
+        _expect(not extra, f"Unknown keys in {path}: {sorted(extra)}.")
+        namespace = _runtime_namespace(item.get("namespace"), f"{path}.namespace", markers)
+        runner_namespace = _runtime_namespace(item.get("runner_namespace"), f"{path}.runner_namespace", markers)
+        _expect(runner_namespace != namespace, f"{path}.runner_namespace must differ from namespace.")
+        _expect(namespace not in seen, f"{path}.namespace '{namespace}' is duplicated.")
+        seen.add(namespace)
+        # Roles are upper-cased BEFORE the pattern check here only (runner_hosts accepts
+        # "uat"); packages[].roles keeps its stricter upper-case-only contract.
+        raw_roles = item.get("roles")
+        _expect(isinstance(raw_roles, list), f"{path}.roles must be a list of strings.")
+        roles = frozenset(
+            _string(role.upper() if isinstance(role, str) else role, f"{path}.roles[{position}]", _ROLE_RE)
+            for position, role in enumerate(raw_roles))
+        _expect(roles, f"{path}.roles must not be empty.")
+        entry_hosts = None
+        if "hosts" in item:
+            entry_hosts = frozenset(host.lower() for host in _string_list(item["hosts"], f"{path}.hosts", _HOST_RE))
+            _expect(entry_hosts, f"{path}.hosts must not be empty.")
+        forbidden = sorted(roles & production)
+        _expect(not forbidden, f"{path}.roles {forbidden} are production roles.")
+        unlisted = sorted(roles - non_production)
+        _expect(not unlisted, f"{path}.roles {unlisted} are not configured non-production roles.")
+        parsed.append(RunnerHost(namespace=namespace, runner_namespace=runner_namespace,
+                                 roles=roles, hosts=entry_hosts))
+    policy_kwargs["runner_hosts"] = tuple(parsed)
+
+
 def _parse_packages(data, policy_kwargs):
     packages = data.get("packages", {})
     _expect(isinstance(packages, dict), "packages must be an object keyed by namespace.")
@@ -557,12 +649,13 @@ def parse_policy(data, project_dir):
     _expect(isinstance(data, dict), "Project configuration must be a JSON object.")
     version = data.get("version", CONFIG_VERSION)
     _expect(version == CONFIG_VERSION, f"Unsupported configuration version {version!r}; expected {CONFIG_VERSION}.")
-    unknown = set(data) - {"version", "site", "canonical_base", "routes", "packages", "mutation", "agents", "servers", "$schema", "_comment"}
+    unknown = set(data) - {"version", "site", "canonical_base", "routes", "runtime", "packages", "mutation", "agents", "servers", "$schema", "_comment"}
     _expect(not unknown, f"Unknown top-level keys: {sorted(unknown)}.")
     kwargs = {"configured": True}
     _parse_site(data, kwargs)
     _parse_canonical_base(data, kwargs)
     _parse_routes(data, kwargs)
+    _parse_runtime(data, kwargs)
     _parse_packages(data, kwargs)
     _parse_agents(data, kwargs)
     _parse_mutation(data, kwargs, project_dir)

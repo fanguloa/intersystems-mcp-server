@@ -99,6 +99,115 @@ def log_debug(message):
     sys.stderr.write(f"[DEBUG] {message}\n")
     sys.stderr.flush()
 
+
+# Local append-only audit of arbitrary runtime execution (iris_execute_objectscript
+# transport). Tool arguments are redacted from logs, so this file is the only trail
+# of what code ran where. Records never store connection credentials or execution
+# output, but they DO store the caller's payload code verbatim: a secret embedded in
+# the code is recorded. Several MCP processes append concurrently, so every line is
+# one write under a cross-process exclusive lock.
+RUNTIME_AUDIT_DIR_ENV = "ISC_AI_AUDIT_DIR"
+RUNTIME_AUDIT_FILE = "runtime.jsonl"
+_AUDIT_LOCK_TIMEOUT_S = 2.0
+_AUDIT_LOCK_RETRY_S = 0.05
+_IS_WINDOWS = os.name == "nt"
+
+
+def _runtime_audit_path():
+    override = os.environ.get(RUNTIME_AUDIT_DIR_ENV)
+    directory = Path(override) if override else Path.home() / ".iris-mcp" / "audit"
+    if not directory.is_absolute():
+        raise LocalPolicyError("Runtime audit directory must be an absolute path.")
+    return directory / RUNTIME_AUDIT_FILE
+
+
+def _audit_try_lock(fd):
+    """One non-blocking attempt at an exclusive lock; raises OSError when held elsewhere."""
+    if _IS_WINDOWS:
+        import msvcrt
+        # Lock byte 0 (a fixed region shared by every process); O_APPEND still
+        # writes at end of file regardless of the current position.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _audit_unlock(fd):
+    if _IS_WINDOWS:
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _audit_lock(fd):
+    """Exclusive lock with a bounded retry; raises LocalPolicyError on timeout."""
+    import time
+    deadline = time.monotonic() + _AUDIT_LOCK_TIMEOUT_S
+    while True:
+        try:
+            _audit_try_lock(fd)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise LocalPolicyError("Runtime audit file lock could not be obtained.") from None
+            time.sleep(_AUDIT_LOCK_RETRY_S)
+
+
+def _chmod_best_effort(path, mode):
+    if _IS_WINDOWS:
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _append_runtime_audit(record):
+    """Append one JSON line to the runtime audit file (creates the directory).
+
+    The line is written with a single os.write on an O_APPEND descriptor while an
+    exclusive cross-process lock is held. On POSIX the directory is 0700 and the
+    file 0600 (best effort). Any failure raises; callers decide fail-closed or not.
+    """
+    _append_jsonl_locked(_runtime_audit_path(), record)
+
+
+def _append_jsonl_locked(path, record):
+    """Shared locked JSON-line appender (runtime audit and LIVE config window audit)."""
+    directory = path.parent
+    existed = directory.is_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not existed:
+        _chmod_best_effort(directory, 0o700)
+    data = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        _chmod_best_effort(path, 0o600)
+        _audit_lock(fd)
+        try:
+            written = os.write(fd, data)
+            if written != len(data):
+                raise OSError("Short write to the runtime audit file.")
+        finally:
+            try:
+                _audit_unlock(fd)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+
+
+def _audit_timestamp():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def clean_to_ascii(content_str):
     replacements = {
         'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
@@ -898,9 +1007,11 @@ class AtelierClient:
         the same-process guard probe and iris_execute_objectscript.
 
         These operations do not go through Perforce or TC change control tracking,
-        so CCR state is irrelevant to them. Only the production gate applies: never
-        on is_production targets, PROD/LIVE namespaces or roles, nor on direct HA
-        nodes (use the configured VIP) except configured UAT exception routes.
+        so CCR state is never consulted. Only the production gate (is_production,
+        PROD/LIVE-looking namespace, production role) and an explicit configured
+        non-production role apply. Direct HA nodes are NOT blocked here (see
+        _runtime_node_route_allowed): a runner on a mirror backup fails at the
+        read-only database, not at this gate.
         """
         reason = self._production_gate_reason()
         if reason:
@@ -1409,17 +1520,97 @@ class AtelierClient:
                 pass
         return False
 
+    def _runner_host_client(self):
+        """Client whose namespace hosts the ephemeral runner for this target.
+
+        Only an explicit runtime.runner_hosts entry for this namespace AND the
+        configured role selects another namespace; otherwise the target itself hosts
+        the runner. The sibling shares host, port, prefix, scheme, credentials,
+        production flags and role; only namespace/base_url differ and stay canonical.
+        """
+        import copy
+        entry = self.policy.runner_host_for(self.namespace, self._configured_role(), self.host)
+        if entry is None:
+            return self
+        runner_namespace = validate_namespace(entry.runner_namespace)
+        if runner_namespace == self.namespace:
+            raise LocalPolicyError("Runner host namespace must differ from the target namespace.")
+        sibling = copy.copy(self)
+        sibling.namespace = runner_namespace
+        sibling.base_url = (f"{getattr(self, 'scheme', 'http')}://{self.host}:{self.port}"
+                            f"{self.path_prefix}/api/atelier/v1/{runner_namespace}")
+        sibling._validate_target()
+        return sibling
+
+    def _namespace_switch_prefix(self):
+        """Payload prologue that moves the runner process into the target namespace."""
+        target = validate_namespace(self.namespace)
+        return f'New $NAMESPACE\nSet $NAMESPACE = "{self._escape_cos(target)}"\n'
+
+    def _runtime_audit_base(self, class_name, runner, code_str):
+        return {
+            "run_id": self._ephemeral_runner_sql_suffix(class_name),
+            "host": self.host,
+            "path_prefix": self.path_prefix,
+            "target_namespace": self.namespace,
+            "runner_namespace": runner.namespace,
+            "role": self._configured_role(),
+            "code_sha256": hashlib.sha256(code_str.encode("utf-8")).hexdigest(),
+            "code_length": len(code_str),
+        }
+
     def _execute_direct_objectscript(self, code_str):
         """Run the temporary executor under the RUNTIME gate (production gate only).
 
         Arbitrary ObjectScript may persist data but is not a source-code change
-        tracked by Perforce/TC, so CCR state does not authorize or deny it.
+        tracked by Perforce/TC, so CCR state does not authorize or deny it. When
+        runtime.runner_hosts names a host namespace for this target and role, the
+        runner lives there and the payload switches to the target namespace; both
+        namespaces must pass the runtime and runner gates. Every call is recorded in
+        the local runtime audit file before any server request (fail closed).
         """
+        import time
         import uuid
         class_name = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
         self._require_ephemeral_runner(class_name)
         self._require_runtime_operation()
-        class_content = self._runner_class_content(class_name, code_str)
+        runner = self._runner_host_client()
+        payload_code = code_str
+        if runner is not self:
+            runner._require_ephemeral_runner(class_name)
+            runner._require_runtime_operation()
+            payload_code = self._namespace_switch_prefix() + code_str
+        class_content = self._runner_class_content(class_name, payload_code)
+        audit = self._runtime_audit_base(class_name, runner, code_str)
+        try:
+            _append_runtime_audit(dict(audit, ts=_audit_timestamp(), event="start", code=code_str))
+        except Exception:
+            raise LocalPolicyError(
+                "Runtime audit record could not be written; execution blocked (set "
+                f"{RUNTIME_AUDIT_DIR_ENV} to a writable absolute directory)."
+            ) from None
+        started = time.monotonic()
+        outcome = "Temporary executor operation failed unexpectedly; details withheld."
+        try:
+            output = runner._run_direct_runner_lifecycle(class_name, class_content)
+            outcome = "ok"
+            return output
+        except LocalPolicyError as exc:
+            outcome = str(exc)
+            raise
+        finally:
+            try:
+                _append_runtime_audit(dict(
+                    audit, ts=_audit_timestamp(), event="end", outcome=outcome,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ))
+            except Exception:
+                log_debug("Runtime audit end record could not be written.")
+
+    def _run_direct_runner_lifecycle(self, class_name, class_content):
+        """Residue check, absence check, PUT, compile, query, delete and residue re-check
+        of the generated runner in THIS client's namespace."""
+        self._require_ephemeral_runner(class_name)
         if self._ephemeral_runner_has_pending_change(class_name):
             raise LocalPolicyError("Temporary executor blocked by pre-existing source-control residue.")
         if not self._ephemeral_runner_is_absent(class_name):
@@ -4144,7 +4335,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_execute_objectscript",
-                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role, direct HA node) and a configured non-production role; CCR state neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Requires verified deletion of the runner and the absence of source-control residue.",
+                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role) and a configured non-production role; CCR state is not consulted and neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Direct HA nodes are not blocked by this gate; on a mirror backup the runner upload fails because the database is read-only. If the project policy runtime.runner_hosts maps the target namespace (for the configured role and, when the entry lists hosts, the target host) to a runner namespace, the runner is created there on the same instance and the payload first runs New $NAMESPACE and Set $NAMESPACE to the target; both namespaces must pass the gate. Requires verified deletion of the runner and the absence of source-control residue. Every call is appended under a cross-process file lock to the local audit file ~/.iris-mcp/audit/runtime.jsonl (ISC_AI_AUDIT_DIR overrides the directory) with target, runner namespace, outcome and the payload code verbatim: it never stores connection credentials or output, but secrets embedded in the code are recorded. If the start record cannot be written the code is not executed. The LIVE CONFIG WINDOW (routes.live_config_window) never opens this tool: it stays blocked on production targets.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
