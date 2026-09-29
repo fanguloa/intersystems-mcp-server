@@ -153,6 +153,48 @@ class RunnerHost:
     hosts: frozenset = None
 
 
+LIVE_CONFIG_WINDOW_KEYS = frozenset({"label", "ticket", "expires", "namespaces", "hosts",
+                                     "active_node_evidence_namespace"})
+LIVE_CONFIG_WINDOW_BACKUP_RELATIVE = Path(".backup") / "live-config-window"
+_EXPIRES_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+@dataclass(frozen=True)
+class LiveConfigWindow:
+    """Exceptional, expiring, ticket-bound route for Ensemble configuration on
+    production-flagged targets (routes.live_config_window).
+
+    It never opens CODE WRITE, CCR, arbitrary runtime execution or anything on a
+    non-production target. The window is open while the LOCAL date of the MCP host
+    is on or before `expires` (inclusive); an unparsable date keeps it closed.
+    Namespaces are stored upper-case and hosts lower-case (case-insensitive match).
+    """
+    label: str
+    ticket: str
+    expires: str
+    namespaces: frozenset
+    hosts: frozenset
+    active_node_evidence_namespace: str
+    backup_root: Path
+
+    def expiry_date(self):
+        import datetime
+        if not isinstance(self.expires, str) or not _EXPIRES_RE.fullmatch(self.expires):
+            return None
+        try:
+            return datetime.date.fromisoformat(self.expires)
+        except ValueError:
+            return None
+
+    def is_open(self, today):
+        expiry = self.expiry_date()
+        return expiry is not None and today <= expiry
+
+    def covers(self, namespace, host):
+        return (isinstance(namespace, str) and namespace.upper() in self.namespaces
+                and isinstance(host, str) and host.lower() in self.hosts)
+
+
 @dataclass(frozen=True)
 class SitePolicy:
     # False for the built-in default policy (no project configuration loaded).
@@ -184,6 +226,9 @@ class SitePolicy:
     # role -> provider-qualified model id. Empty means "let the client decide": a
     # concrete id is a decision about which model runs the work, never a default.
     agent_models: dict = field(default_factory=dict)
+    # routes.live_config_window. None (the default) means no window: production
+    # targets keep every write, runner and RUNTIME operation blocked.
+    live_config_window: LiveConfigWindow = None
 
     # -- CCR identifier -------------------------------------------------
 
@@ -468,7 +513,7 @@ def _parse_canonical_base(data, policy_kwargs):
     )
 
 
-def _parse_routes(data, policy_kwargs):
+def _parse_routes(data, policy_kwargs, project_dir=None):
     routes = data.get("routes", {})
     _expect(isinstance(routes, dict), "routes must be an object.")
     if "direct_ha_nodes" in routes:
@@ -513,6 +558,51 @@ def _parse_routes(data, policy_kwargs):
             path_prefixes=prefixes, hosts=hosts, requires_active_node=requires,
         ))
     policy_kwargs["uat_write_exceptions"] = tuple(parsed)
+    if "live_config_window" in routes:
+        policy_kwargs["live_config_window"] = _parse_live_config_window(
+            routes["live_config_window"], policy_kwargs.get("direct_ha_nodes", frozenset()), project_dir)
+
+
+def _parse_live_config_window(item, direct_ha_nodes, project_dir):
+    """routes.live_config_window: strict, explicit, never widened by the environment."""
+    path = "routes.live_config_window"
+    _expect(isinstance(item, dict), f"{path} must be an object.")
+    _expect(project_dir is not None, f"{path} requires a project directory for its backups and audit.")
+    unknown = set(item) - LIVE_CONFIG_WINDOW_KEYS
+    _expect(not unknown, f"Unknown keys in {path}: {sorted(unknown)}.")
+    missing = LIVE_CONFIG_WINDOW_KEYS - set(item)
+    _expect(not missing, f"{path} is missing required keys: {sorted(missing)}.")
+    label = _string(item["label"], f"{path}.label")
+    ticket = _string(item["ticket"], f"{path}.ticket")
+    _expect(ticket.strip() == ticket and ticket, f"{path}.ticket must be a non-empty trimmed string.")
+    # Only the type is a configuration error: an unparsable date keeps the window
+    # closed (fail closed) without taking every other route down with it.
+    expires = _string(item["expires"], f"{path}.expires")
+
+    def namespace_value(value, where):
+        try:
+            return validate_namespace(value)
+        except LocalPolicyError:
+            raise ConfigError(f"{where} must be a plain namespace identifier.") from None
+
+    raw_namespaces = item["namespaces"]
+    _expect(isinstance(raw_namespaces, list) and raw_namespaces, f"{path}.namespaces must be a non-empty list of strings.")
+    namespaces = frozenset(namespace_value(_string(value, f"{path}.namespaces[{index}]"), f"{path}.namespaces[{index}]")
+                           for index, value in enumerate(raw_namespaces))
+    raw_hosts = item["hosts"]
+    _expect(isinstance(raw_hosts, list) and raw_hosts, f"{path}.hosts must be a non-empty list of strings.")
+    hosts = frozenset(host.lower() for host in _string_list(raw_hosts, f"{path}.hosts", _HOST_RE))
+    direct = {host.lower() for host in direct_ha_nodes}
+    outside = sorted(hosts - direct)
+    _expect(not outside, f"{path}.hosts {outside} must also be listed in routes.direct_ha_nodes.")
+    evidence = namespace_value(_string(item["active_node_evidence_namespace"],
+                                       f"{path}.active_node_evidence_namespace"),
+                               f"{path}.active_node_evidence_namespace")
+    return LiveConfigWindow(
+        label=label, ticket=ticket, expires=expires, namespaces=namespaces, hosts=hosts,
+        active_node_evidence_namespace=evidence,
+        backup_root=(Path(project_dir) / LIVE_CONFIG_WINDOW_BACKUP_RELATIVE).resolve(),
+    )
 
 
 def _runtime_namespace(value, path, markers):
@@ -654,7 +744,7 @@ def parse_policy(data, project_dir):
     kwargs = {"configured": True}
     _parse_site(data, kwargs)
     _parse_canonical_base(data, kwargs)
-    _parse_routes(data, kwargs)
+    _parse_routes(data, kwargs, project_dir)
     _parse_runtime(data, kwargs)
     _parse_packages(data, kwargs)
     _parse_agents(data, kwargs)

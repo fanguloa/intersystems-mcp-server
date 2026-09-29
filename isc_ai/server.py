@@ -208,6 +208,344 @@ def _audit_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# ---------------------------------------------------------------------------
+# LIVE CONFIG WINDOW (routes.live_config_window)
+#
+# Exceptional, expiring, ticket-bound route for Ensemble configuration on
+# production-flagged targets. It never opens CODE WRITE, CCR, arbitrary runtime
+# execution or anything on a non-production target. Backups and the audit trail
+# live under <project>/.backup/live-config-window/.
+# ---------------------------------------------------------------------------
+
+LIVE_WINDOW_AUDIT_FILE = "audit.jsonl"
+# A grant is issued per tool call after the gate passed; it only needs to cover
+# the runners of that single call.
+_LIVE_WINDOW_GRANT_TTL_S = 600
+_LIVE_WINDOW_VALUE_MAX = 8192
+_LIVE_WINDOW_SENSITIVE_SETTING_RE = re.compile(r"pass|secret|token|credential|key", re.IGNORECASE)
+_LIVE_WINDOW_SETTING_NAME_RE = re.compile(r"%?[A-Za-z][A-Za-z0-9_]{0,127}")
+# Characters that XML 1.0 cannot carry (the value ends up inside the class XData).
+_XML_INVALID_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_COS_BASE64_RE = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_LIVE_WINDOW_NOT_PRIMARY = "MCPLCW_NOT_PRIMARY"
+# Prepended to EVERY window runner: the payload never runs on a mirror member that
+# is not the primary, evaluated in the same IRIS process that would execute it.
+_LIVE_WINDOW_PRIMARY_GUARD = (
+    "If $SYSTEM.Mirror.IsMember() && '$SYSTEM.Mirror.IsPrimary() { Write \""
+    + _LIVE_WINDOW_NOT_PRIMARY + "\", ! Quit }"
+)
+_LIVE_WINDOW_RESULT_FIELDS = frozenset({
+    "status", "member", "primary", "before_present", "before", "after_present", "after",
+    "running", "message",
+})
+
+
+def _live_window_today():
+    """Local calendar date of the MCP host: the documented clock of the window."""
+    import datetime
+    return datetime.date.today()
+
+
+def _live_window_audit_path(window):
+    path = Path(window.backup_root) / LIVE_WINDOW_AUDIT_FILE
+    if not path.is_absolute():
+        raise LocalPolicyError("LIVE config window audit path must be absolute.")
+    return path
+
+
+def _append_live_window_audit(window, record):
+    """One JSON line per window operation, same locked appender as the runtime audit."""
+    _append_jsonl_locked(_live_window_audit_path(window), record)
+
+
+def _live_window_audit_preflight(window):
+    """Prove the audit file can be created, locked and appended BEFORE any write."""
+    path = _live_window_audit_path(window)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        _audit_lock(fd)
+        _audit_unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _cos_string_expr(value):
+    """Strict ObjectScript expression that evaluates to `value`.
+
+    The caller string never reaches the ObjectScript parser: it travels as the
+    base64 of its UTF-8 bytes inside a quoted literal whose alphabet cannot close
+    the literal, concatenate, call $C() or start a new command.
+    """
+    if not isinstance(value, str):
+        raise LocalPolicyError("LIVE config window values must be strings.")
+    try:
+        raw = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise LocalPolicyError("LIVE config window values must be valid Unicode text.") from None
+    encoded = base64.b64encode(raw).decode("ascii")
+    if not _COS_BASE64_RE.fullmatch(encoded):
+        raise LocalPolicyError("LIVE config window value encoding failed.")
+    return f'$ZConvert($System.Encryption.Base64Decode("{encoded}"),"I","UTF8")'
+
+
+def _live_window_item_setting_code(production, item, target, setting, value, expected):
+    """FIXED runner template for one compare-and-set of a production item setting.
+
+    Every caller value is embedded through _cos_string_expr; nothing else varies.
+    In ONE process it: aborts unless the node is not a mirror member or is the
+    primary; opens Ens.Config.Production; requires exactly one item with that
+    name and FindItemByConfigName to return it; locates the setting by
+    Target+Name (adds it when absent); aborts on drift; sets, %Save(), then
+    SaveToClass() so the class XData is updated. It writes one MCPLCW record.
+    """
+    lines = [
+        f"Set mcpProd = {_cos_string_expr(production)}",
+        f"Set mcpItemName = {_cos_string_expr(item)}",
+        f"Set mcpTarget = {_cos_string_expr(target)}",
+        f"Set mcpSetting = {_cos_string_expr(setting)}",
+        f"Set mcpValue = {_cos_string_expr(value)}",
+        f"Set mcpExpected = {_cos_string_expr(expected)}",
+        'Set mcpStatus = "EXCEPTION", mcpMsg = "", mcpMember = "", mcpPrimary = "", mcpRunning = 0',
+        'Set mcpBeforePresent = 0, mcpBefore = "", mcpAfterPresent = 0, mcpAfter = ""',
+        "Try {",
+        "    Set mcpMember = +$SYSTEM.Mirror.IsMember(), mcpPrimary = +$SYSTEM.Mirror.IsPrimary()",
+        "    If '(('mcpMember) || mcpPrimary) {",
+        '        Set mcpStatus = "NOT_PRIMARY", mcpMsg = "Mirror member is not the primary; nothing was written"',
+        "    } Else {",
+        "        Set mcpSC = $$$OK",
+        "        Set mcpProduction = ##class(Ens.Config.Production).%OpenId(mcpProd, , .mcpSC)",
+        "        If '$IsObject(mcpProduction) {",
+        '            Set mcpStatus = "NO_PRODUCTION", mcpMsg = "Production configuration not found; nothing was written"',
+        "        } Else {",
+        "            Set mcpCount = 0",
+        "            For mcpI = 1:1:mcpProduction.Items.Count() {",
+        "                If mcpProduction.Items.GetAt(mcpI).Name = mcpItemName { Set mcpCount = mcpCount + 1 }",
+        "            }",
+        "            If mcpCount '= 1 {",
+        '                Set mcpStatus = "ITEM_NOT_UNIQUE", mcpMsg = "Item name must match exactly one item; found "_mcpCount_"; nothing was written"',
+        "            } Else {",
+        "                Set mcpItem = mcpProduction.FindItemByConfigName(mcpItemName, .mcpSC)",
+        "                If ('$IsObject(mcpItem)) || (mcpItem.Name '= mcpItemName) {",
+        '                    Set mcpStatus = "NO_ITEM", mcpMsg = "FindItemByConfigName did not return the item; nothing was written"',
+        "                } Else {",
+        "                    Set mcpIndex = 0, mcpDup = 0",
+        "                    For mcpI = 1:1:mcpItem.Settings.Count() {",
+        "                        Set mcpS = mcpItem.Settings.GetAt(mcpI)",
+        "                        If (mcpS.Target = mcpTarget) && (mcpS.Name = mcpSetting) {",
+        "                            If mcpIndex { Set mcpDup = 1 } Else { Set mcpIndex = mcpI }",
+        "                        }",
+        "                    }",
+        "                    If mcpDup {",
+        '                        Set mcpStatus = "DUPLICATE_SETTING", mcpMsg = "Setting appears more than once for this target; nothing was written"',
+        "                    } Else {",
+        "                        If mcpIndex { Set mcpBeforePresent = 1, mcpBefore = mcpItem.Settings.GetAt(mcpIndex).Value }",
+        "                        If mcpBefore '= mcpExpected {",
+        '                            Set mcpStatus = "DRIFT", mcpMsg = "Current value differs from expected_current_value; nothing was written"',
+        "                        } Else {",
+        "                            Set mcpNew = ##class(Ens.Config.Setting).%New()",
+        "                            Set mcpNew.Target = mcpTarget, mcpNew.Name = mcpSetting, mcpNew.Value = mcpValue",
+        "                            If mcpIndex { Set mcpSC = mcpItem.Settings.SetAt(mcpNew, mcpIndex) } Else { Set mcpSC = mcpItem.Settings.Insert(mcpNew) }",
+        "                            If $$$ISOK(mcpSC) { Set mcpSC = mcpProduction.%Save() }",
+        "                            If $$$ISERR(mcpSC) {",
+        '                                Set mcpStatus = "SAVE_FAILED", mcpMsg = $System.Status.GetOneErrorText(mcpSC)',
+        "                            } Else {",
+        "                                Set mcpSC = mcpProduction.SaveToClass(mcpItem)",
+        "                                If $$$ISERR(mcpSC) {",
+        '                                    Set mcpStatus = "SAVETOCLASS_FAILED", mcpMsg = $System.Status.GetOneErrorText(mcpSC)',
+        "                                    If mcpIndex {",
+        "                                        Set mcpOld = ##class(Ens.Config.Setting).%New()",
+        "                                        Set mcpOld.Target = mcpTarget, mcpOld.Name = mcpSetting, mcpOld.Value = mcpBefore",
+        "                                        Set mcpRevert = mcpItem.Settings.SetAt(mcpOld, mcpIndex)",
+        "                                    } Else {",
+        "                                        Do mcpItem.Settings.RemoveAt(mcpItem.Settings.Count())",
+        "                                        Set mcpRevert = $$$OK",
+        "                                    }",
+        "                                    If $$$ISOK(mcpRevert) { Set mcpRevert = mcpProduction.%Save() }",
+        '                                    Set mcpMsg = mcpMsg_"; configuration table revert "_$Select($$$ISOK(mcpRevert):"OK",1:"FAILED")',
+        "                                } Else {",
+        '                                    Set mcpStatus = "OK"',
+        "                                }",
+        "                            }",
+        "                            For mcpI = 1:1:mcpItem.Settings.Count() {",
+        "                                Set mcpS = mcpItem.Settings.GetAt(mcpI)",
+        "                                If (mcpS.Target = mcpTarget) && (mcpS.Name = mcpSetting) { Set mcpAfterPresent = 1, mcpAfter = mcpS.Value }",
+        "                            }",
+        "                        }",
+        "                    }",
+        "                }",
+        "            }",
+        '            Set mcpActive = "", mcpState = 0',
+        "            Set mcpDirSC = ##class(Ens.Director).GetProductionStatus(.mcpActive, .mcpState)",
+        "            If $$$ISOK(mcpDirSC) && (mcpActive = mcpProd) && (mcpState = 1) { Set mcpRunning = 1 }",
+        "        }",
+        "    }",
+        "} Catch mcpEx {",
+        '    Set mcpStatus = "EXCEPTION", mcpMsg = mcpEx.DisplayString()',
+        "}",
+        'Write "MCPLCW|status=", mcpStatus, "|member=", +mcpMember, "|primary=", +mcpPrimary, '
+        '"|before_present=", mcpBeforePresent, '
+        '"|before=", $System.Encryption.Base64Encode($ZConvert(mcpBefore,"O","UTF8"),1), '
+        '"|after_present=", mcpAfterPresent, '
+        '"|after=", $System.Encryption.Base64Encode($ZConvert(mcpAfter,"O","UTF8"),1), '
+        '"|running=", mcpRunning, '
+        '"|message=", $System.Encryption.Base64Encode($ZConvert(mcpMsg,"O","UTF8"),1), !',
+    ]
+    return "\n".join(lines)
+
+
+def _decode_live_window_b64(value):
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8", errors="strict")
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("Invalid base64 field") from None
+
+
+def _parse_live_window_result(output):
+    """Exactly one MCPLCW record with the expected fields; anything else raises."""
+    lines = [line.strip() for line in str(output).splitlines() if line.strip()]
+    if any(line == _LIVE_WINDOW_NOT_PRIMARY for line in lines):
+        raise _LiveWindowNotPrimary("LIVE config window: the runner process is not on the mirror primary; nothing was executed.")
+    if len(lines) != 1:
+        raise LocalPolicyError("LIVE config window runner returned no single result record; outcome UNKNOWN, inspect manually.")
+    try:
+        fields = _parse_pipe_record(lines[0], "MCPLCW")
+        if set(fields) != _LIVE_WINDOW_RESULT_FIELDS:
+            raise ValueError("fields")
+        for flag in ("member", "primary", "before_present", "after_present", "running"):
+            if not fields[flag].isdigit():
+                raise ValueError("flag")
+        return {
+            "status": fields["status"],
+            "mirror_member": int(fields["member"]),
+            "mirror_primary": int(fields["primary"]),
+            "before_present": fields["before_present"] == "1",
+            "before": _decode_live_window_b64(fields["before"]),
+            "after_present": fields["after_present"] == "1",
+            "after": _decode_live_window_b64(fields["after"]),
+            "production_running": fields["running"] == "1",
+            "message": _decode_live_window_b64(fields["message"]),
+        }
+    except ValueError:
+        raise LocalPolicyError("LIVE config window runner returned a malformed result record; outcome UNKNOWN, inspect manually.") from None
+
+
+def _production_definition_root(lines, production):
+    """Parse the XData ProductionDefinition of a production class source (UDL lines)."""
+    import xml.etree.ElementTree as ET
+    if not isinstance(lines, list) or any(not isinstance(line, str) for line in lines):
+        raise LocalPolicyError("Production class source is not an array of lines.")
+    text = "\n".join(lines)
+    headers = re.findall(r"(?m)^\s*XData\s+ProductionDefinition\b", text)
+    if len(headers) != 1:
+        raise LocalPolicyError("Production class must contain exactly one XData ProductionDefinition.")
+    body = text[re.search(r"(?m)^\s*XData\s+ProductionDefinition\b", text).end():]
+    start = body.find("<Production")
+    end = body.find("</Production>")
+    if start < 0 or end < start or body.count("<Production") != 1 or body.count("</Production>") != 1:
+        raise LocalPolicyError("Production XData does not hold exactly one <Production> element.")
+    xml = body[start:end + len("</Production>")]
+    if "<!DOCTYPE" in xml.upper() or "<!ENTITY" in xml.upper():
+        raise LocalPolicyError("Production XData must not declare a DOCTYPE or entities.")
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        raise LocalPolicyError("Production XData is not well-formed XML.") from None
+    if root.tag != "Production" or root.get("Name") != production:
+        raise LocalPolicyError("Production XData Name does not match production_name.")
+    return root
+
+
+def _production_item_setting(root, item_name, target, setting):
+    """(present, value) of one Item setting; the item must be unique, the setting too."""
+    items = [element for element in root.findall("Item") if element.get("Name") == item_name]
+    if len(items) != 1:
+        raise LocalPolicyError(f"Production XData must contain exactly one Item named '{item_name}'; found {len(items)}.")
+    matches = [element for element in items[0].findall("Setting")
+               if element.get("Target") == target and element.get("Name") == setting]
+    if len(matches) > 1:
+        raise LocalPolicyError("Production XData lists this setting more than once for the target.")
+    if not matches:
+        return False, ""
+    return True, matches[0].text or ""
+
+
+def _production_canonical_without(root, item_name, target, setting):
+    """Order-insensitive canonical form of the production minus one target setting.
+
+    Used to prove SaveToClass changed nothing but the requested setting.
+    """
+    def is_target(parent, child):
+        return (parent.tag == "Item" and parent.get("Name") == item_name and child.tag == "Setting"
+                and child.get("Target") == target and child.get("Name") == setting)
+
+    def canonical(element):
+        children = tuple(sorted((canonical(child) for child in element if not is_target(element, child)),
+                                key=repr))
+        text = element.text or ""
+        if element.tag != "Setting":
+            text = text.strip()
+        return (element.tag, tuple(sorted(element.attrib.items())), text, children)
+
+    return canonical(root)
+
+
+def _live_window_write_backup(window, namespace, production, lines, stamp=None):
+    """Immutable, timestamped local copy of the production class; never overwrites."""
+    from datetime import datetime, timezone
+    namespace = validate_namespace(namespace)
+    AtelierClient._validate_identifier(production)
+    if production.startswith("%"):
+        raise LocalPolicyError("Production names under % are not configurable through the window.")
+    root = Path(window.backup_root)
+    directory = root / namespace
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if stamp is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    if not re.fullmatch(r"\d{8}T\d{12}Z", stamp):
+        raise LocalPolicyError("Invalid backup timestamp.")
+    path = directory / f"{production}-{stamp}.cls"
+    if path.resolve().parent != directory.resolve():
+        raise LocalPolicyError("Backup path escaped the window backup directory.")
+    data = ("\n".join(lines) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError:
+        raise LocalPolicyError("Backup file already exists; refusing to overwrite it.") from None
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return path, hashlib.sha256(data).hexdigest()
+
+
+class _LiveWindowNotPrimary(LocalPolicyError):
+    """The in-process mirror guard stopped the runner before its payload ran."""
+
+
+class _LiveWindowGrant:
+    """Per-call capability that lets ONE window-gated tool call run fixed runners on
+    a production target. Issued only by AtelierClient._issue_live_window_grant after
+    is_live_config_allowed() passed; never built from tool arguments."""
+    __slots__ = ("label", "ticket", "base_url", "issued")
+
+    def __init__(self, label, ticket, base_url):
+        import time
+        self.label = label
+        self.ticket = ticket
+        self.base_url = base_url
+        self.issued = time.monotonic()
+
+    def fresh(self):
+        import time
+        return time.monotonic() - self.issued <= _LIVE_WINDOW_GRANT_TTL_S
+
 def clean_to_ascii(content_str):
     replacements = {
         'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
@@ -1096,6 +1434,119 @@ class AtelierClient:
         if not allowed:
             raise LocalPolicyError(reason)
 
+    # ------------------------------------------------------------------
+    # LIVE CONFIG WINDOW gate (routes.live_config_window). Separate from every
+    # other gate: it never changes READ, RUNTIME, CODE WRITE or CCR decisions.
+    # ------------------------------------------------------------------
+
+    def _live_window_prefix(self):
+        window = self.policy.live_config_window
+        return f"LIVE CONFIG WINDOW '{window.label}' (ticket {window.ticket})"
+
+    def is_live_config_allowed(self):
+        """LIVE CONFIG WINDOW gate for Ensemble configuration on production targets.
+
+        Allowed only if ALL hold: a project policy is loaded; routes.live_config_window
+        is configured and its expiry date (local MCP host date, inclusive) has not
+        passed; the target is production-flagged; namespace and host are listed in
+        the window; the host is a configured direct HA node; the READ gate is open
+        (production_read), because backups and verification read over REST; and
+        fresh evidence obtained NOW shows Interoperability jobs in the window's
+        active_node_evidence_namespace on this node (mirror primary). No environment
+        variable is consulted. Never a runner.
+        """
+        if not self.policy.configured:
+            return False, "LIVE CONFIG WINDOW blocked: no project configuration loaded."
+        window = self.policy.live_config_window
+        if window is None:
+            return False, "LIVE CONFIG WINDOW blocked: routes.live_config_window is not configured."
+        prefix = self._live_window_prefix()
+        if window.expiry_date() is None:
+            return False, f"{prefix} blocked: expires '{window.expires}' is not a valid YYYY-MM-DD date; window closed."
+        if not window.is_open(_live_window_today()):
+            return False, f"{prefix} blocked: window expired on {window.expires} (local MCP host date)."
+        if self._production_gate_reason() is None:
+            return False, f"{prefix} blocked: the window applies to production targets only; it grants nothing here."
+        if self.namespace.upper() not in window.namespaces:
+            return False, f"{prefix} blocked: namespace '{self.namespace}' is not listed in the window."
+        if self.host.lower() not in window.hosts:
+            return False, f"{prefix} blocked: host '{self.host}' is not listed in the window."
+        if self.host.lower() not in {host.lower() for host in self.policy.direct_ha_nodes}:
+            return False, f"{prefix} blocked: host '{self.host}' is not a configured direct HA node."
+        read_allowed, _ = self.is_read_allowed()
+        if not read_allowed:
+            return False, (f"{prefix} blocked: the server entry needs production_read=true (backups and "
+                           "verification read the production over REST).")
+        evidence = window.active_node_evidence_namespace
+        if not active_node(evidence, lambda sql: self._read_metadata_query(sql, namespace=evidence)):
+            return False, (f"{prefix} blocked: no Interoperability jobs observed in '{evidence}' on "
+                           f"'{self.host}' (mirror backup, stopped or evidence unavailable); use the active node.")
+        return True, (f"{prefix}: allowed on the ACTIVE node '{self.host}' (jobs observed in '{evidence}') "
+                      f"for namespace '{self.namespace}', expires {window.expires}.")
+
+    def _issue_live_window_grant(self):
+        """Evaluate the gate NOW and return (per-call grant, reason), or raise the denial."""
+        allowed, reason = self.is_live_config_allowed()
+        if not allowed:
+            raise LocalPolicyError(reason)
+        window = self.policy.live_config_window
+        grant = _LiveWindowGrant(window.label, window.ticket, self.base_url)
+        self.__dict__.setdefault("_live_window_grants", []).append(grant)
+        return grant, reason
+
+    def _run_live_window_runner(self, grant, code_str):
+        """Run a FIXED window runner on the production target under a fresh grant.
+
+        The mirror-primary guard is prepended and evaluated in the runner process.
+        Residue, absence, cleanup and residue re-check follow the direct runner
+        lifecycle. Not reachable from iris_execute_objectscript or any tool argument.
+        """
+        import uuid
+        issued = self.__dict__.get("_live_window_grants", ())
+        if (not isinstance(grant, _LiveWindowGrant) or not any(item is grant for item in issued)
+                or grant.base_url != self.base_url or not grant.fresh()):
+            raise LocalPolicyError("LIVE CONFIG WINDOW runner requires a fresh grant from the window gate.")
+        if self.__dict__.get("_live_window_runner") is not None:
+            raise LocalPolicyError("LIVE CONFIG WINDOW runners do not nest.")
+        class_name = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
+        content = self._runner_class_content(class_name, _LIVE_WINDOW_PRIMARY_GUARD + "\n" + code_str)
+        self._live_window_runner = (class_name, grant)
+        try:
+            output = self._run_direct_runner_lifecycle(class_name, content)
+        finally:
+            self._live_window_runner = None
+        if any(line.strip() == _LIVE_WINDOW_NOT_PRIMARY for line in str(output).splitlines()):
+            raise _LiveWindowNotPrimary("LIVE CONFIG WINDOW: the runner process is not on the mirror primary; "
+                                        "nothing was executed.")
+        return output
+
+    def _live_window_pending_change(self, document_name):
+        """True when %Studio.SourceControl holds an uncommitted change row for the document."""
+        self._validate_document_name(document_name)
+        failure = "Source-control change check failed; server details withheld."
+        status, data = self._send_request(
+            "/action/query", method="POST",
+            payload={"query": self._EPHEMERAL_CHANGE_SQL, "parameters": [document_name]},
+            timeout=DEFAULT_HTTP_TIMEOUT,
+        )
+        if status != 200 or not isinstance(data, dict):
+            raise LocalPolicyError(failure)
+        status_info = data.get("status")
+        result = data.get("result")
+        if (not isinstance(status_info, dict) or status_info.get("errors") != []
+                or status_info.get("summary") not in (None, "")
+                or not isinstance(result, dict) or not isinstance(result.get("content"), list)):
+            raise LocalPolicyError(failure)
+        rows = result["content"]
+        if not rows:
+            return False
+        row = rows[0]
+        if (len(rows) != 1 or not isinstance(row, dict) or set(row) != {"InternalName"}
+                or not isinstance(row["InternalName"], str)
+                or row["InternalName"].casefold() != document_name.casefold()):
+            raise LocalPolicyError(failure)
+        return True
+
     def execute_runtime_code(self, code_str):
         """Run an Ensemble runtime operation through the ephemeral runner.
 
@@ -1138,6 +1589,16 @@ class AtelierClient:
         if (not isinstance(class_name, str)
                 or not self._EPHEMERAL_RUNNER_RE.fullmatch(class_name)):
             raise LocalPolicyError("Invalid ephemeral runner identity.")
+        # Separate, explicit path: ONLY the runner that _run_live_window_runner is
+        # executing right now, for a grant issued by the LIVE CONFIG WINDOW gate on
+        # this exact target. No tool argument can set it; every other runner
+        # (iris_execute_objectscript included) falls through to the checks below.
+        active = self.__dict__.get("_live_window_runner")
+        if active is not None:
+            runner_class, grant = active
+            if (class_name == runner_class and isinstance(grant, _LiveWindowGrant)
+                    and grant.base_url == self.base_url):
+                return
         if getattr(self, "is_production", False):
             raise LocalPolicyError("Ephemeral runner blocked on production targets.")
         namespace = self.namespace.upper()
@@ -1183,7 +1644,12 @@ class AtelierClient:
         host/port/prefix/credentials, e.g. active-node evidence for the LIVE config
         window; None keeps the canonical target namespace."""
         self._validate_target()
-        url = f"{self.base_url}{endpoint}"
+        base_url = self.base_url
+        if namespace is not None:
+            sibling = validate_namespace(namespace)
+            base_url = (f"{getattr(self, 'scheme', 'http')}://{self.host}:{self.port}"
+                        f"{self.path_prefix}/api/atelier/v1/{sibling}")
+        url = f"{base_url}{endpoint}"
         if query_params:
             url += f"?{query_params}"
             
@@ -1226,11 +1692,15 @@ class AtelierClient:
             log_debug("Atelier request failed: transport or response error")
             return 500, {"error": "Atelier transport or response error"}
 
-    def _read_metadata_query(self, sql):
-        """Separate discovery transport: no run_query policy recursion or runner."""
+    def _read_metadata_query(self, sql, namespace=None):
+        """Separate discovery transport: no run_query policy recursion or runner.
+
+        namespace=None queries the target namespace (unchanged behaviour); a value
+        queries that sibling namespace on the same instance route."""
+        extra = {} if namespace is None else {"namespace": namespace}
         status, data = self._send_request(
             "/action/query", method="POST", payload={"query": sql, "parameters": []},
-            timeout=DEFAULT_HTTP_TIMEOUT,
+            timeout=DEFAULT_HTTP_TIMEOUT, **extra,
         )
         if status != 200 or not isinstance(data, dict):
             raise ValueError("Metadata unavailable")
@@ -3835,6 +4305,15 @@ class IRISMCPServer:
         "iris_ensemble_production_control", "iris_ensemble_component_control",
         "iris_ensemble_default_settings", "iris_ensemble_queue_control",
     })
+    # LIVE CONFIG WINDOW category: gated per action inside the handler ('get' ->
+    # READ gate; 'set' -> LIVE CONFIG WINDOW gate, audited).
+    LIVE_CONFIG_WINDOW_TOOLS = frozenset({"iris_ensemble_item_setting"})
+    # Runtime actions that, on a PRODUCTION target and only while a window is
+    # configured, route through the LIVE CONFIG WINDOW gate instead of RUNTIME.
+    _LIVE_WINDOW_RUNTIME_ACTIONS = {
+        "iris_ensemble_production_control": frozenset({"status", "start", "stop", "restart"}),
+        "iris_ensemble_component_control": frozenset({"enable", "disable", "restart"}),
+    }
 
     def __init__(self, project_dir=None):
         """project_dir pins the project explicitly (CLI --project-dir); None resolves
@@ -4051,6 +4530,321 @@ class IRISMCPServer:
             return working_namespaces, None
             
         return None, "USER"
+
+    # ------------------------------------------------------------------
+    # LIVE CONFIG WINDOW handlers (routes.live_config_window)
+    # ------------------------------------------------------------------
+
+    def _live_window_audit(self, client, server_id, tool, action, result, reason, production=None,
+                           item=None, target=None, setting=None, before=None, after=None,
+                           ticket=None, extra=None):
+        """Append one audit line; returns a warning string when it could not be written.
+
+        Never stores connection credentials; values of sensitive-looking settings are
+        recorded as SHA-256 digests only.
+        """
+        window = self.policy.live_config_window
+        if window is None:
+            return None
+        sensitive = isinstance(setting, str) and _LIVE_WINDOW_SENSITIVE_SETTING_RE.search(setting)
+
+        def shown(value):
+            if value is None or not sensitive:
+                return value
+            return "sha256:" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+        try:
+            password = self._resolve_server_config(server_id)[1].get("password")
+        except Exception:
+            password = None
+        record = {
+            "ts": _audit_timestamp(), "server_id": server_id, "host": client.host,
+            "namespace": client.namespace, "tool": tool, "action": action,
+            "production": production, "item": item, "target": target, "setting": setting,
+            "before": shown(before), "after": shown(after), "ticket": ticket,
+            "window": window.label, "result": result, "reason": reason,
+        }
+        if extra:
+            record.update(extra)
+        if isinstance(password, str) and len(password) >= 4:
+            record = {key: (AtelierClient._redact_secret(value, password) if isinstance(value, str) else value)
+                      for key, value in record.items()}
+        try:
+            _append_live_window_audit(window, record)
+        except Exception:
+            log_debug("LIVE config window audit line could not be written.")
+            return "WARNING: the LIVE config window audit line could not be written; record this operation manually."
+        return None
+
+    @staticmethod
+    def _live_window_text_value(value, name):
+        if not isinstance(value, str):
+            raise LocalPolicyError(f"'{name}' must be a string.")
+        if len(value) > _LIVE_WINDOW_VALUE_MAX:
+            raise LocalPolicyError(f"'{name}' exceeds {_LIVE_WINDOW_VALUE_MAX} characters.")
+        if _XML_INVALID_CHARS_RE.search(value):
+            raise LocalPolicyError(f"'{name}' contains characters that the production XData cannot hold.")
+        return value
+
+    @classmethod
+    def _live_window_setting_spec(cls, arguments):
+        """Validate the item/setting coordinates locally, before any gate or network."""
+        production = arguments.get("production_name")
+        if not isinstance(production, str) or production.endswith(".cls") or production.startswith("%"):
+            raise LocalPolicyError("production_name must be a production class name without .cls.")
+        AtelierClient._validate_identifier(production)
+        item = arguments.get("item_name")
+        if (not isinstance(item, str) or not item or len(item) > 256
+                or re.search(r"[\x00-\x1f\x7f]", item)):
+            raise LocalPolicyError("item_name must be a non-empty item name without control characters.")
+        target = arguments.get("target")
+        if target not in ("Host", "Adapter"):
+            raise LocalPolicyError("target must be 'Host' or 'Adapter'.")
+        setting = arguments.get("setting_name")
+        if not isinstance(setting, str) or not _LIVE_WINDOW_SETTING_NAME_RE.fullmatch(setting):
+            raise LocalPolicyError("setting_name must be a plain setting identifier.")
+        return {"production": production, "item": item, "target": target, "setting": setting,
+                "document": production + ".cls"}
+
+    def _live_window_item_setting(self, client, server_id, arguments):
+        tool = "iris_ensemble_item_setting"
+        action = arguments.get("action")
+        if action not in ("get", "set"):
+            raise LocalPolicyError("action must be 'get' or 'set'.")
+        spec = self._live_window_setting_spec(arguments)
+        production, item, target, setting, document = (
+            spec["production"], spec["item"], spec["target"], spec["setting"], spec["document"])
+
+        if action == "get":
+            allowed, reason = client.is_read_allowed()
+            if not allowed:
+                return {"isError": True, "content": [{"type": "text", "text": f"Operation denied: {reason}"}]}
+            lines = client.get_document(document, strict=True)
+            root = _production_definition_root(lines, production)
+            present, value = _production_item_setting(root, item, target, setting)
+            structured = {"production": production, "item": item, "target": target,
+                          "setting": setting, "present": present, "value": value}
+            text = (f"### Item setting on {server_id} ({client.namespace})\n\n"
+                    f"- **Production**: `{production}`\n- **Item**: `{item}`\n"
+                    f"- **Setting**: `{target}.{setting}`\n"
+                    f"- **Present in XData**: {'yes' if present else 'no (class default applies)'}\n"
+                    f"- **Value**: `{value}`\n")
+            return {"structuredContent": structured, "content": [{"type": "text", "text": text}]}
+
+        ticket = arguments.get("ticket")
+        fields = {"production": production, "item": item, "target": target, "setting": setting,
+                  "ticket": ticket}
+
+        def finish(result, reason, is_error=True, before=None, after=None, extra=None, text=None):
+            warning = self._live_window_audit(client, server_id, tool, "set", result, reason,
+                                              before=before, after=after, extra=extra, **fields)
+            body = text or f"LIVE CONFIG WINDOW set {result}: {reason}"
+            if warning:
+                body += f"\n\n{warning}"
+            structured = {"result": result, "reason": reason}
+            structured.update(extra or {})
+            return {"isError": is_error or bool(warning), "structuredContent": structured,
+                    "content": [{"type": "text", "text": body}]}
+
+        window = self.policy.live_config_window
+        if window is None:
+            return finish("DENIED", "routes.live_config_window is not configured; 'set' is never "
+                                    "available outside the LIVE CONFIG WINDOW.")
+        value = arguments.get("value")
+        expected = arguments.get("expected_current_value")
+        try:
+            if value is None:
+                raise LocalPolicyError("'value' is required for set.")
+            if expected is None:
+                raise LocalPolicyError("'expected_current_value' is required for set (compare-and-set).")
+            self._live_window_text_value(value, "value")
+            self._live_window_text_value(expected, "expected_current_value")
+            if not isinstance(ticket, str) or ticket != window.ticket:
+                raise LocalPolicyError("'ticket' is required and must equal the window ticket.")
+        except LocalPolicyError as exc:
+            return finish("DENIED", str(exc))
+        try:
+            grant, gate_reason = client._issue_live_window_grant()
+        except LocalPolicyError as exc:
+            return finish("DENIED", str(exc))
+
+        try:
+            before_lines = client.get_document(document, strict=True)
+            before_root = _production_definition_root(before_lines, production)
+            present, current = _production_item_setting(before_root, item, target, setting)
+        except LocalPolicyError as exc:
+            return finish("FAILED", f"Production class could not be read or parsed: {exc} Nothing was written.")
+        except Exception:
+            return finish("FAILED", "Production class could not be read; server details withheld. Nothing was written.")
+        if current != expected:
+            return finish("DRIFT", "The class XData value differs from expected_current_value; nothing was written.",
+                          before=current)
+        try:
+            if client._live_window_pending_change(document):
+                return finish("DENIED", f"{document} has an uncommitted source-control change row; resolve it "
+                                        "first. Nothing was written.", before=current)
+        except LocalPolicyError as exc:
+            return finish("FAILED", f"{exc} Nothing was written.", before=current)
+        try:
+            _live_window_audit_preflight(window)
+        except Exception:
+            return finish("DENIED", "The LIVE config window audit file is not writable; nothing was written.",
+                          before=current)
+        try:
+            backup_path, backup_sha = _live_window_write_backup(window, client.namespace, production, before_lines)
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, LocalPolicyError) else "local I/O error"
+            return finish("FAILED", f"Backup could not be written ({detail}); nothing was written.", before=current)
+        extra = {"backup": str(backup_path), "backup_sha256": backup_sha}
+
+        code = _live_window_item_setting_code(production, item, target, setting, value, expected)
+        try:
+            output = client._run_live_window_runner(grant, code)
+            outcome = _parse_live_window_result(output)
+        except _LiveWindowNotPrimary as exc:
+            return finish("DENIED", str(exc), before=current, extra=extra)
+        except LocalPolicyError as exc:
+            return finish("UNKNOWN", f"{exc} Compare the class with the backup {backup_path}.",
+                          before=current, extra=extra)
+        extra.update(mirror_member=outcome["mirror_member"], mirror_primary=outcome["mirror_primary"],
+                     production_running=outcome["production_running"])
+        if outcome["status"] != "OK":
+            result = "DRIFT" if outcome["status"] == "DRIFT" else "FAILED"
+            return finish(result, f"Runner status {outcome['status']}: {outcome['message']}",
+                          before=outcome["before"], after=outcome["after"], extra=extra)
+
+        verified_value = None
+        others_unchanged = False
+        verify_error = ""
+        try:
+            after_lines = client.get_document(document, strict=True)
+            after_root = _production_definition_root(after_lines, production)
+            after_present, verified_value = _production_item_setting(after_root, item, target, setting)
+            if not after_present:
+                verified_value = None
+            others_unchanged = (_production_canonical_without(before_root, item, target, setting)
+                                == _production_canonical_without(after_root, item, target, setting))
+        except Exception as exc:
+            verify_error = str(exc) if isinstance(exc, LocalPolicyError) else "re-read failed; details withheld"
+        try:
+            residue = client._live_window_pending_change(document)
+        except LocalPolicyError:
+            residue = None
+        value_ok = verified_value == value
+        extra.update(verified_value_matches=value_ok, other_settings_unchanged=others_unchanged,
+                     source_control_change_row={True: "PRESENT", False: "NONE", None: "UNKNOWN"}[residue])
+        lines = [
+            f"### LIVE CONFIG WINDOW item setting on {server_id} ({client.namespace})",
+            "",
+            f"- **Gate**: {gate_reason}",
+            f"- **Production / item**: `{production}` / `{item}`",
+            f"- **Setting**: `{target}.{setting}`",
+            f"- **Before**: `{outcome['before']}` (present: {'yes' if outcome['before_present'] else 'no'})",
+            f"- **After (runner)**: `{outcome['after']}`",
+            f"- **Backup**: `{backup_path}` (sha256 {backup_sha})",
+            f"- **Class XData re-read**: value {'MATCHES' if value_ok else 'DOES NOT MATCH'}; "
+            f"rest of the production {'unchanged' if others_unchanged else 'CHANGED OR UNVERIFIED'}"
+            + (f" ({verify_error})" if verify_error else ""),
+            f"- **Source-control change row for `{document}`**: "
+            + {True: "PRESENT (created or pre-existing; not undone automatically, review it)",
+               False: "none", None: "UNKNOWN (check failed)"}[residue],
+        ]
+        if outcome["production_running"]:
+            lines.append(f"- **Hint**: production is running; restart item `{item}` for the change to take effect "
+                         "(not done automatically).")
+        if value_ok and others_unchanged:
+            return finish("OK", "Setting written and verified in the class XData.", is_error=False,
+                          before=outcome["before"], after=verified_value, extra=extra,
+                          text="\n".join(lines) + "\n")
+        lines.insert(0, "## FAILED: post-write verification did not confirm the change. Restore from the "
+                        "backup if needed.\n")
+        return finish("FAILED", "Post-write verification failed: "
+                      + ("value mismatch" if not value_ok else "other parts of the production changed or could not be compared"),
+                      before=outcome["before"], after=verified_value, extra=extra, text="\n".join(lines) + "\n")
+
+    def _live_window_ensemble_control(self, name, client, server_id, arguments):
+        """Production/component runtime actions on a production target, window-gated."""
+        action = arguments.get("action")
+        window = self.policy.live_config_window
+        prod_name = arguments.get("production_name")
+        comp_name = arguments.get("component_name")
+        fields = {"production": prod_name, "item": comp_name, "ticket": window.ticket}
+
+        def finish(result, reason, text=None):
+            warning = self._live_window_audit(client, server_id, name, action, result, reason, **fields)
+            body = text or f"LIVE CONFIG WINDOW {name} '{action}' {result}: {reason}"
+            if warning:
+                body += f"\n\n{warning}"
+            return {"isError": result != "OK" or bool(warning),
+                    "content": [{"type": "text", "text": body}]}
+
+        if name == "iris_ensemble_component_control" and not comp_name:
+            return finish("DENIED", f"'component_name' is required for action '{action}'.")
+        try:
+            timeout_val = int(arguments.get("timeout", 30))
+        except (TypeError, ValueError):
+            return finish("DENIED", "'timeout' must be an integer.")
+        if not 0 <= timeout_val <= 3600:
+            return finish("DENIED", "'timeout' must be between 0 and 3600 seconds.")
+        force_val = 1 if arguments.get("force", False) is True else 0
+        try:
+            grant, gate_reason = client._issue_live_window_grant()
+        except LocalPolicyError as exc:
+            return finish("DENIED", str(exc))
+        try:
+            _live_window_audit_preflight(window)
+        except Exception:
+            return finish("DENIED", "The LIVE config window audit file is not writable; nothing was executed.")
+
+        def run(code):
+            return client._run_live_window_runner(grant, code).strip()
+
+        where = f"{server_id} ({client.namespace})"
+        try:
+            if name == "iris_ensemble_production_control":
+                if action == "status":
+                    raw = run('Set sc = ##class(Ens.Director).GetProductionStatus(.pName, .pState) Write pName, "|", pState, !')
+                    parts = raw.split("|")
+                    state_num = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else -1
+                    state_map = {0: "Stopped", 1: "Running", 2: "Suspended", 3: "Troubled (errors/partial)"}
+                    text = (f"### Ensemble production status on {where}\n\n"
+                            f"- **Gate**: {gate_reason}\n"
+                            f"- **Active production**: `{(parts[0] if parts else '') or 'none'}`\n"
+                            f"- **State**: **{state_map.get(state_num, f'Unknown ({state_num})')}**\n")
+                    return finish("OK", "status read", text=text)
+                if action == "start":
+                    if not prod_name:
+                        prod_name = run('Set sc = ##class(Ens.Director).GetProductionStatus(.pName, .pState) Write pName, !')
+                        fields["production"] = prod_name
+                        if not prod_name:
+                            return finish("FAILED", "No 'production_name' was given and no production was previously recorded.")
+                    code = (f'Set sc = ##class(Ens.Director).StartProduction({_cos_string_expr(prod_name)}) '
+                            'If \'$$$ISOK(sc) { Write $System.Status.GetOneErrorText(sc), ! }')
+                elif action == "stop":
+                    code = (f'Set sc = ##class(Ens.Director).StopProduction({timeout_val}, {force_val}) '
+                            'If \'$$$ISOK(sc) { Write $System.Status.GetOneErrorText(sc), ! }')
+                else:
+                    code = (f'Set sc = ##class(Ens.Director).RestartProduction({timeout_val}, {force_val}) '
+                            'If \'$$$ISOK(sc) { Write $System.Status.GetOneErrorText(sc), ! }')
+            else:
+                item = _cos_string_expr(comp_name)
+                if action == "enable":
+                    code = f'Set sc = ##class(Ens.Director).EnableConfigItem({item}, 1) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
+                elif action == "disable":
+                    code = f'Set sc = ##class(Ens.Director).EnableConfigItem({item}, 0) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
+                else:
+                    code = (f'Set sc = ##class(Ens.Director).EnableConfigItem({item}, 0) If \'$$$ISOK(sc) {{ Write "disable: ", $System.Status.GetOneErrorText(sc), ! }} '
+                            f'Hang 0.5 Set sc2 = ##class(Ens.Director).EnableConfigItem({item}, 1) If \'$$$ISOK(sc2) {{ Write "enable: ", $System.Status.GetOneErrorText(sc2), ! }}')
+            error_text = run(code)
+        except _LiveWindowNotPrimary as exc:
+            return finish("DENIED", str(exc))
+        except LocalPolicyError as exc:
+            return finish("FAILED", str(exc))
+        if error_text:
+            return finish("FAILED", f"IRIS reported: {AtelierClient._bounded_runner_text(error_text)}")
+        subject = f"component '{comp_name}'" if comp_name else f"production '{prod_name or ''}'".strip()
+        return finish("OK", f"{action} completed", text=(
+            f"LIVE CONFIG WINDOW: {action} of {subject} completed on {where}.\n\n- **Gate**: {gate_reason}\n"))
 
 
     def handle_tools_list(self):
@@ -4373,7 +5167,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_production_control",
-                "description": "Queries the status of, or controls, the Ensemble production (status, start, stop, restart).",
+                "description": "Queries the status of, or controls, the Ensemble production (status, start, stop, restart). Non-production targets: RUNTIME gate (ephemeral runner). Production targets: blocked, except while the project configures routes.live_config_window, in which case every action (status included) passes only the LIVE CONFIG WINDOW gate (window not expired, namespace and host listed, production_read, fresh Interoperability jobs in the window evidence namespace on this node, mirror-primary check inside the runner process) and is appended to <project>/.backup/live-config-window/audit.jsonl.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4408,7 +5202,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_component_control",
-                "description": "Manages individual production components (Business Services, Processes, Operations): list, enable, disable or hot-restart.",
+                "description": "Manages individual production components (Business Services, Processes, Operations): list, enable, disable or hot-restart. 'list' uses the READ gate. enable/disable/restart: RUNTIME gate on non-production targets; on production targets blocked, except while routes.live_config_window is configured, in which case they pass only the LIVE CONFIG WINDOW gate (window not expired, namespace and host listed, production_read, fresh Interoperability jobs in the window evidence namespace on this node, mirror-primary check inside the runner process) and are audited to <project>/.backup/live-config-window/audit.jsonl.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4525,6 +5319,58 @@ class IRISMCPServer:
                         }
                     },
                     "required": ["server_id", "action"]
+                }
+            },
+            {
+                "name": "iris_ensemble_item_setting",
+                "description": "Reads or compare-and-sets ONE production Item setting stored in the production class XData (e.g. WebServiceURL, StorageNamespace, AllowedIPAddresses). 'get': READ gate only (production_read on production targets); parses the class XData fetched over REST, no runner. 'set': LIVE CONFIG WINDOW gate only (routes.live_config_window): production-flagged target, window not expired (local MCP host date), namespace and host listed, host is a configured direct HA node, production_read, and fresh Interoperability jobs in the window evidence namespace on this node; 'set' is never allowed on non-production targets. 'set' requires expected_current_value (compare-and-set: drift aborts without writing) and the window ticket; it stores an immutable timestamped backup of the class under <project>/.backup/live-config-window/<namespace>/, blocks if the class has a pending source-control change, then runs a FIXED runner (no caller ObjectScript; values travel base64-encoded) that checks the mirror primary in-process, updates Ens.Config.Production, %Save() and SaveToClass(). It re-reads the class to verify the new value and that nothing else changed, reports any source-control change row created for the class, and never applies or restarts the production (restart the item if it is running). Every 'set' (allowed or denied) is appended to <project>/.backup/live-config-window/audit.jsonl.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "Configured server ID."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Target namespace (must be listed in the window for 'set')."
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["get", "set"],
+                            "description": "'get' (read the setting) or 'set' (compare-and-set through the LIVE CONFIG WINDOW gate)."
+                        },
+                        "production_name": {
+                            "type": "string",
+                            "description": "Production class name (e.g. 'HMF.Router.Production')."
+                        },
+                        "item_name": {
+                            "type": "string",
+                            "description": "Exact Item Name (config name) inside the production."
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["Host", "Adapter"],
+                            "description": "Setting target: 'Host' or 'Adapter'."
+                        },
+                        "setting_name": {
+                            "type": "string",
+                            "description": "Setting name (e.g. 'WebServiceURL')."
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "New value (required for 'set')."
+                        },
+                        "expected_current_value": {
+                            "type": "string",
+                            "description": "Required for 'set': the value you expect now. An absent setting counts as ''. If the current value differs, nothing is written."
+                        },
+                        "ticket": {
+                            "type": "string",
+                            "description": "Required for 'set': must equal the ticket of routes.live_config_window."
+                        }
+                    },
+                    "required": ["server_id", "action", "production_name", "item_name", "target", "setting_name"]
                 }
             },
             {
@@ -5618,6 +6464,9 @@ class IRISMCPServer:
             elif name in self.CODE_WRITE_TOOLS:
                 allowed, reason = client.is_code_write_route_allowed(
                     promotion=(name == "iris_ccr_download_load"))
+            elif name in self.LIVE_CONFIG_WINDOW_TOOLS:
+                # Gated per action in the handler: get -> READ, set -> LIVE CONFIG WINDOW.
+                allowed, reason = True, ""
             else:
                 allowed, reason = False, "Tool has no gate category."
             if not allowed:
@@ -5628,6 +6477,13 @@ class IRISMCPServer:
                         "text": f"Operation denied: {reason}"
                     }]
                 }
+
+            if name in self.LIVE_CONFIG_WINDOW_TOOLS:
+                return self._live_window_item_setting(client, server_id, arguments)
+            if (self.policy.live_config_window is not None
+                    and arguments.get("action") in self._LIVE_WINDOW_RUNTIME_ACTIONS.get(name, ())
+                    and client._production_gate_reason() is not None):
+                return self._live_window_ensemble_control(name, client, server_id, arguments)
 
             if name == "iris_query_sql":
                 query = arguments.get("query", "")
