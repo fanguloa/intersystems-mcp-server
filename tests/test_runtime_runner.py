@@ -287,6 +287,39 @@ class RunnerDiagnosticTests(HermeticTestCase):
                          (400, {"error": "Atelier HTTP request failed"}))
 
 
+class SqlReadPolicyLiteralTests(HermeticTestCase):
+    def test_keywords_and_system_prefixes_inside_literals_are_accepted(self):
+        for sql in (
+            "SELECT Name FROM %Dictionary.ClassDefinition WHERE Name LIKE '%Create%'",
+            "SELECT 'a'' CREATE' AS x",
+            "SELECT '%SYSTEM.Version' AS x, '$SYSTEM.Util' AS y",
+            "SELECT 'x' AS \"col\" FROM T WHERE Text = 'a DELETE inside'",
+            "select 'CALL' as word",
+        ):
+            with self.subTest(sql=sql):
+                self.assertIsNone(_read_sql_policy_violation(sql))
+
+    def test_tokens_outside_literals_and_malformed_quotes_stay_denied(self):
+        for sql in (
+            "SELECT 1; CREATE TABLE x",
+            "SELECT 'a''' CREATE",
+            "SELECT 'unterminated",
+            "SELECT 'a'' CREATE",
+            'SELECT "unterminated',
+            # Each of these hides a real token behind a quote inside an identifier or
+            # comment; a naive literal stripper would accept them.
+            "SELECT \"x'\" FROM t; CREATE TABLE y --'",
+            "SELECT 1 -- it's\n; CREATE TABLE x --'",
+            "SELECT 1 /* it's */ ; DROP TABLE t /*'*/",
+            'SELECT "CREATE" FROM t',
+            "SELECT %SYSTEM.Version.GetNumber()",
+            "SELECT 'a' || $SYSTEM.Util.X()",
+            "INSERT INTO t VALUES ('SELECT')",
+        ):
+            with self.subTest(sql=sql):
+                self.assertIsNotNone(_read_sql_policy_violation(sql))
+
+
 class RuntimeAuditTests(HermeticTestCase):
     def setUp(self):
         # Created before the hermetic environment clears TEMP/TMP.

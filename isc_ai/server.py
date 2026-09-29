@@ -315,13 +315,70 @@ _READ_SQL_FORBIDDEN_TOKENS = (
 _READ_SQL_FORBIDDEN_PREFIXES = ("%SYSTEM.", "$SYSTEM.")
 
 
+def _mask_sql_string_literals(sql_query):
+    """Replace single-quoted literals ('' escapes a quote) with ''; None if unterminated.
+
+    Double-quoted delimited identifiers and comments are copied verbatim so they stay
+    subject to the token scan, and a quote inside them never opens a literal.
+    """
+    out = []
+    index, length = 0, len(sql_query)
+    while index < length:
+        char = sql_query[index]
+        if char == "'":
+            cursor = index + 1
+            while True:
+                close = sql_query.find("'", cursor)
+                if close < 0:
+                    return None
+                if sql_query.startswith("''", close):
+                    cursor = close + 2
+                    continue
+                break
+            out.append("''")
+            index = close + 1
+            continue
+        if char == '"':
+            cursor = index + 1
+            while True:
+                close = sql_query.find('"', cursor)
+                if close < 0:
+                    return None
+                if sql_query.startswith('""', close):
+                    cursor = close + 2
+                    continue
+                break
+            out.append(sql_query[index:close + 1])
+            index = close + 1
+            continue
+        if sql_query.startswith("--", index) or sql_query.startswith("//", index):
+            close = sql_query.find("\n", index)
+            close = length if close < 0 else close
+            out.append(sql_query[index:close])
+            index = close
+            continue
+        if sql_query.startswith("/*", index):
+            close = sql_query.find("*/", index + 2)
+            close = length if close < 0 else close + 2
+            out.append(sql_query[index:close])
+            index = close
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _read_sql_policy_violation(sql_query):
     """Return a bounded denial reason, or None when the statement passes the policy."""
     if not isinstance(sql_query, str) or not sql_query.strip():
         return "SQL policy: a non-empty SQL statement is required."
     if not re.match(r"SELECT\b", sql_query.lstrip(), flags=re.IGNORECASE):
         return "SQL policy: only statements that start with SELECT are accepted on the read transport."
-    upper = sql_query.upper()
+    # Keywords inside string literals (Name LIKE '%Create%') are data, not statements.
+    masked = _mask_sql_string_literals(sql_query)
+    if masked is None:
+        return "SQL policy: unterminated string literal or delimited identifier."
+    upper = masked.upper()
     for token in _READ_SQL_FORBIDDEN_TOKENS:
         if re.search(r"\b" + token + r"\b", upper):
             return f"SQL policy: the token {token} is not accepted on the read transport."
@@ -4008,7 +4065,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_query_sql",
-                "description": "Runs a read-only SQL query on an InterSystems IRIS instance and returns a structured result listing. READ gate (blocks production) plus a conservative SQL policy: only statements that start with SELECT, with no CALL/INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/CREATE/GRANT/REVOKE/BUILD/TUNE tokens and no %SYSTEM./$SYSTEM. references; anything else is denied.",
+                "description": "Runs a read-only SQL query on an InterSystems IRIS instance and returns a structured result listing. READ gate (blocks production unless the entry sets production_read) plus a conservative SQL policy: only statements that start with SELECT, with no CALL/INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/CREATE/GRANT/REVOKE/BUILD/TUNE tokens and no %SYSTEM./$SYSTEM. references outside single-quoted string literals; unterminated literals and anything else are denied.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

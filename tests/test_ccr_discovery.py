@@ -1338,7 +1338,9 @@ class MutationTests(HermeticTestCase):
             "CALL Some_Proc('x')",
             "UPDATE Ens_Config.Item SET Enabled = 0",
             "SELECT 1; DROP TABLE t",
-            "SELECT Name FROM T WHERE Text = 'a DELETE inside'",
+            # Tokens inside string literals are data (see SqlReadPolicyLiteralTests);
+            # the same token outside a literal is still denied.
+            "SELECT Name FROM T WHERE Text = 'a' OR DELETE = 1",
             "WITH x AS (SELECT 1) SELECT * FROM x",
             "  select 1 union all select 2 from Foo where BUILD = 1",
             "",
