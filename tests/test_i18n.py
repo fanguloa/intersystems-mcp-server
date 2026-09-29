@@ -20,14 +20,28 @@ from isc_ai.cli import main
 from isc_ai.locales import en as en_catalog
 from isc_ai.locales import es as es_catalog
 
-CLI_SOURCE = (Path(__file__).resolve().parent.parent / "isc_ai" / "cli.py").read_text(encoding="utf-8")
+_PACKAGE = Path(__file__).resolve().parent.parent / "isc_ai"
 
-# The only values cli.py ever interpolates. Anything else in a catalog entry is a
+# Modules that render CLI-facing text. cli.py owns the argparse surface; wizard.py owns the
+# interactive surface. A key used by neither is catalog rot; add a module here only when it
+# genuinely prints to a person.
+TEXT_MODULES = ("cli.py", "wizard.py")
+CLI_SOURCE = "\n".join(
+    (_PACKAGE / name).read_text(encoding="utf-8") for name in TEXT_MODULES
+)
+
+# The only values these modules ever interpolate. Anything else in a catalog entry is a
 # literal brace that was not doubled -- typically a {env:VAR} reference, which
 # str.format would silently eat as a field named "env".
+#
+# Note: "key" is deliberately absent. i18n.t()'s first parameter is named `key`, so a
+# catalog entry using {key} raises TypeError at the call site. Those placeholders are
+# named {name} instead.
 ALLOWED_PARAMETERS = frozenset({
-    "ancestor", "command", "count", "detail", "directory", "language", "legacy", "name",
-    "path", "paths", "project_dir", "server_id", "supported", "target", "value", "values",
+    "ancestor", "command", "count", "detail", "directory", "errors", "files", "language",
+    "legacy", "name", "names", "path", "paths", "project_dir", "reason", "server",
+    "server_id", "summary", "supported", "target", "valid", "value", "values", "version",
+    "warnings",
 })
 
 
@@ -76,11 +90,25 @@ class CatalogIntegrityTests(LanguageResetTestCase):
                         self.fail(f"{language}/{key} is not formattable: {exc!r}")
 
     def test_no_catalog_key_is_dead(self):
-        # Keys are literals in cli.py, so an unused one is catalog rot.
+        # Keys are literals in the text modules, so an unused one is catalog rot.
         for key in en_catalog.MESSAGES:
             with self.subTest(key=key):
                 self.assertTrue(f'"{key}"' in CLI_SOURCE or f"'{key}'" in CLI_SOURCE,
-                                f"{key} is never used by cli.py")
+                                f"{key} is never used by {' or '.join(TEXT_MODULES)}")
+
+    def test_no_catalog_entry_interpolates_key(self):
+        """{key} collides with i18n.t()'s own first parameter and raises TypeError.
+
+        Caught the hard way while adding the wizard: the failure happens at the call site,
+        not in formatting, so a catalog review will not spot it.
+        """
+        for language, messages in i18n.CATALOGS.items():
+            for name, template in messages.items():
+                with self.subTest(language=language, key=name):
+                    self.assertNotIn(
+                        "key", placeholders(template),
+                        f"{language}/{name} interpolates {{key}}: rename it to {{name}}",
+                    )
 
     def test_spanish_catalog_is_written_in_accented_spanish(self):
         # Guards against dropping diacritics "to be safe with encodings": the CLI
@@ -97,20 +125,39 @@ class CatalogIntegrityTests(LanguageResetTestCase):
         written straight into a call would be found instead of shipping as a string
         that no language can ever translate.
         """
-        sinks = {"_emit", "_note", "_warn", "_hint", "_tell", "error", "ArgumentTypeError",
-                 "ConfigError", "LocalPolicyError", "SetupError"}
+        # Anything that puts text in front of a person. `say` and `print` belong here
+        # because wizard.py prints its prompts directly: a sink that is not listed is a
+        # blind spot, and this test missed a hardcoded "[S/n]" until they were added.
+        sinks = {"_emit", "_note", "_warn", "_hint", "_tell", "say", "print", "error",
+                 "ArgumentTypeError", "ConfigError", "LocalPolicyError", "SetupError",
+                 "WizardAborted"}
         described = {"help", "description", "epilog", "title"}
         # metavar values are usage-line placeholders, and _tell's first argument is a
         # catalog key by design.
-        allowed = set(en_catalog.MESSAGES) | {"-h", "--help"}
+        allowed = set(en_catalog.MESSAGES) | {"-h", "--help", "", " "}
 
         def name_of(call):
             return call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+
+        def is_layout_only(node):
+            """An f-string whose literal parts carry no letters is layout, not text.
+
+            Indentation, arrows and separators around an already-translated value need no
+            translation. Requiring t() for them would push whitespace into the catalog.
+            Anything with a letter in it still has to come from the catalog.
+            """
+            if not isinstance(node, ast.JoinedStr):
+                return False
+            literals = [part.value for part in node.values
+                        if isinstance(part, ast.Constant) and isinstance(part.value, str)]
+            return not any(char.isalpha() for text in literals for char in text)
 
         def is_translated(node):
             if isinstance(node, ast.Call):
                 return name_of(node) in {"t", "lines"}
             if isinstance(node, ast.JoinedStr):
+                if is_layout_only(node):
+                    return True
                 return any(isinstance(part, ast.FormattedValue) and is_translated(part.value)
                            for part in node.values)
             if isinstance(node, ast.BinOp):
@@ -133,7 +180,36 @@ class CatalogIntegrityTests(LanguageResetTestCase):
                     value = keyword.value.value
                     if isinstance(value, str) and value.strip() and value not in allowed:
                         offenders.append((node.lineno, value))
-        self.assertEqual(offenders, [], f"cli.py writes text that bypasses the catalog: {offenders}")
+        self.assertEqual(offenders, [],
+                         f"{' / '.join(TEXT_MODULES)} write text that bypasses the catalog: "
+                         f"{offenders}")
+
+
+    def test_the_layout_exemption_does_not_swallow_real_text(self):
+        """Guards the exemption itself: only letter-free literals may skip the catalog.
+
+        Written because the exemption was added to let `f"  {line}"` through, and an
+        exemption that is one character too wide would hide every untranslated sentence.
+        """
+        import ast as ast_module
+
+        def literals_have_letters(source):
+            tree = ast_module.parse(source)
+            for node in ast_module.walk(tree):
+                if isinstance(node, ast_module.JoinedStr):
+                    parts = [p.value for p in node.values
+                             if isinstance(p, ast_module.Constant) and isinstance(p.value, str)]
+                    return any(char.isalpha() for text in parts for char in text)
+            return False
+
+        # Layout: must be exempt.
+        for source in ('f"  {line}"', 'f"      {a}  ->  {b}"', 'f"{x}: {y}"'):
+            with self.subTest(source=source):
+                self.assertFalse(literals_have_letters(source))
+        # Real text: must never be exempt.
+        for source in ('f"  Hello {name}"', 'f"{count} files written"', 'f"done: {x}"'):
+            with self.subTest(source=source):
+                self.assertTrue(literals_have_letters(source))
 
 
 class LanguageResolutionTests(LanguageResetTestCase):
