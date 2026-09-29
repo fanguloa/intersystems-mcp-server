@@ -14,13 +14,22 @@ forgot to mock a call path that reaches winreg, which is exactly the bug this gu
 exists to catch.
 """
 
+import pathlib
+import subprocess
+import sys
 import unittest
-import winreg
 from unittest.mock import patch
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - exercised only off Windows
+    winreg = None
 
 from isc_ai import osenv
 from isc_ai import config as isc_config
 from isc_ai.setup import SetupError
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _real_winreg_call_attempted(*_args, **_kwargs):
@@ -35,6 +44,8 @@ _guard_patches = []
 
 
 def setUpModule():
+    if winreg is None:
+        raise unittest.SkipTest("Windows registry tests require winreg (not available here)")
     for name in _GUARDED_WINREG_CALLS:
         p = patch(f"isc_ai.osenv.winreg.{name}", side_effect=_real_winreg_call_attempted)
         p.start()
@@ -190,6 +201,37 @@ class ProjectDiscoveryRegressionTests(unittest.TestCase):
 
         self.assertEqual(before, after)
         self.assertEqual(before_root, after_root)
+
+
+class ModuleImportPortabilityTests(unittest.TestCase):
+    """This module does an unconditional `import winreg` at module scope. On a platform
+    where winreg does not exist, discovery must skip the module cleanly instead of
+    crashing the whole `unittest discover` run with a ModuleNotFoundError.
+
+    Simulated here (still on Windows) by forcing `import winreg` to fail in a fresh
+    subprocess via `sys.modules["winreg"] = None` before discovery runs -- this is the
+    documented way to make `import winreg` raise ImportError without needing a real
+    non-Windows interpreter.
+    """
+
+    def test_discovery_skips_cleanly_when_winreg_is_unavailable(self):
+        probe = (
+            "import sys\n"
+            "sys.modules['winreg'] = None\n"
+            "import unittest\n"
+            "suite = unittest.TestLoader().discover('tests', pattern='test_osenv.py')\n"
+            "result = unittest.TextTestRunner(verbosity=0).run(suite)\n"
+            "sys.exit(0 if not result.errors and not result.failures else 1)\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe], cwd=str(REPO), capture_output=True, text=True,
+        )
+        self.assertEqual(
+            completed.returncode, 0,
+            f"module import must not error when winreg is unavailable; "
+            f"stderr:\n{completed.stderr}",
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
 
 
 if __name__ == "__main__":
