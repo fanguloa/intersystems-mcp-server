@@ -1,0 +1,62 @@
+{
+  "schema": "isc-ai.harness-vendor-provenance.v1",
+  "sources": {
+    "ai-enablement/claude-code-marketplace": {
+      "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+      "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+      "synced_at": "2026-09-29T14:25:22+00:00",
+      "license": "none",
+      "license_note": "No LICENSE file in the source repository; InterSystems-internal content; redistribution confirmation pending with ai-enablement@intersystems.com.",
+      "plugins": [
+        {
+          "name": "caveman-enterprise",
+          "version": "1.0.0",
+          "audience": "standard",
+          "skills": [
+            "caveman"
+          ]
+        },
+        {
+          "name": "uifw",
+          "version": "1.2.0",
+          "audience": "technical",
+          "skills": [
+            "uifw",
+            "uifw-about-dialog",
+            "uifw-auth",
+            "uifw-cds-card",
+            "uifw-change-control",
+            "uifw-change-history",
+            "uifw-chart",
+            "uifw-column-view",
+            "uifw-confirmation-dialog",
+            "uifw-customizable-element",
+            "uifw-error-pages",
+            "uifw-filter-widget",
+            "uifw-grid-layout",
+            "uifw-header",
+            "uifw-hs-auth",
+            "uifw-hs-basic-login",
+            "uifw-hs-custom-login",
+            "uifw-hs-isc-form",
+            "uifw-hs-patient-banner",
+            "uifw-hs-patient-search",
+            "uifw-icons",
+            "uifw-isc-form",
+            "uifw-notification",
+            "uifw-shared-utilities",
+            "uifw-spinner",
+            "uifw-stepper",
+            "uifw-table",
+            "uifw-template-builder",
+            "uifw-template-question-library",
+            "uifw-text-diff",
+            "uifw-timeout",
+            "uifw-types",
+            "uifw-user-default"
+          ]
+        }
+      ]
+    }
+  }
+}
