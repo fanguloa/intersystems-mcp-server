@@ -48,6 +48,9 @@ PROVENANCE = HARNESS / "vendor-provenance.json"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 GIT_URL_RE = re.compile(r"^(https?://|git@|ssh://|git://)")
 
+# TODO(licensing): the vendored AI Enablement marketplace skills have no upstream LICENSE
+# file. Confirm with ai-enablement@intersystems.com that isc-ai may redistribute them, then
+# record the answer here and in LICENSE_NOTE (which feeds vendor-provenance.json).
 LICENSE_NOTE = (
     "No LICENSE file in the source repository; InterSystems-internal content; "
     "redistribution confirmation pending with ai-enablement@intersystems.com."
