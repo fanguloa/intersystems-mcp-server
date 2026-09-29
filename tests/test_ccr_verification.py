@@ -309,6 +309,20 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         self.assertEqual(code.count("{"), code.count("}"))
         self.assertNotRegex(code, r"(?im)^[ \t]*Quit[ \t]+\S")
 
+    def test_checkout_terminates_notice_lines_before_records(self):
+        client, captured = recording_client(
+            "NOTICE: x.cls is currently checked out by user 'other'\n"
+            "VERIFIED_CHECKOUT|action=idempotent|ccr_enc=CLRS3425"
+        )
+        success, _ = client.ccr_checkout("Custom.ACHS.Test", "CLRS3425")
+        code = captured[0]
+        self.assertTrue(success)
+        status_idx = code.index("scInst.GetStatus(")
+        self.assertLess(status_idx, code.index("Write:$X>0 !", status_idx))
+        checkout_idx = code.index("scInst.CheckOut(")
+        self.assertLess(checkout_idx, code.index("Write:$X>0 !", checkout_idx))
+        self.assert_safe_objectscript(code)
+
     def test_checkout_sets_escaped_ccr_session_before_source_control_calls(self):
         requested_ccr = 'ACHS"0875'
         client, captured = recording_client(

@@ -2417,6 +2417,9 @@ class AtelierClient:
         If flowOK {{
             Set inSC = 0, editable = 0, isCheckedOut = 0, user = ""
             Set statusSC = scInst.GetStatus(className, .inSC, .editable, .isCheckedOut, .user)
+            // GetStatus can print a NOTICE (e.g. "checked out by user ...") without a trailing
+            // newline; end that line so the next record starts on its own line.
+            Write:$X>0 !
             If $$$ISERR(statusSC) {{
                 Write "ERROR_STATUS|message=", $ZConvert($System.Status.GetErrorText(statusSC), "O", "URL"), !
                 Set flowOK = 0
@@ -2453,6 +2456,7 @@ class AtelierClient:
                 Set verifiedAction = "checkout"
                 Set sc = scInst.CheckOut(className, requestedCCR)
             }}
+            Write:$X>0 !
             If $$$ISERR(sc) {{
                 Write "ERROR_CHECKOUT|message=", $ZConvert($System.Status.GetErrorText(sc), "O", "URL"), !
                 Set flowOK = 0
