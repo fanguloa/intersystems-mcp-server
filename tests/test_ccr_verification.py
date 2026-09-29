@@ -10,7 +10,7 @@ from tests.hermetic_test_support import (
     AtelierClient, IRISMCPServer, HermeticTestCase, synthetic_client, script_guard,
     script_guarded_runner, GUARD_STATES, REFERENCE_POLICY,
 )
-from isc_ai.server import LocalPolicyError
+from isc_ai.server import LocalPolicyError, _classify_ccr_terminal_result
 
 
 def encode_record_value(value):
@@ -532,6 +532,77 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         self.assertNotIn(".Upload(", code)
         self.assert_safe_objectscript(code)
         self.assert_token_is_not_written(code, "test-token")
+
+    def test_commit_discovers_the_change_control_engine_in_process(self):
+        client, captured = recording_client(
+            "VERIFIED|action=commit|local_id=1080|local_name=item.xml|"
+            "server_id=42|server_name=item.xml"
+        )
+
+        client.ccr_commit("CLRS3425", [72203, 72204], "test-token")
+
+        code = captured[0]
+        # Both engines are resolved at run time; neither class is referenced statically,
+        # so a runner compiles on a system that has only one of them.
+        self.assertNotIn("##class(%pkg.isc.changecontrol.CCR)", code)
+        self.assertNotIn("##class(TC.ChangeControl.CCR)", code)
+        self.assertIn('%ExistsId("%pkg.isc.changecontrol.CCR||Commit")', code)
+        self.assertIn('%ExistsId("TC.ChangeControl.CCR||Commit")', code)
+        self.assertLess(
+            code.index('%ExistsId("%pkg.isc.changecontrol.CCR||Commit")'),
+            code.index('%ExistsId("TC.ChangeControl.CCR||Commit")'),
+        )
+        self.assertIn("ERROR_ENGINE", code)
+        self.assertIn('$ClassMethod(engine, "Commit", ccr, list, .success, .absent, .errors)', code)
+        self.assertIn('$ClassMethod(engine, "Commit", ccr, list, ccr)', code)
+        # TC Commit bundles whatever it is given: every row is proven first.
+        self.assertIn("ERROR_CHANGE_PRECHECK", code)
+        self.assertIn("change.CCR '= ccr", code)
+        self.assertLess(code.index("ERROR_CHANGE_PRECHECK"), code.index('$ClassMethod(engine, "Commit", ccr, list, ccr)'))
+        # The session user is restored and the original request is put back.
+        self.assertIn('Kill %session.Data("LOGON.USERCODE")', code)
+        self.assertIn("Set %request = priorRequest", code)
+        # The TC log never reaches the output with the token in it.
+        self.assertIn('Set tcLog = $Replace(tcLog, token, "<redacted>")', code)
+        self.assertIn("Set changeList = $ListBuild(72203,72204)", code)
+        self.assert_safe_objectscript(code)
+        self.assert_token_is_not_written(code, "test-token")
+
+    def test_commit_tc_path_never_runs_uncaptured_and_reports_failed_upload(self):
+        client, captured = recording_client("ERROR_X|message=synthetic")
+        client.ccr_commit("CLRS3425", [72203], "test-token")
+        code = captured[0]
+        # Commit runs only inside the branch where the log file was opened and selected.
+        open_idx = code.index("Open tcLogFile")
+        test_idx = code.index("If $Test {", open_idx)
+        call_idx = code.index('$ClassMethod(engine, "Commit", ccr, list, ccr)')
+        else_idx = code.index("} Else {", test_idx)
+        self.assertLess(test_idx, call_idx)
+        self.assertLess(call_idx, else_idx)
+        self.assertIn("commit not attempted", code)
+        self.assertIn("ERROR_COMMIT_UPLOAD|local_id=", code)
+        self.assertIn("iris_ccr_reupload_itemset", code)
+        self.assertIn("Kill %request", code)
+        self.assert_safe_objectscript(code)
+        self.assert_token_is_not_written(code, "test-token")
+
+    def test_commit_rejects_duplicate_change_ids(self):
+        client, captured = recording_client("")
+        with self.assertRaises(ValueError):
+            client.ccr_commit("CLRS3425", [72203, 72203], "test-token")
+        self.assertEqual(captured, [])
+
+    def test_commit_engine_record_does_not_hide_the_terminal_result(self):
+        client, _ = recording_client(
+            "COMMIT_ENGINE|name_enc=TC.ChangeControl.CCR\n"
+            "COMMIT_UPLOAD_STATUS|message_enc=Success!\n"
+            "VERIFIED|action=commit|local_id=1080|local_name=item.xml|"
+            "server_id=42|server_name=item.xml"
+        )
+        result = client.ccr_commit("CLRS3425", [72203], "test-token")
+        status, fields, _ = _classify_ccr_terminal_result(result, {"commit"})
+        self.assertEqual(status, "verified")
+        self.assertEqual(fields["server_id"], "42")
 
     def test_reupload_sanitization_preserves_and_rolls_back_originals(self):
         client, captured = recording_client(

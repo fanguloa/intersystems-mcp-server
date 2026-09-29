@@ -2614,6 +2614,8 @@ class AtelierClient:
             safe_ids.append(cid)
         if not safe_ids:
             raise ValueError("change_ids must contain at least one ID")
+        if len(set(safe_ids)) != len(safe_ids):
+            raise ValueError("change_ids must not contain duplicates")
         list_items = ",".join(str(cid) for cid in safe_ids)
         ccr_id_esc = self._escape_cos(ccr_id)
         upload_token_esc = self._escape_cos(upload_token)
@@ -2652,12 +2654,127 @@ class AtelierClient:
                 }}
             }}
 
+            // Change-control engine discovery, in the same process that commits.
+            // %pkg.isc.changecontrol.CCR: Commit(ccr, list, .success, .absent, .errors)
+            // TC.ChangeControl.CCR (native TrakCare): Commit(Description, Changes, Key); it reads the
+            // token from %request and the user from %session, writes its log to the current device
+            // and always returns $$$OK, so its outcome is proven by the ItemSet capture below.
+            Set engine = "", tcLog = "", tcError = ""
             If flowOK {{
+                If ##class(%Dictionary.CompiledMethod).%ExistsId("%pkg.isc.changecontrol.CCR||Commit") {{
+                    Set engine = "%pkg.isc.changecontrol.CCR"
+                }}
+                If (engine = "") && ##class(%Dictionary.CompiledMethod).%ExistsId("TC.ChangeControl.CCR||Commit") {{
+                    Set engineSpec = ##class(%Dictionary.CompiledMethod).%OpenId("TC.ChangeControl.CCR||Commit").FormalSpec
+                    If ($Length(engineSpec, ",") = 3) && ($Piece($Piece(engineSpec, ",", 3), ":", 1) = "Key") {{
+                        Set engine = "TC.ChangeControl.CCR"
+                    }}
+                }}
+                If engine = "" {{
+                    Write "ERROR_ENGINE|message=No supported change-control Commit was found (pkg.isc.changecontrol.CCR or TC.ChangeControl.CCR)", !
+                    Set flowOK = 0
+                }} Else {{
+                    Write "COMMIT_ENGINE|name_enc=", $ZConvert(engine, "O", "URL"), !
+                }}
+            }}
+
+            // The native TC Commit does not check the rows it bundles: prove every change is a
+            // pending row of exactly this CCR before handing it over.
+            If flowOK && (engine = "TC.ChangeControl.CCR") {{
+                Set changeList = $ListBuild({list_items})
+                For changeIdx=1:1:$ListLength(changeList) {{
+                    Set changeId = $List(changeList, changeIdx)
+                    Set change = ##class(%Studio.SourceControl.Change).%OpenId(changeId)
+                    If '$IsObject(change) {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|message=Change does not exist", !
+                        Set flowOK = 0
+                    }} ElseIf change.Committed {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|message=Change is already committed", !
+                        Set flowOK = 0
+                    }} ElseIf change.CCR '= ccr {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|actual_ccr_enc=", $ZConvert(change.CCR, "O", "URL"), "|message=Change belongs to a blank or different CCR", !
+                        Set flowOK = 0
+                    }} ElseIf change.ItemFile = "" {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|message=Change has no ItemFile", !
+                        Set flowOK = 0
+                    }}
+                    If 'flowOK {{
+                        Quit
+                    }}
+                }}
+                If flowOK && '$IsObject($Get(%session)) {{
+                    Write "ERROR_SESSION|message=TC.ChangeControl.CCR Commit needs a CSP session and none is available", !
+                    Set flowOK = 0
+                }}
+            }}
+
+            If flowOK {{
+                Set priorRequestDefined = $Data(%request)#2
+                Set priorRequest = $Get(%request)
                 Set %request = ##class(%CSP.Request).%New()
                 Set %request.Data("UploadToken", 1) = token
                 Set list = $ListBuild({list_items})
                 Kill success, absent, errors
-                Set commitSC = ##class(%pkg.isc.changecontrol.CCR).Commit(ccr, list, .success, .absent, .errors)
+                If engine = "%pkg.isc.changecontrol.CCR" {{
+                    Set commitSC = $ClassMethod(engine, "Commit", ccr, list, .success, .absent, .errors)
+                }} Else {{
+                    // TC records the committing user from %session; set it only when absent and restore it.
+                    Set priorUserDefined = $Data(%session.Data("LOGON.USERCODE"))
+                    Set priorUser = $Get(%session.Data("LOGON.USERCODE"))
+                    If priorUser = "" {{
+                        Set %session.Data("LOGON.USERCODE") = $Username
+                    }}
+                    Set commitIO = $IO, tcLogFile = ##class(%File).TempFilename("log"), tcLogOpen = 0
+                    Set commitSC = $$$OK
+                    Try {{
+                        Open tcLogFile:("WNS"):5
+                        If $Test {{
+                            Set tcLogOpen = 1
+                            Use tcLogFile
+                            // Only with the log captured: TC writes its raw log to the current device.
+                            Set commitSC = $ClassMethod(engine, "Commit", ccr, list, ccr)
+                        }} Else {{
+                            Set commitSC = $$$ERROR($$$GeneralError, "Could not open a temporary file to capture the TC commit log; commit not attempted")
+                        }}
+                    }} Catch tcEx {{
+                        Set commitSC = tcEx.AsStatus()
+                    }}
+                    Use commitIO
+                    If tcLogOpen {{
+                        Close tcLogFile
+                        Set tcStream = ##class(%Stream.FileCharacter).%New()
+                        If $$$ISOK(tcStream.LinkToFile(tcLogFile)) {{
+                            While 'tcStream.AtEnd && ($Length(tcLog) < 20000) {{
+                                Set tcLog = tcLog _ tcStream.Read(4000)
+                            }}
+                        }}
+                        Kill tcStream
+                        Do ##class(%File).Delete(tcLogFile)
+                    }}
+                    If token'="" {{
+                        Set tcLog = $Replace(tcLog, token, "<redacted>")
+                    }}
+                    If priorUserDefined {{
+                        Set %session.Data("LOGON.USERCODE") = priorUser
+                    }} Else {{
+                        Kill %session.Data("LOGON.USERCODE")
+                    }}
+                    Set tcUpload = $ZStrip($Piece($Piece(tcLog, "Upload Status:", 2), $Char(10), 1), "<>WC")
+                    Set tcError = ""
+                    For tcLine=1:1:$Length(tcLog, $Char(10)) {{
+                        Set tcText = $ZStrip($Piece(tcLog, $Char(10), tcLine), "<>WC")
+                        If (tcText [ "ERROR") || (tcText [ "No ItemSet was created") {{
+                            Set tcError = $Extract(tcText, 1, 300)
+                            Quit
+                        }}
+                    }}
+                    Write "COMMIT_UPLOAD_STATUS|message_enc=", $ZConvert(tcUpload, "O", "URL"), !
+                }}
+                If priorRequestDefined {{
+                    Set %request = priorRequest
+                }} Else {{
+                    Kill %request
+                }}
                 If $$$ISERR(commitSC) {{
                     Set errorText = $System.Status.GetErrorText(commitSC)
                     If token'="" {{
@@ -2700,10 +2817,15 @@ class AtelierClient:
                         Set localFile = afterRS.%Get("ItemSetFile")
                     }}
                     If newCount'=1 {{
-                        Write "ERROR_ITEMSET_COUNT|after_id=", beforeID, "|new_count=", newCount, "|message=Commit must create exactly one local ItemSet for this CCR", !
+                        Write "ERROR_ITEMSET_COUNT|after_id=", beforeID, "|new_count=", newCount, "|engine_enc=", $ZConvert(engine, "O", "URL"), "|engine_log_enc=", $ZConvert($Get(tcError), "O", "URL"), "|message=Commit must create exactly one local ItemSet for this CCR", !
                         Set flowOK = 0
                     }} ElseIf localName="" {{
                         Write "ERROR_LOCAL_CAPTURE|local_id=", localID, "|local_name=|message=New local ItemSet has no Name", !
+                        Set flowOK = 0
+                    }} ElseIf (engine = "TC.ChangeControl.CCR") && ($Get(tcUpload) '= "") && ($Get(tcUpload) '= "Success!") && ($Get(tcUpload) '[ "Check-in in progress") {{
+                        // TC created the local ItemSet and removed the rows, but its upload failed:
+                        // report it with the local id so iris_ccr_reupload_itemset can recover it.
+                        Write "ERROR_COMMIT_UPLOAD|local_id=", localID, "|local_name=", $ZConvert(localName, "O", "URL"), "|message=", $ZConvert("Local ItemSet created but TC upload failed: "_tcUpload_". Recover with iris_ccr_reupload_itemset; DO NOT re-commit.", "O", "URL"), !
                         Set flowOK = 0
                     }}
                 }}
@@ -4355,7 +4477,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_commit",
-                "description": "Triggers a change-control commit (CCR/Perforce), captures the new local ItemSet and verifies by exact name that it exists on the central server. The native Commit already uploads the ItemSet; it NEVER re-uploads automatically (this avoids duplicate commits in Perforce). If the central server does not list it yet, it returns PENDING_VERIFICATION. It reports success only with a VERIFIED result.",
+                "description": "Triggers a change-control commit (CCR/Perforce), captures the new local ItemSet and verifies by exact name that it exists on the central server. The change-control engine is discovered in the committing process (%pkg.isc.changecontrol.CCR first, else the native TrakCare TC.ChangeControl.CCR, whose rows are pre-checked to be pending changes of exactly this CCR). The native Commit already uploads the ItemSet; it NEVER re-uploads automatically (this avoids duplicate commits in Perforce). If the central server does not list it yet, it returns PENDING_VERIFICATION. It reports success only with a VERIFIED result.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
