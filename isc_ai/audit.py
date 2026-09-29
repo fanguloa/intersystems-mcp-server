@@ -30,6 +30,8 @@ REFERENCE = re.compile(r"^(\{env:[A-Za-z_][A-Za-z0-9_]*\}|\$\{?[A-Za-z_][A-Za-z0
 # A separator or a drive prefix is required: a bare switch like `/c` or `-y` is not a path.
 LOOKS_LIKE_PATH = re.compile(r"^([A-Za-z]:[\\/]|[\\/]{2}[^\\/]|[\\/][^\\/]+[\\/])")
 
+GIT_COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+
 ERROR = "error"
 WARNING = "warning"
 INFO = "info"
@@ -261,6 +263,112 @@ def _launch_of(spec):
     return (launch.get("command") or "", tuple(launch.get("args") or []), launch.get("url") or "")
 
 
+def _version_from_arg(arg):
+    """The version pinned onto one launch argument, if any.
+
+    Handles bare package refs (`markitdown-mcp@0.0.1a4`) and npm-scoped ones
+    (`@playwright/mcp@latest`), where a leading `@` names the scope, not a
+    version boundary: only an `@` found after the first character counts.
+    """
+    if not isinstance(arg, str):
+        return None
+    tail = arg[1:] if arg.startswith("@") else arg
+    if "@" not in tail:
+        return None
+    return tail.rsplit("@", 1)[1]
+
+
+def _launch_reference_version(spec):
+    """The version suffix baked into this server's launch args, if any."""
+    _, args, _ = _launch_of(spec)
+    for arg in args:
+        version = _version_from_arg(arg)
+        if version:
+            return version
+    return None
+
+
+def _is_git_sourced_install(install):
+    """True when this install block actually runs `... git+<url>[@ref]`.
+
+    Detected from the real recipe (`install.argv`), not a fixed `manager: "git"`
+    spelling: the decided distribution recipe for isc-ai's own packages is
+    `uv tool install git+https://...@<tag>`, so `manager` stays `"uv"` and the
+    git source only shows up in argv. `manager == "git"` is accepted too, in
+    case a future recipe spells it that way directly.
+    """
+    if not install:
+        return False
+    if str(install.get("manager", "")).lower() == "git":
+        return True
+    for arg in install.get("argv") or []:
+        if isinstance(arg, str) and "git+" in arg:
+            return True
+    return False
+
+
+def _audit_install(name, spec, findings):
+    """Surface an unpinned or inconsistently-pinned package reference.
+
+    Detection-only (isc_ai.resources.mcp-suite.json §Suite Manifest Install Metadata):
+    an absent install block or `pinned: false` never installs, upgrades, or writes
+    anything by itself; it only changes what the audit report says. HTTP-transport
+    servers have no installable package version at all, so they are never checked.
+
+    Git-sourced installs (`uv tool install git+<url>@<tag>`) get a distinct
+    integrity check instead of the launch-args-vs-pin comparison below: their
+    launch command is a plain installed console-script entry point (e.g.
+    `perforce-mcp-server`), which never carries a version suffix, so comparing
+    it against `install.pin` would always mismatch and is not a meaningful
+    check for this source kind. Per decision `distribution-channel`, integrity
+    for a git source is the pinned tag PLUS an expected commit SHA (there is no
+    wheel/package checksum to verify against for a git checkout) - a tag with no
+    recorded commit is reported (a moved/re-tagged ref would install silently),
+    and a malformed `commit` value is an authoring error.
+    """
+    _, _, url = _launch_of(spec)
+    if url:
+        return
+    install = spec.get("install")
+    pinned = install.get("pinned") if install else None
+    launch_version = _launch_reference_version(spec)
+    looks_unpinned = launch_version is None or launch_version == "latest"
+    git_sourced = _is_git_sourced_install(install)
+    if (install is None or pinned is False) and looks_unpinned:
+        reason = install.get("pin_reason") if install else None
+        findings.append(Finding(
+            "VERSION_UNPINNED", WARNING, server=name,
+            message=f"'{name}' launches an unpinned package reference"
+                    + (f" ({reason})" if reason else ""),
+        ))
+    if install and pinned is True and not git_sourced:
+        pin = install.get("pin")
+        if pin and launch_version != pin:
+            findings.append(Finding(
+                "INSTALL_PIN_MISMATCH", ERROR, server=name,
+                message=f"'{name}' declares install.pin={pin} but the launch command "
+                        f"actually runs {launch_version or '<unpinned>'}",
+            ))
+    if git_sourced and install:
+        pin = install.get("pin")
+        if pin:
+            commit = install.get("commit")
+            if not commit:
+                findings.append(Finding(
+                    "INSTALL_COMMIT_MISSING", WARNING, server=name,
+                    message=f"'{name}' pins git tag {pin} but declares no expected commit "
+                            f"SHA (install.commit); a re-tagged or moved ref would be "
+                            f"installed silently. Not invented here: leave absent and tag "
+                            f"the real release first (see MANUAL-2)",
+                ))
+            elif not GIT_COMMIT_SHA.match(str(commit)):
+                findings.append(Finding(
+                    "INSTALL_COMMIT_INVALID", ERROR, server=name,
+                    message=f"'{name}' install.commit={commit!r} is not a 40-character "
+                            f"hex commit SHA",
+                ))
+
+
 def _unwrap(entry):
     """`cmd /c <real command>` states the same intent as the bare command.
 
@@ -344,6 +452,7 @@ def classify(suite, entries, findings, clients=None):
         by_client.setdefault(entry.client, []).append(entry)
 
     for name, spec in suite["servers"].items():
+        _audit_install(name, spec, findings)
         canonical = _normalize_name(name)
         aliases = {_normalize_name(alias) for alias in spec.get("aliases", [])}
         per_client = {}
