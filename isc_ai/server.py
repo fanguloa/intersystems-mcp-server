@@ -1106,7 +1106,14 @@ class AtelierClient:
             raise LocalPolicyError("Target changed; create a new canonical client before continuing.")
 
 
-    def _send_request(self, endpoint, method='GET', payload=None, query_params="", timeout=None):
+    def _send_request(self, endpoint, method='GET', payload=None, query_params="", timeout=None,
+                      capture_error_body=False, namespace=None):
+        """capture_error_body=True returns the parsed JSON body of an HTTP error so a
+        private caller can extract bounded IRIS error codes; others get a generic dict.
+
+        namespace (private callers only) addresses a sibling namespace on the SAME
+        host/port/prefix/credentials, e.g. active-node evidence for the LIVE config
+        window; None keeps the canonical target namespace."""
         self._validate_target()
         url = f"{self.base_url}{endpoint}"
         if query_params:
@@ -1127,7 +1134,16 @@ class AtelierClient:
                 return response.status, json.loads(raw_data) if raw_data else {}
         except urllib.error.HTTPError as e:
             log_debug(f"Atelier request failed: HTTP {e.code}")
+            body = None
+            if capture_error_body:
+                try:
+                    raw_error = e.read(65536).decode('utf-8', errors='replace')
+                    body = json.loads(raw_error) if raw_error else None
+                except Exception:
+                    body = None
             e.close()
+            if isinstance(body, dict):
+                return e.code, body
             return e.code, {"error": "Atelier HTTP request failed"}
         except (socket.timeout, TimeoutError):
             log_debug("Atelier request failed: client-side timeout")
@@ -1365,32 +1381,117 @@ class AtelierClient:
             return True, "Deleted successfully"
         return False, f"Delete failed with status {status}; server details withheld"
 
+    # Bounded runner diagnostics: IRIS error codes plus an operator hint. The payload
+    # code, console output and raw server bodies are never echoed.
+    _RUNNER_ERROR_CODE_RE = re.compile(r"#\s?(\d{2,5})\b")
+    _RUNNER_LOCKED_HINT = ("namespace is locked by source control; configure "
+                           "runtime.runner_hosts for this namespace")
+    _RUNNER_READONLY_HINT = "database is read-only (likely a mirror backup node); target the primary"
+
+    @classmethod
+    def _runner_hint(cls, codes, locked=False):
+        if locked or "5845" in codes:
+            return cls._RUNNER_LOCKED_HINT
+        if "5883" in codes or "302" in codes:
+            return cls._RUNNER_READONLY_HINT
+        return ""
+
+    @classmethod
+    def _bounded_runner_text(cls, text):
+        text = " ".join(str(text).replace("\r", " ").replace("\n", " ").split())
+        if len(text) > cls._SQL_DIAG_MAX_CHARS:
+            text = text[:cls._SQL_DIAG_MAX_CHARS] + "..."
+        return text
+
+    @classmethod
+    def _runner_upload_diagnostic(cls, status, data):
+        """Return None when the PUT succeeded, else a bounded failure message."""
+        texts = []
+        locked = False
+        reported = False
+        if isinstance(data, dict):
+            result = data.get("result")
+            result_status = result.get("status") if isinstance(result, dict) else None
+            if isinstance(result_status, str) and result_status.strip():
+                texts.append(result_status)
+                reported = True
+            status_info = data.get("status")
+            errors = status_info.get("errors") if isinstance(status_info, dict) else None
+            if isinstance(errors, list) and errors:
+                reported = True
+                for item in errors:
+                    text = item.get("error", "") if isinstance(item, dict) else item
+                    if isinstance(text, str) and text.strip():
+                        texts.append(text)
+            console = data.get("console")
+            if isinstance(console, list):
+                locked = any(isinstance(line, str) and "namespace is locked" in line.lower()
+                             for line in console)
+        if status in (200, 201) and not reported and not locked:
+            return None
+        codes = []
+        for text in texts:
+            for code in cls._RUNNER_ERROR_CODE_RE.findall(text):
+                if code not in codes:
+                    codes.append(code)
+        if not codes and not locked and status not in (200, 201):
+            return "Temporary executor upload failed; server details withheld."
+        detail = f"HTTP {status}"
+        if codes:
+            detail += "; IRIS " + ", ".join(f"ERROR #{code}" for code in codes)
+        hint = cls._runner_hint(codes, locked)
+        if hint:
+            detail += f". Hint: {hint}"
+        return (f"Temporary executor upload failed ({cls._bounded_runner_text(detail)}); "
+                "server details withheld.")
+
     def _ephemeral_runner_save(self, class_name, content_lines):
         self._require_ephemeral_runner(class_name)
         quoted_doc = urllib.parse.quote(class_name + ".cls", safe="")
-        status, _ = self._send_request(
+        status, data = self._send_request(
             f"/doc/{quoted_doc}", method="PUT",
             payload={"content": content_lines, "enc": False},
-            query_params="ignoreConflict=1",
+            query_params="ignoreConflict=1", capture_error_body=True,
         )
-        if status not in (200, 201):
-            raise LocalPolicyError("Temporary executor upload failed; server details withheld.")
+        failure = self._runner_upload_diagnostic(status, data)
+        if failure:
+            raise LocalPolicyError(failure)
+
+    @classmethod
+    def _runner_compile_failure(cls, data):
+        generic = "Temporary executor compilation failed; code/details withheld."
+        status_info = data.get("status") if isinstance(data, dict) else None
+        errors = status_info.get("errors") if isinstance(status_info, dict) else None
+        parts = []
+        for item in errors if isinstance(errors, list) else []:
+            text = item.get("error") if isinstance(item, dict) else None
+            if isinstance(text, str) and text.strip():
+                parts.append(" ".join(text.split()))
+        if not parts:
+            return generic
+        joined = " | ".join(parts)
+        codes = cls._RUNNER_ERROR_CODE_RE.findall(joined)
+        hint = cls._runner_hint(codes)
+        message = f"Temporary executor compilation failed; IRIS: {cls._bounded_runner_text(joined)}."
+        if hint:
+            message += f" Hint: {hint}."
+        return message + " Console withheld."
 
     def _ephemeral_runner_compile(self, class_name):
         self._require_ephemeral_runner(class_name)
         status, data = self._send_request(
             "/action/compile", method="POST", payload=[class_name + ".cls"],
-            timeout=get_exec_timeout(),
+            timeout=get_exec_timeout(), capture_error_body=True,
         )
         if status != 200 or not isinstance(data, dict):
-            raise LocalPolicyError("Temporary executor compilation failed; code/details withheld.")
+            raise LocalPolicyError(self._runner_compile_failure(data))
         status_info = data.get("status")
         if (not isinstance(status_info, dict)
                 or "errors" not in status_info
                 or "summary" not in status_info
                 or status_info.get("errors") != []
                 or status_info.get("summary") not in (None, "")):
-            raise LocalPolicyError("Temporary executor compilation failed; code/details withheld.")
+            raise LocalPolicyError(self._runner_compile_failure(data))
 
     @staticmethod
     def _ephemeral_runner_sql_suffix(class_name):
@@ -1471,6 +1572,27 @@ class AtelierClient:
                 raise LocalPolicyError(failure)
         raise LocalPolicyError(failure)
 
+    # Exact bodies _send_request synthesizes for client-side timeout / unreachable
+    # transport (never a server-sent body). A pre-check failing this way means the
+    # server was not reached, which is distinct from a server-side refusal.
+    _RUNNER_TRANSPORT_FAILURES = frozenset({
+        (504, "Atelier client timeout"),
+        (500, "Atelier transport error"),
+    })
+    _RUNNER_UNREACHABLE_MESSAGE = (
+        "Temporary executor could not reach the server (transport timeout/unreachable); "
+        "payload was not executed."
+    )
+
+    @classmethod
+    def _raise_if_runner_unreachable(cls, status, data):
+        """Pre-check helpers raise the distinct unreachable message. Every post-PUT
+        caller catches Exception and treats it as cleanup failure, so cleanup
+        strictness is unchanged."""
+        if (isinstance(data, dict) and set(data) == {"error"}
+                and (status, data["error"]) in cls._RUNNER_TRANSPORT_FAILURES):
+            raise LocalPolicyError(cls._RUNNER_UNREACHABLE_MESSAGE)
+
     def _ephemeral_runner_has_pending_change(self, class_name):
         """Check only the generated document through the private metadata transport."""
         self._require_ephemeral_runner(class_name)
@@ -1480,6 +1602,7 @@ class AtelierClient:
             payload={"query": self._EPHEMERAL_CHANGE_SQL, "parameters": [document_name]},
             timeout=DEFAULT_HTTP_TIMEOUT,
         )
+        self._raise_if_runner_unreachable(status, data)
         if status != 200 or not isinstance(data, dict):
             raise LocalPolicyError("Temporary executor source-control check failed; server details withheld.")
         status_info = data.get("status")
@@ -1507,7 +1630,8 @@ class AtelierClient:
     def _ephemeral_runner_is_absent(self, class_name):
         self._require_ephemeral_runner(class_name)
         quoted_doc = urllib.parse.quote(class_name + ".cls", safe="")
-        status, _ = self._send_request(f"/doc/{quoted_doc}", method="GET")
+        status, data = self._send_request(f"/doc/{quoted_doc}", method="GET")
+        self._raise_if_runner_unreachable(status, data)
         return status == 404
 
     def _delete_ephemeral_runner(self, class_name):

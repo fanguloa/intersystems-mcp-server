@@ -211,6 +211,82 @@ class RunnerHostRoutingTests(HermeticTestCase):
             client._namespace_switch_prefix()
 
 
+class RunnerDiagnosticTests(HermeticTestCase):
+    SECRET_CODE = "Set ^SecretPayload=1"
+
+    def test_put_200_with_status_error_is_a_locked_namespace_failure(self):
+        client = routed_client(policy=policy_with())
+        put = (200, {
+            "status": {"errors": [], "summary": ""},
+            "console": [f"NOTICE: {CLASS}.CLS is being treated as Readonly - Namespace is LOCKED"],
+            "result": {"name": f"{CLASS}.cls", "status": f"ERROR #5845: Item '{CLASS}.CLS' is not editable"},
+        })
+        calls = []
+        with patch.object(AtelierClient, "_send_request", autospec=True,
+                          side_effect=lifecycle_responder(calls, put=put)), \
+                patch("uuid.uuid4", return_value=UUID):
+            with self.assertRaises(LocalPolicyError) as raised:
+                client._execute_direct_objectscript(self.SECRET_CODE)
+        message = str(raised.exception)
+        self.assertIn("upload failed", message)
+        self.assertIn("ERROR #5845", message)
+        self.assertIn("runtime.runner_hosts", message)
+        self.assertNotIn("SecretPayload", message)
+        self.assertNotIn("Readonly", message)
+        self.assertNotIn("/action/compile", [call[1] for call in calls])
+        self.assertIn("DELETE", [call[2] for call in calls])
+        self.assertEqual(self.runtime_audit_records[-1]["outcome"], message)
+
+    def test_backup_node_read_only_hints_and_success_envelopes(self):
+        client = synthetic_client()
+        client._send_request.side_effect = None
+        client._send_request.return_value = (400, {"result": {
+            "status": f"ERROR #5883: Item '{CLASS}.CLS' is mapped from a database that you do not have write permission on."}})
+        with self.assertRaisesRegex(LocalPolicyError, r"HTTP 400; IRIS ERROR #5883\. Hint: database is read-only"):
+            client._ephemeral_runner_save(CLASS, ["Class x {}"])
+        self.assertTrue(client._send_request.call_args.kwargs["capture_error_body"])
+        for response in ((201, {}), (200, {"result": {"status": ""}}),
+                         (200, {"status": {"errors": [], "summary": ""}, "result": {"status": ""}})):
+            with self.subTest(response=response):
+                client._send_request.return_value = response
+                self.assertIsNone(client._ephemeral_runner_save(CLASS, []))
+        client._send_request.return_value = (500, {"error": "Atelier HTTP request failed"})
+        with self.assertRaisesRegex(LocalPolicyError, "^Temporary executor upload failed; server details withheld.$"):
+            client._ephemeral_runner_save(CLASS, [])
+
+    def test_compile_diagnostic_is_bounded_and_hinted(self):
+        client = synthetic_client()
+        client._send_request.side_effect = None
+        client._send_request.return_value = (200, {"status": {
+            "errors": [{"error": "ERROR #302: the database is read-only."}], "summary": "failed"},
+            "console": ["console-detail-must-not-leak"]})
+        with self.assertRaises(LocalPolicyError) as raised:
+            client._ephemeral_runner_compile(CLASS)
+        message = str(raised.exception)
+        self.assertIn("compilation failed", message)
+        self.assertIn("ERROR #302", message)
+        self.assertIn("read-only", message)
+        self.assertNotIn("console-detail", message)
+        client._send_request.return_value = (200, {"status": {"errors": [{"error": "E" * 2000}], "summary": "x"}})
+        with self.assertRaises(LocalPolicyError) as raised:
+            client._ephemeral_runner_compile(CLASS)
+        self.assertLess(len(str(raised.exception)), 400)
+
+    def test_http_error_body_is_parsed_only_on_request(self):
+        client = synthetic_client()
+        del client._send_request
+        body = json.dumps({"result": {"status": "ERROR #5883: read-only"}}).encode("utf-8")
+
+        def fail(*args, **kwargs):
+            raise urllib.error.HTTPError("http://x", 400, "Bad Request", {}, io.BytesIO(body))
+
+        client.opener.open.side_effect = fail
+        self.assertEqual(client._send_request("/doc/x", method="PUT", payload={}, capture_error_body=True),
+                         (400, {"result": {"status": "ERROR #5883: read-only"}}))
+        self.assertEqual(client._send_request("/doc/x", method="PUT", payload={}),
+                         (400, {"error": "Atelier HTTP request failed"}))
+
+
 class RuntimeAuditTests(HermeticTestCase):
     def setUp(self):
         # Created before the hermetic environment clears TEMP/TMP.
@@ -381,3 +457,62 @@ class RuntimeAuditTests(HermeticTestCase):
                 else:
                     self.assertEqual([call.args for call in chmod.call_args_list], [
                         (directory, 0o700), (directory / "runtime.jsonl", 0o600)])
+
+
+class RunnerTransportErrorTests(HermeticTestCase):
+    UNREACHABLE = ("Temporary executor could not reach the server (transport timeout/unreachable); "
+                   "payload was not executed.")
+
+    def run_with(self, respond):
+        client = synthetic_client()
+        calls = []
+
+        def send(endpoint, method="GET", payload=None, **kwargs):
+            calls.append((endpoint, method, payload))
+            return respond(endpoint, method, payload)
+
+        client._send_request.side_effect = send
+        with patch("uuid.uuid4", return_value=UUID):
+            with self.assertRaises(LocalPolicyError) as raised:
+                client._execute_direct_objectscript("Write 1")
+        return str(raised.exception), calls
+
+    def test_residue_precheck_timeout_is_unreachable_and_never_puts(self):
+        for response in ((504, {"error": "Atelier client timeout"}), (500, {"error": "Atelier transport error"})):
+            with self.subTest(response=response):
+                message, calls = self.run_with(lambda endpoint, method, payload: response)
+                self.assertEqual(message, self.UNREACHABLE)
+                self.assertEqual([call[1] for call in calls], ["POST"])
+                self.assertEqual(self.runtime_audit_records[-1]["outcome"], self.UNREACHABLE)
+
+    def test_absence_precheck_timeout_is_unreachable_and_never_puts(self):
+        def respond(endpoint, method, payload):
+            if endpoint == "/action/query":
+                return envelope([])
+            return 504, {"error": "Atelier client timeout"}
+
+        message, calls = self.run_with(respond)
+        self.assertEqual(message, self.UNREACHABLE)
+        self.assertNotIn("PUT", [call[1] for call in calls])
+
+    def test_server_side_failures_keep_their_messages(self):
+        message, _ = self.run_with(lambda e, m, p: (500, {"error": "Atelier HTTP request failed"}))
+        self.assertIn("source-control check failed", message)
+
+    def test_post_put_timeout_keeps_unknown_outcome_and_strict_cleanup(self):
+        state = {"put": False}
+
+        def respond(endpoint, method, payload):
+            if method == "PUT":
+                state["put"] = True
+                return 201, {}
+            if state["put"]:
+                return 504, {"error": "Atelier client timeout"}
+            if endpoint == "/action/query":
+                return envelope([])
+            return 404, {}
+
+        message, calls = self.run_with(respond)
+        self.assertNotIn("could not reach", message)
+        self.assertIn("cleanup failed", message)
+        self.assertIn("PUT", [call[1] for call in calls])
