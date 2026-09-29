@@ -285,6 +285,116 @@ class InstallPinTests(AuditTestCase):
         self.assertNotIn("VERSION_UNPINNED", self.codes(report, "beta"))
 
 
+class InstallIntegrityTests(AuditTestCase):
+    """S3 fix round: git-sourced installs pin a tag AND an expected commit SHA.
+
+    Per decision `distribution-channel`: for git-sourced installs the integrity
+    check is (tag, commit), not a wheel sha256 - `uv tool install git+...@<tag>`
+    has nothing else to verify against. Non-git managers (npm/uvx registry pins)
+    are explicitly NOT asked for an invented checksum here; that stays deferred.
+    """
+
+    def suite_with_servers(self, extra_servers):
+        suite = json.loads(json.dumps(SUITE))
+        suite["servers"].update(extra_servers)
+        return suite
+
+    def run_audit_with_suite(self, suite):
+        suite_file = self.root / "suite-install-integrity.json"
+        suite_file.write_text(json.dumps(suite), encoding="utf-8")
+        return audit.run_audit(project_dir=self.project, home=self.home,
+                                environ=self.environ, suite_path=suite_file)
+
+    def test_git_sourced_install_with_a_tag_but_no_commit_is_a_warning(self):
+        suite = self.suite_with_servers({
+            "zeta-ext": {
+                "transport": "stdio",
+                "launch": {"command": "zeta-ext", "args": []},
+                "aliases": [], "settings": {},
+                "install": {
+                    "manager": "uv",
+                    "argv": ["uv", "tool", "install",
+                             "git+https://gitlab.iscinternal.com/isc-ai-squad/zeta-ext.git@v0.1.0"],
+                    "pin": "v0.1.0", "pinned": True,
+                },
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertIn("INSTALL_COMMIT_MISSING", self.codes(report, "zeta-ext"))
+
+    def test_git_sourced_install_with_tag_and_a_valid_commit_has_no_finding(self):
+        suite = self.suite_with_servers({
+            "zeta-ext": {
+                "transport": "stdio",
+                "launch": {"command": "zeta-ext", "args": []},
+                "aliases": [], "settings": {},
+                "install": {
+                    "manager": "uv",
+                    "argv": ["uv", "tool", "install",
+                             "git+https://gitlab.iscinternal.com/isc-ai-squad/zeta-ext.git@v0.1.0"],
+                    "pin": "v0.1.0", "pinned": True,
+                    "commit": "a" * 40,
+                },
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertNotIn("INSTALL_COMMIT_MISSING", self.codes(report, "zeta-ext"))
+        self.assertNotIn("INSTALL_COMMIT_INVALID", self.codes(report, "zeta-ext"))
+
+    def test_git_sourced_install_with_a_malformed_commit_is_an_error(self):
+        suite = self.suite_with_servers({
+            "zeta-ext": {
+                "transport": "stdio",
+                "launch": {"command": "zeta-ext", "args": []},
+                "aliases": [], "settings": {},
+                "install": {
+                    "manager": "uv",
+                    "argv": ["uv", "tool", "install",
+                             "git+https://gitlab.iscinternal.com/isc-ai-squad/zeta-ext.git@v0.1.0"],
+                    "pin": "v0.1.0", "pinned": True,
+                    "commit": "not-a-sha",
+                },
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        invalid = [item for item in report["findings"] if item["code"] == "INSTALL_COMMIT_INVALID"]
+        self.assertEqual(len(invalid), 1)
+        self.assertEqual(invalid[0]["severity"], "error")
+
+    def test_a_non_git_manager_is_never_asked_for_a_commit(self):
+        # npm/uvx registry pins keep working exactly as before: no invented checksum,
+        # no INSTALL_COMMIT_MISSING for a manager that isn't git-sourced at all.
+        suite = self.suite_with_servers({
+            "gamma-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "uvx", "args": ["gamma-pkg@1.2.3"]},
+                "aliases": [], "settings": {},
+                "install": {"manager": "uvx", "pin": "1.2.3", "pinned": True},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertNotIn("INSTALL_COMMIT_MISSING", self.codes(report, "gamma-pkg"))
+
+    def test_git_source_is_detected_from_the_argv_even_with_manager_uv(self):
+        # Detection is by the git+ URL actually run, not a fixed 'manager: git' spelling,
+        # since the real recipe is 'uv tool install git+<url>@<tag>'.
+        suite = self.suite_with_servers({
+            "zeta-ext": {
+                "transport": "stdio",
+                "launch": {"command": "zeta-ext", "args": []},
+                "aliases": [], "settings": {},
+                "install": {
+                    "manager": "uv",
+                    "argv": ["uv", "tool", "install", "--force",
+                             "git+https://gitlab.iscinternal.com/isc-ai-squad/zeta-ext.git@v0.1.0"],
+                    "pin": "v0.1.0", "pinned": True,
+                },
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertIn("INSTALL_COMMIT_MISSING", self.codes(report, "zeta-ext"))
+
+
 class ClientAndAmbiguityTests(AuditTestCase):
     def test_an_absent_client_reports_whether_its_installer_is_available(self):
         report = self.run_audit()
