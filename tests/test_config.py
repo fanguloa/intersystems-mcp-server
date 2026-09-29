@@ -21,6 +21,7 @@ from tests.hermetic_test_support import (
 from isc_ai.config import CanonicalBase, ConfigError, PackageGrant, SitePolicy, WriteException
 from isc_ai.cli import _parse_cli_args, main
 from isc_ai.server import _load_ccr_mutation_resource
+from isc_ai.config import STATE_DIR
 
 
 class PolicyModelTests(HermeticTestCase):
@@ -287,7 +288,7 @@ class FilesystemTestCase(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def project_config(self):
-        return json.loads((self.project / ".iris-mcp" / "config.json").read_text(encoding="utf-8"))
+        return json.loads((self.project / STATE_DIR / "config.json").read_text(encoding="utf-8"))
 
 
 class LoaderTests(FilesystemTestCase):
@@ -302,13 +303,13 @@ class LoaderTests(FilesystemTestCase):
         (self.home / ".iris_mcp_servers.json").write_text(json.dumps({"servers": {
             "legacy": {"host": "legacy.invalid"}, "shared": {"host": "legacy-shared.invalid"},
         }}), encoding="utf-8")
-        (self.home / ".iris-mcp").mkdir()
-        (self.home / ".iris-mcp" / "servers.json").write_text(json.dumps({"servers": {
+        (self.home / STATE_DIR).mkdir()
+        (self.home / STATE_DIR / "servers.json").write_text(json.dumps({"servers": {
             "user": {"host": "user.invalid", "password": "{env:PW}"}, "shared": {"host": "user-shared.invalid"},
         }}), encoding="utf-8")
         data = reference_policy_data()
         data["servers"] = {"shared": {"host": "project-shared.invalid"}}
-        iris_mcp_config.write_json(self.project / ".iris-mcp" / "config.json", data)
+        iris_mcp_config.write_json(self.project / STATE_DIR / "config.json", data)
         with patch.dict(os.environ, {"PW": "resolved", "IRIS_EXTRA_PACKAGES": "BASE-ACHS:Own.Extra"}):
             runtime = iris_mcp_config.load_runtime_config(self.project)
         self.assertEqual(runtime.servers["legacy"]["host"], "legacy.invalid")
@@ -324,12 +325,12 @@ class LoaderTests(FilesystemTestCase):
         data["servers"] = {"achsbase": {"host": "10.244.10.4", "port": 80, "path_prefix": "/trakbase01",
                                         "namespace": "BASE-ACHS", "env_role": "BASE", "username": "u",
                                         "password": "{env:PW}"}}
-        iris_mcp_config.write_json(self.project / ".iris-mcp" / "config.json", data)
+        iris_mcp_config.write_json(self.project / STATE_DIR / "config.json", data)
         with patch.dict(os.environ, {iris_mcp_config.PROJECT_DIR_ENV: str(self.project), "PW": "x"}):
             server = IRISMCPServer()
             self.assertEqual(server.policy.site_name, "reference")
             self.assertIn("achsbase", server.servers)
-            (self.project / ".iris-mcp" / "config.json").write_text("{not json", encoding="utf-8")
+            (self.project / STATE_DIR / "config.json").write_text("{not json", encoding="utf-8")
             server.load_configuration()
             # A broken file never leaves the previous snapshot in force.
             self.assertFalse(server.policy.configured)
@@ -338,8 +339,8 @@ class LoaderTests(FilesystemTestCase):
                 server._resolve_server_config("achsbase")
 
     def test_missing_project_config_blocks_code_write_routes_but_not_read(self):
-        (self.home / ".iris-mcp").mkdir()
-        (self.home / ".iris-mcp" / "servers.json").write_text(json.dumps({"servers": {
+        (self.home / STATE_DIR).mkdir()
+        (self.home / STATE_DIR / "servers.json").write_text(json.dumps({"servers": {
             "node": {"host": "10.244.20.4", "port": 80, "path_prefix": "/trakuat01", "namespace": "UAT-X",
                      "env_role": "UAT", "username": "u", "password": "p"},
             "base": {"host": "b.invalid", "port": 80, "path_prefix": "", "namespace": "BASE-X",
@@ -369,11 +370,11 @@ class LoaderTests(FilesystemTestCase):
 
     def test_explicit_config_env_resolves_relative_paths_against_its_own_project(self):
         other = self.root / "other-site"
-        (other / ".iris-mcp").mkdir(parents=True)
+        (other / STATE_DIR).mkdir(parents=True)
         data = reference_policy_data()
         data["mutation"]["local_source_root"] = "SRC/Custom/ACHS"
-        iris_mcp_config.write_json(other / ".iris-mcp" / "config.json", data)
-        env = {iris_mcp_config.PROJECT_CONFIG_ENV: str(other / ".iris-mcp" / "config.json")}
+        iris_mcp_config.write_json(other / STATE_DIR / "config.json", data)
+        env = {iris_mcp_config.PROJECT_CONFIG_ENV: str(other / STATE_DIR / "config.json")}
         # Shell sits inside an unrelated deployment; the explicit file must still win
         # and its relative mutation root must resolve under other-site, not under cwd.
         with patch.dict(os.environ, env), patch("pathlib.Path.cwd", return_value=self.project):
@@ -388,11 +389,11 @@ class LoaderTests(FilesystemTestCase):
     def test_server_pins_project_dir_when_given(self):
         from isc_ai.server import IRISMCPServer
         other = self.root / "other-site"
-        (other / ".iris-mcp").mkdir(parents=True)
+        (other / STATE_DIR).mkdir(parents=True)
         data = reference_policy_data()
         data["site"]["name"] = "other"
-        iris_mcp_config.write_json(other / ".iris-mcp" / "config.json", data)
-        iris_mcp_config.write_json(self.project / ".iris-mcp" / "config.json", reference_policy_data())
+        iris_mcp_config.write_json(other / STATE_DIR / "config.json", data)
+        iris_mcp_config.write_json(self.project / STATE_DIR / "config.json", reference_policy_data())
         with patch("pathlib.Path.cwd", return_value=self.project):
             self.assertEqual(IRISMCPServer().policy.site_name, "reference")
             pinned = IRISMCPServer(project_dir=other)
@@ -410,13 +411,13 @@ class ConfigCliTests(FilesystemTestCase):
         data = self.project_config()
         self.assertEqual(data["version"], 1)
         self.assertIn("servers", data)
-        before = (self.project / ".iris-mcp" / "config.json").read_bytes()
+        before = (self.project / STATE_DIR / "config.json").read_bytes()
         # Second run: success, nothing rewritten, explicit message.
         code, out, err = self.run_cli("init")
         self.assertEqual(code, 0)
         self.assertIn("already exists; nothing changed", out)
         self.assertEqual(err, "")
-        self.assertEqual((self.project / ".iris-mcp" / "config.json").read_bytes(), before)
+        self.assertEqual((self.project / STATE_DIR / "config.json").read_bytes(), before)
         code, _, _ = self.run_cli("init", "--force", "--no-servers")
         self.assertEqual(code, 0)
         self.assertNotIn("servers", self.project_config())
@@ -427,7 +428,7 @@ class ConfigCliTests(FilesystemTestCase):
         stdout = io.StringIO()
         with patch("pathlib.Path.cwd", return_value=self.project), patch("sys.stdout", stdout):
             self.assertEqual(main(["init"]), 0)
-        self.assertTrue((self.project / ".iris-mcp" / "config.json").is_file())
+        self.assertTrue((self.project / STATE_DIR / "config.json").is_file())
         # A process launched deep inside the deployment resolves the same project.
         self.assertEqual(iris_mcp_config.find_project_root(nested), self.project)
         self.assertEqual(iris_mcp_config.project_directory(environ={}, start=nested), self.project)
@@ -508,7 +509,7 @@ class ConfigCliTests(FilesystemTestCase):
         code, _, _ = self.run_cli("add-server", "private", "--host", "p.invalid", "--user",
                                   "--username", "me", "--password", "literal")
         self.assertEqual(code, 0)
-        user_file = json.loads((self.home / ".iris-mcp" / "servers.json").read_text(encoding="utf-8"))
+        user_file = json.loads((self.home / STATE_DIR / "servers.json").read_text(encoding="utf-8"))
         self.assertEqual(user_file["servers"]["private"]["password"], "literal")
         self.assertNotIn("private", self.project_config()["servers"])
         code, out, _ = self.run_cli("show", "--servers")
@@ -554,7 +555,7 @@ class ConfigCliTests(FilesystemTestCase):
         code, out, _ = self.run_cli("migrate-servers")
         self.assertEqual(code, 0)
         self.assertIn("Copied 1 servers", out)
-        migrated = json.loads((self.home / ".iris-mcp" / "servers.json").read_text(encoding="utf-8"))
+        migrated = json.loads((self.home / STATE_DIR / "servers.json").read_text(encoding="utf-8"))
         self.assertEqual(migrated, {"servers": {"a": {"host": "a.invalid"}}})
         code, _, err = self.run_cli("migrate-servers")
         self.assertEqual(code, 1)
@@ -669,10 +670,10 @@ class ConfigCliTests(FilesystemTestCase):
         with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
             self.assertEqual(main(["init", str(nested)]), 0)
         self.assertIn("shadows it", stderr.getvalue())
-        self.assertTrue((nested / ".iris-mcp" / "config.json").is_file())
+        self.assertTrue((nested / STATE_DIR / "config.json").is_file())
         # A configuration living in HOME governs every deployment below it: warn loudly.
-        (self.home / ".iris-mcp").mkdir(exist_ok=True)
-        iris_mcp_config.write_json(self.home / ".iris-mcp" / "config.json", {"version": 1, "site": {"name": "home"}})
+        (self.home / STATE_DIR).mkdir(exist_ok=True)
+        iris_mcp_config.write_json(self.home / STATE_DIR / "config.json", {"version": 1, "site": {"name": "home"}})
         orphan = self.home / "deployments" / "x"
         orphan.mkdir(parents=True)
         stdout, stderr = io.StringIO(), io.StringIO()

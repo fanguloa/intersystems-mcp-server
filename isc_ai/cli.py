@@ -36,6 +36,7 @@ from isc_ai import secrets as isc_secrets
 from isc_ai import toggle as isc_toggle
 from isc_ai import docs as isc_docs
 from isc_ai import suite as isc_suite
+from isc_ai import migrate as isc_migrate
 from isc_ai.audit import run_audit
 from isc_ai.ccr_discovery import LocalPolicyError
 from isc_ai.config import ConfigError
@@ -213,6 +214,11 @@ def _parse_cli_args(argv):
 
     p_mcp = _add_parser(sub, "mcp", "cmd.mcp.help", "cmd.mcp.examples")
     _add_project_dir(p_mcp)
+
+    p_migrate = _add_parser(sub, "migrate", "cmd.migrate.help", "cmd.migrate.examples")
+    p_migrate.add_argument("--apply", action="store_true", help=t("flag.migrate.apply"))
+    p_migrate.add_argument("--no-user", action="store_true", help=t("flag.migrate.no_user"))
+    _add_project_dir(p_migrate)
 
     p_init = _add_parser(sub, "init", "cmd.init.help", "cmd.init.examples")
     p_init.add_argument("directory", nargs="?", help=t("flag.init.directory"))
@@ -469,6 +475,15 @@ def _reject_literal_project_secrets(data):
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
+
+def _run_migrate(args):
+    """Move the state directory to its current name. Plan by default; --apply performs it."""
+    project_dir, _ = _project_paths(args)
+    runner = isc_migrate.apply if args.apply else isc_migrate.plan
+    report = runner(project_dir=project_dir, home=None if args.no_user else Path.home())
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if report["conflicts"] else 0
+
 
 def _run_init(args):
     directory = Path(args.directory).resolve() if args.directory else Path.cwd().resolve()
@@ -793,6 +808,8 @@ def main(argv=None):
     if args.command == "facility" and args.facility_command == "install":
         return _run_facility(args)
     try:
+        if args.command == "migrate":
+            return _run_migrate(args)
         if args.command == "init":
             return _run_init(args)
         if args.command == "config":

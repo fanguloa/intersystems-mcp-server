@@ -24,11 +24,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_VERSION = 1
-PROJECT_DIR_ENV = "IRIS_MCP_PROJECT_DIR"
-PROJECT_CONFIG_ENV = "IRIS_MCP_CONFIG"
+
+# Directory names, newest first. The tool configures the agentic environment, of which
+# IRIS/TrakCare is one server, so the state directory carries the tool's name rather than
+# that server's. `.iris-mcp` stays readable forever: an installed deployment must keep
+# working after an upgrade, and a rename is not a reason to break one.
+STATE_DIR = ".isc-ai"
+LEGACY_STATE_DIR = ".iris-mcp"
+STATE_DIRS = (STATE_DIR, LEGACY_STATE_DIR)
+
+# Environment overrides, newest first. Both are honoured; the new name wins when both are
+# set, and the CLI reports which one was used instead of choosing in silence.
+PROJECT_DIR_ENV = "ISC_AI_PROJECT_DIR"
+PROJECT_CONFIG_ENV = "ISC_AI_CONFIG"
+LEGACY_PROJECT_DIR_ENV = "IRIS_MCP_PROJECT_DIR"
+LEGACY_PROJECT_CONFIG_ENV = "IRIS_MCP_CONFIG"
+PROJECT_DIR_ENVS = (PROJECT_DIR_ENV, LEGACY_PROJECT_DIR_ENV)
+PROJECT_CONFIG_ENVS = (PROJECT_CONFIG_ENV, LEGACY_PROJECT_CONFIG_ENV)
+
 EXTRA_PACKAGES_ENV = "IRIS_EXTRA_PACKAGES"
-PROJECT_CONFIG_RELATIVE = Path(".iris-mcp") / "config.json"
-USER_SERVERS_RELATIVE = Path(".iris-mcp") / "servers.json"
+PROJECT_CONFIG_RELATIVE = Path(STATE_DIR) / "config.json"
+LEGACY_PROJECT_CONFIG_RELATIVE = Path(LEGACY_STATE_DIR) / "config.json"
+USER_SERVERS_RELATIVE = Path(STATE_DIR) / "servers.json"
+LEGACY_USER_SERVERS_RELATIVE = Path(LEGACY_STATE_DIR) / "servers.json"
 LEGACY_USER_SERVERS_NAME = ".iris_mcp_servers.json"
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "resources" / "config.template.json"
@@ -613,28 +631,52 @@ class RuntimeConfig:
     notes: tuple = ()
 
 
-def find_project_root(start):
-    """Nearest ancestor of `start` (inclusive) that holds .iris-mcp/config.json, else None.
+class AmbiguousStateError(ConfigError):
+    """One directory holds both the new and the legacy state: refuse to guess which wins."""
 
-    Mirrors how git finds .git: the MCP may be launched from any subdirectory of a
-    deployment and still pick up that deployment's policy.
+
+def state_flavours(directory):
+    """Which state directories exist in `directory`, newest first.
+
+    Two of them means a half-finished migration, and picking one silently would make the
+    other invisible: a stale policy that looks live is worse than an error.
+    """
+    base = Path(directory)
+    return tuple(name for name in STATE_DIRS if (base / name / "config.json").is_file())
+
+
+def find_project_root(start):
+    """Nearest ancestor of `start` (inclusive) that holds a project configuration, else None.
+
+    Mirrors how git finds .git: the server may be launched from any subdirectory of a
+    deployment and still pick up that deployment's policy. Proximity decides, not flavour,
+    so a nearby legacy deployment is never overruled by a distant migrated one.
     """
     current = Path(start).resolve()
     for candidate in (current, *current.parents):
-        if (candidate / PROJECT_CONFIG_RELATIVE).is_file():
+        if state_flavours(candidate):
             return candidate
     return None
 
 
-def project_directory(environ=None, start=None):
-    """Directory whose .iris-mcp/config.json governs this process.
+def _first_env(environ, names):
+    """Value of the first name that is set, and the name it came from."""
+    for name in names:
+        value = environ.get(name)
+        if value:
+            return value, name
+    return None, None
 
-    Precedence: IRIS_MCP_PROJECT_DIR (explicit, no search) → nearest ancestor of
-    `start` (default cwd) with a project configuration → `start` itself (which
-    then yields an unconfigured policy).
+
+def project_directory(environ=None, start=None):
+    """Directory whose project configuration governs this process.
+
+    Precedence: an explicit override (no search) -> nearest ancestor of `start` (default
+    cwd) with a project configuration -> `start` itself, which then yields an unconfigured
+    policy.
     """
     environ = os.environ if environ is None else environ
-    override = environ.get(PROJECT_DIR_ENV)
+    override, _ = _first_env(environ, PROJECT_DIR_ENVS)
     if override:
         return Path(override).resolve()
     start = Path.cwd() if start is None else Path(start)
@@ -643,14 +685,38 @@ def project_directory(environ=None, start=None):
 
 
 def project_config_path(project_dir, environ=None):
+    """Path of the policy that governs `project_dir`.
+
+    Reads whichever flavour exists; writes the current one when neither does. Both present
+    is an error, because the answer to "which policy is live" must not depend on which
+    constant happens to be checked first.
+    """
     environ = os.environ if environ is None else environ
-    override = environ.get(PROJECT_CONFIG_ENV)
-    return Path(override).resolve() if override else (Path(project_dir) / PROJECT_CONFIG_RELATIVE)
+    override, _ = _first_env(environ, PROJECT_CONFIG_ENVS)
+    if override:
+        return Path(override).resolve()
+    base = Path(project_dir)
+    flavours = state_flavours(base)
+    if len(flavours) > 1:
+        raise AmbiguousStateError(
+            f"{base} holds both {STATE_DIR}/config.json and {LEGACY_STATE_DIR}/config.json; "
+            f"keep one and remove the other (see 'isc-ai migrate')"
+        )
+    if flavours:
+        return base / flavours[0] / "config.json"
+    return base / PROJECT_CONFIG_RELATIVE
 
 
 def user_servers_path(home=None):
+    """User-level connections, preferring the current directory but reading the legacy one."""
     home = Path.home() if home is None else Path(home)
-    return home / USER_SERVERS_RELATIVE
+    current = home / USER_SERVERS_RELATIVE
+    if current.is_file():
+        return current
+    legacy = home / LEGACY_USER_SERVERS_RELATIVE
+    if legacy.is_file():
+        return legacy
+    return current
 
 
 def legacy_user_servers_path(home=None):

@@ -420,4 +420,22 @@ MESSAGES = {
     # -- language --------------------------------------------------------
     "msg.language.rejected": "ignored unsupported language {values}; using {language}. "
                              "Supported languages: {supported}.",
+
+    # -- migrate ---------------------------------------------------------
+    "cmd.migrate.help": "move the state directory from .iris-mcp to .isc-ai",
+    "cmd.migrate.examples": (
+        "isc-ai migrate                        show what would move\n"
+        "isc-ai migrate --apply                move it\n"
+        "isc-ai migrate --apply --no-user      this project only, leave the user files\n"
+        "\n"
+        "The directory was named after the IRIS server; it now carries this tool's name,\n"
+        "because what it configures is the whole agentic environment. Both names keep being\n"
+        "read, so an un-migrated deployment goes on working: this only tidies it up.\n"
+        "\n"
+        "It never overwrites. A destination that already exists with different content is\n"
+        "reported as a conflict and nothing is moved until you resolve it. Files are copied\n"
+        "and verified before the original is removed."
+    ),
+    "flag.migrate.apply": "perform the migration (default: only report it)",
+    "flag.migrate.no_user": "migrate the project directory only, not the user-level one",
 }

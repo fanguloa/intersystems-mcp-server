@@ -11,6 +11,7 @@ from pathlib import Path
 
 from isc_ai import config as isc_config
 from isc_ai import docs
+from isc_ai.config import STATE_DIR
 
 POLICY = {
     "version": 1,
@@ -39,8 +40,8 @@ class DocsTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.project = Path(self.tmp.name) / "project"
-        (self.project / ".iris-mcp").mkdir(parents=True)
-        (self.project / ".iris-mcp" / "config.json").write_text(json.dumps(POLICY), encoding="utf-8")
+        (self.project / STATE_DIR).mkdir(parents=True)
+        (self.project / STATE_DIR / "config.json").write_text(json.dumps(POLICY), encoding="utf-8")
         self.workflow = self.project / "WORKFLOW.md"
         self.agents = self.project / "AGENTS.md"
         self.workflow.write_text(AUTHORED, encoding="utf-8")
@@ -75,23 +76,23 @@ class RenderTests(DocsTestCase):
                              "the Chilean profile cannot be written in the dialect it rules out")
 
     def test_another_tag_selects_another_profile(self):
-        data = json.loads((self.project / ".iris-mcp" / "config.json").read_text(encoding="utf-8"))
+        data = json.loads((self.project / STATE_DIR / "config.json").read_text(encoding="utf-8"))
         data["agents"]["reply_language"] = "en"
-        (self.project / ".iris-mcp" / "config.json").write_text(json.dumps(data), encoding="utf-8")
+        (self.project / STATE_DIR / "config.json").write_text(json.dumps(data), encoding="utf-8")
         body = docs.render_language(self.runtime())
         self.assertIn("Reply in natural English", body)
 
     def test_an_unknown_tag_is_a_clear_error_not_a_silent_default(self):
-        data = json.loads((self.project / ".iris-mcp" / "config.json").read_text(encoding="utf-8"))
+        data = json.loads((self.project / STATE_DIR / "config.json").read_text(encoding="utf-8"))
         data["agents"]["reply_language"] = "fr"
-        (self.project / ".iris-mcp" / "config.json").write_text(json.dumps(data), encoding="utf-8")
+        (self.project / STATE_DIR / "config.json").write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(isc_config.ConfigError, "no profile"):
             docs.render_language(self.runtime())
 
     def test_the_default_is_chilean_spanish_when_nothing_is_configured(self):
-        data = json.loads((self.project / ".iris-mcp" / "config.json").read_text(encoding="utf-8"))
+        data = json.loads((self.project / STATE_DIR / "config.json").read_text(encoding="utf-8"))
         del data["agents"]
-        (self.project / ".iris-mcp" / "config.json").write_text(json.dumps(data), encoding="utf-8")
+        (self.project / STATE_DIR / "config.json").write_text(json.dumps(data), encoding="utf-8")
         self.assertIn("español de Chile", docs.render_language(self.runtime()))
 
 
@@ -116,9 +117,9 @@ class BlockTests(DocsTestCase):
 
     def test_a_policy_change_rewrites_only_the_block(self):
         self.apply()
-        data = json.loads((self.project / ".iris-mcp" / "config.json").read_text(encoding="utf-8"))
+        data = json.loads((self.project / STATE_DIR / "config.json").read_text(encoding="utf-8"))
         data["canonical_base"]["host"] = "moved.example.invalid"
-        (self.project / ".iris-mcp" / "config.json").write_text(json.dumps(data), encoding="utf-8")
+        (self.project / STATE_DIR / "config.json").write_text(json.dumps(data), encoding="utf-8")
         report = self.apply()
         text = self.workflow.read_text(encoding="utf-8")
         self.assertIn("moved.example.invalid", text)
