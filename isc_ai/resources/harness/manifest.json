@@ -1,6 +1,6 @@
 {
   "schema": "isc-ai.harness-manifest.v1",
-  "bundle_version": 4,
+  "bundle_version": 6,
   "reviewed": true,
   "omitted": [
     "commands/sdd-new.md",
@@ -140,6 +140,20 @@
       "source": "skills/ai-work-policy/references/runtime-compatibility.md",
       "destination": "skills/ai-work-policy/references/runtime-compatibility.md",
       "sha256": "027322521609780f89ddecbb4a7bdf9cc4b4481805c291c02d8ba4e67947bd43"
+    },
+    {
+      "category": "skill",
+      "source": "skills/caveman/SKILL.md",
+      "destination": "skills/caveman/SKILL.md",
+      "sha256": "cc63f118399d7c3f4840043d4633a13916b7fa26a32a31351a93134508905cf7",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "caveman-enterprise",
+        "plugin_version": "1.0.0",
+        "audience": "standard"
+      }
     },
     {
       "category": "skill",
@@ -284,6 +298,874 @@
       "source": "skills/sdd-verify/strict-tdd-verify.md",
       "destination": "skills/sdd-verify/strict-tdd-verify.md",
       "sha256": "531cb024c3d9d14d4e3f7e862449d3a1e47919a76744adb584bfdcc72c3cbde0"
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-about-dialog/SKILL.md",
+      "destination": "skills/uifw-about-dialog/SKILL.md",
+      "sha256": "a62e02b2ab9ff40dd887a58f57fe6123898537557d47d59d198c61430c6dc7b6",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-auth/SKILL.md",
+      "destination": "skills/uifw-auth/SKILL.md",
+      "sha256": "9df1549153571b1965305f87a0b4ba37d3900ba14ce3b318eda199eff6e82f2b",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-auth/references/guards.md",
+      "destination": "skills/uifw-auth/references/guards.md",
+      "sha256": "7e6a3c867b3938ea41ec2f6bb1abf4dd62bfe13fff955b92053415599bdfc8bd",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-auth/references/interceptor.md",
+      "destination": "skills/uifw-auth/references/interceptor.md",
+      "sha256": "99dc9abb0565eafa297ab3fcf8d7516d43281fdbb4849a42163b146855bf8491",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-auth/references/storage.md",
+      "destination": "skills/uifw-auth/references/storage.md",
+      "sha256": "4bcdc04c429943cfd353908960a4950ff07623503ba2a28bec5683463ac6301e",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-cds-card/SKILL.md",
+      "destination": "skills/uifw-cds-card/SKILL.md",
+      "sha256": "269f878292408164df14a1f5a54708e438d86aa2c47c2004bcbbdb50ff2d3b76",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-change-control/SKILL.md",
+      "destination": "skills/uifw-change-control/SKILL.md",
+      "sha256": "92b35dd9206bb63f01af586b6e6058b48c311d8548c2b06bdeb4b30e242d78a5",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-change-control/references/ngrx-state.md",
+      "destination": "skills/uifw-change-control/references/ngrx-state.md",
+      "sha256": "0417cf09b6eec74180f4086d811a5d2a9d9ad6e23173c0ea4025e7ac7ae832d0",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-change-control/references/sessions.md",
+      "destination": "skills/uifw-change-control/references/sessions.md",
+      "sha256": "1d3f95691035190eac4bb144cb8c5c2f5ef7750549c5412d1dd5ba0572c8ec14",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-change-history/SKILL.md",
+      "destination": "skills/uifw-change-history/SKILL.md",
+      "sha256": "938a755968af0a83bf35bf7a92ee49fa49ada85d99e64a99783e267b80a72b04",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-chart/SKILL.md",
+      "destination": "skills/uifw-chart/SKILL.md",
+      "sha256": "8dba2838298ef20ffa7cfb722e840c0bf2656cfea42523e161ed8391f248b3ae",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-chart/references/chart-types.md",
+      "destination": "skills/uifw-chart/references/chart-types.md",
+      "sha256": "5ed5419b388c259dff0cad40040d57662e3fb7bd20867c23a278c9bae97e65e3",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-column-view/SKILL.md",
+      "destination": "skills/uifw-column-view/SKILL.md",
+      "sha256": "9d534882a1bfc4c590329cfa188ea180c2bec977398ba967fab8f236588c8392",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-confirmation-dialog/SKILL.md",
+      "destination": "skills/uifw-confirmation-dialog/SKILL.md",
+      "sha256": "c77c285287674d3f04ec5f5749b34c121e5ec10427842b9846664905f679621b",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-customizable-element/SKILL.md",
+      "destination": "skills/uifw-customizable-element/SKILL.md",
+      "sha256": "6fe07c01335cffa0233265eb5800082fc823449a4646a0c039a92ccd10788428",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-customizable-element/references/elements.md",
+      "destination": "skills/uifw-customizable-element/references/elements.md",
+      "sha256": "dc1a8d04a2108fb7f91732f8c9adb12786740cc39c428446c18f662f24c1152e",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-customizable-element/references/ngrx-state.md",
+      "destination": "skills/uifw-customizable-element/references/ngrx-state.md",
+      "sha256": "b591c70c862287ac3ad00c1a966de1f98f675f5501dd1e9228dfb49f817742a5",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-error-pages/SKILL.md",
+      "destination": "skills/uifw-error-pages/SKILL.md",
+      "sha256": "a3e7be60d5030775f6fa1e6a56cd919ed6f918be5f0e34a2426e323345ec0fde",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-filter-widget/SKILL.md",
+      "destination": "skills/uifw-filter-widget/SKILL.md",
+      "sha256": "820b0bb2b575fc2edcd4e525adaac5e2249b1265cbd21c890945a9cb30386276",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-filter-widget/references/filter-bubbles.md",
+      "destination": "skills/uifw-filter-widget/references/filter-bubbles.md",
+      "sha256": "47b1203dff2e0bc3d0ebee4b0e3506b625d7f6947b2a5a1f1f9b39ba21082440",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-filter-widget/references/filter-params.md",
+      "destination": "skills/uifw-filter-widget/references/filter-params.md",
+      "sha256": "daae296bbba7d326afbb13a1b52fca51f7812296291cf8209f6e83d8912547fd",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-grid-layout/SKILL.md",
+      "destination": "skills/uifw-grid-layout/SKILL.md",
+      "sha256": "2ddad03f8289de19664cbad437a7b34cb3100a8fcc5c6e3099dbdbbffdae19fd",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-header/SKILL.md",
+      "destination": "skills/uifw-header/SKILL.md",
+      "sha256": "d43d03188bb41c786ee6a9199fc805df3127bb617404c3834ce3255a067327df",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-header/references/left-menu.md",
+      "destination": "skills/uifw-header/references/left-menu.md",
+      "sha256": "7258d4e9a8287adbd6cde97c06852f0a1471ab7fcfda5a6410ffe89637a01fba",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-header/references/topbar.md",
+      "destination": "skills/uifw-header/references/topbar.md",
+      "sha256": "05e89f02fffb6704fa371457dd9b381ebfd6415111913e29c80351c0faf80dd8",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-auth/SKILL.md",
+      "destination": "skills/uifw-hs-auth/SKILL.md",
+      "sha256": "7a98e6bff9ebde9f9035e5356bf83af84a54261d432ef32c328b0f01b6492fb7",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-auth/references/auth-state.md",
+      "destination": "skills/uifw-hs-auth/references/auth-state.md",
+      "sha256": "446440fd7c4cd7bd7345dfc843a22b0051ba4e1c9b6f196ac7b70437157d9fad",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-auth/references/oauth-oidc.md",
+      "destination": "skills/uifw-hs-auth/references/oauth-oidc.md",
+      "sha256": "b520230b50b1204550323fabb683d34c7b01a0fe6ca5e289a21ab0672854c129",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-basic-login/SKILL.md",
+      "destination": "skills/uifw-hs-basic-login/SKILL.md",
+      "sha256": "c0cb3c86faee5c81413214e28c7685411d7a572777feae0c3c90eea8806f2e83",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-custom-login/SKILL.md",
+      "destination": "skills/uifw-hs-custom-login/SKILL.md",
+      "sha256": "fba13c49809c56d56017baf3ffc36c7bfc2ccdad574652a7fcd625614ef0c6a2",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-isc-form/SKILL.md",
+      "destination": "skills/uifw-hs-isc-form/SKILL.md",
+      "sha256": "281a812deb231a079a27b71728fda6b2ead520d2a76527541f035f03c2525326",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-isc-form/references/clinical-field.md",
+      "destination": "skills/uifw-hs-isc-form/references/clinical-field.md",
+      "sha256": "098885757781c3e8fa600c57a100ead8577c9e365a338736d30d7339775d7aa9",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-patient-banner/SKILL.md",
+      "destination": "skills/uifw-hs-patient-banner/SKILL.md",
+      "sha256": "27d77146eefdd65980c94526891d2ce927bcb904cce06f75358a68172f11f3a4",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-patient-banner/references/banner-variants.md",
+      "destination": "skills/uifw-hs-patient-banner/references/banner-variants.md",
+      "sha256": "056efd25eb252f2ef708ed672ef806bf4e69daf66bb74f84ee101c63031b9d82",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-hs-patient-search/SKILL.md",
+      "destination": "skills/uifw-hs-patient-search/SKILL.md",
+      "sha256": "0e80b89bcb07aceb8c49e921d8b019aeb7664a68f093d16d381561cba4b51ead",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-icons/SKILL.md",
+      "destination": "skills/uifw-icons/SKILL.md",
+      "sha256": "b8c89a49e061a5e7937993499706ee9e34e7773f04ca60c3cec9ce84f7bc75dc",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-isc-form/SKILL.md",
+      "destination": "skills/uifw-isc-form/SKILL.md",
+      "sha256": "f5ffc4637913b9a4ef7aa01d7a823d5c28afd705f0288993a7be429917d511ab",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-notification/SKILL.md",
+      "destination": "skills/uifw-notification/SKILL.md",
+      "sha256": "16dcd9413061ef932729da206fbb96f7ba3536f816006fa0785d334ecc31a239",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-shared-utilities/SKILL.md",
+      "destination": "skills/uifw-shared-utilities/SKILL.md",
+      "sha256": "efccff6541efd16d19ce43a312f153ab40587ce14c3ae31955079538c40ebefa",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-spinner/SKILL.md",
+      "destination": "skills/uifw-spinner/SKILL.md",
+      "sha256": "734090e5f35b6126e7ab2602026dfe0c3a3bf561d9ea147dcf9c91a0d9775f9c",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-stepper/SKILL.md",
+      "destination": "skills/uifw-stepper/SKILL.md",
+      "sha256": "679ea0bc54482d4cfe777a67db62cf690ff4b6207ab95d74f0a1aa11fd43c308",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/SKILL.md",
+      "destination": "skills/uifw-table/SKILL.md",
+      "sha256": "87d8c1e64f45d04677afbf6c656d6ed1b37dd63e40cf75f0650457fbbc1c9c21",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/column-presets.md",
+      "destination": "skills/uifw-table/references/column-presets.md",
+      "sha256": "189ef97f8917801e8809ae68c2c2c5f169ec441766c039c6c24a0f1186326803",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/custom-cells.md",
+      "destination": "skills/uifw-table/references/custom-cells.md",
+      "sha256": "63290fa4c660e7df2f7c37c62a19e7729a42758bbcc4f6c5ea0515689939ab94",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/expandable-rows.md",
+      "destination": "skills/uifw-table/references/expandable-rows.md",
+      "sha256": "f092df2d9afec1824e29827f765efc12e9b1868bc08b6e44256b5df7f689d61e",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/filter-widget.md",
+      "destination": "skills/uifw-table/references/filter-widget.md",
+      "sha256": "ccb61d9fb26d0e424247a5778f82e107bcb4fc29f4a9e593e0fccd7162f623af",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/pagination.md",
+      "destination": "skills/uifw-table/references/pagination.md",
+      "sha256": "08f49c176830355c584bf9cba186666a022e995f2caa1e08a337ac92bceaa15d",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/searching.md",
+      "destination": "skills/uifw-table/references/searching.md",
+      "sha256": "e01bee5ca07767df4286bea2c92375b00c86ecc18ca3e98a92f3baf36fc06749",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/sorting.md",
+      "destination": "skills/uifw-table/references/sorting.md",
+      "sha256": "5fc8d68d23f1022081ecd6b08036a6c1fe6b75f6310ea7a6a8a72d54ab981bf3",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-table/references/styling.md",
+      "destination": "skills/uifw-table/references/styling.md",
+      "sha256": "1ee285624f2d29d55d9396893270ef744e54ac13dbdacb27074d3d8c55671f71",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-template-builder/SKILL.md",
+      "destination": "skills/uifw-template-builder/SKILL.md",
+      "sha256": "35d3f628b8ea8e96e18427efb7bca06176bc53bf01cce0f51979fef12d0a692d",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-template-builder/references/builder-config.md",
+      "destination": "skills/uifw-template-builder/references/builder-config.md",
+      "sha256": "4c8b17dfb104588ef9ef5b7cc0f2299115fb97075b5f6eb11fd8a694428babbb",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-template-builder/references/ngrx-setup.md",
+      "destination": "skills/uifw-template-builder/references/ngrx-setup.md",
+      "sha256": "193c56c5d0fe5cf4719de5f59bea418cc9b7d6874abc44d68bfa4e11e9abc0ae",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-template-question-library/SKILL.md",
+      "destination": "skills/uifw-template-question-library/SKILL.md",
+      "sha256": "b55b56c6f73e4d6a8a924b2f68a34993b6facb8e4941322296d5c8fedd0ffa52",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-text-diff/SKILL.md",
+      "destination": "skills/uifw-text-diff/SKILL.md",
+      "sha256": "9e1ce2e95257ef1719e8cb45536274c65d236712ffcb4c02815be77518a5f112",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-timeout/SKILL.md",
+      "destination": "skills/uifw-timeout/SKILL.md",
+      "sha256": "bfdd5e15fac9ed440e604d3cf29d5ec52f902f88228a75e25d8aa7e6460313bc",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-types/SKILL.md",
+      "destination": "skills/uifw-types/SKILL.md",
+      "sha256": "17f979de154c94c8589921e9a1953dc8acc95433b849ed4ac748797092d4236e",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw-user-default/SKILL.md",
+      "destination": "skills/uifw-user-default/SKILL.md",
+      "sha256": "50d2ac0f05d32ba93767d1a008a189f8c4a1fb4910178a49b61225d7b7e2f124",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw/SKILL.md",
+      "destination": "skills/uifw/SKILL.md",
+      "sha256": "3822bdf9bcd2ed3cabcdd4113d9b8af20e19b62d296ad0ec17b2b134aeeb899e",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw/references/breakpoints.md",
+      "destination": "skills/uifw/references/breakpoints.md",
+      "sha256": "31b921be387ee3b8f4c27df7204d38ba110e7d3c77dd513d53a47a63b48435f7",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw/references/schematics.md",
+      "destination": "skills/uifw/references/schematics.md",
+      "sha256": "173d2467e6b6a1ea9aafd484844e7b3eac1669e7483ea947c2876ecb8012b261",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
+    },
+    {
+      "category": "skill",
+      "source": "skills/uifw/references/theming.md",
+      "destination": "skills/uifw/references/theming.md",
+      "sha256": "58630fec2a01203c7058c07c2c0b08bd6fc0bb3bf578be2306c9cc0c346ccc49",
+      "vendor": {
+        "marketplace": "ai-enablement/claude-code-marketplace",
+        "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
+        "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
+        "plugin": "uifw",
+        "plugin_version": "1.2.0",
+        "audience": "technical"
+      }
     },
     {
       "category": "skill",
