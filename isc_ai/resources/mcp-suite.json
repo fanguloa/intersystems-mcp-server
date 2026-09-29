@@ -305,6 +305,15 @@
       ],
       "settings": {},
       "notes": "Version pinned on purpose: an unpinned entry changes behaviour without a change on your side.",
+      "install": {
+        "manager": "uvx",
+        "argv": [
+          "uvx",
+          "markitdown-mcp@0.0.1a4"
+        ],
+        "pin": "0.0.1a4",
+        "pinned": true
+      },
       "verify": {
         "min_tools": 1
       }
@@ -329,6 +338,16 @@
       ],
       "settings": {},
       "notes": "The only entry of the suite that is not pinned. Pinning it is recommended once a version is settled; the audit reports @latest as an advisory, not an error.",
+      "install": {
+        "manager": "npm",
+        "argv": [
+          "npx",
+          "@playwright/mcp@0.0.29"
+        ],
+        "pin": "0.0.29",
+        "pinned": false,
+        "pin_reason": "no version has been evaluated yet"
+      },
       "verify": {
         "min_tools": 10
       }

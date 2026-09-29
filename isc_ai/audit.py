@@ -261,6 +261,63 @@ def _launch_of(spec):
     return (launch.get("command") or "", tuple(launch.get("args") or []), launch.get("url") or "")
 
 
+def _version_from_arg(arg):
+    """The version pinned onto one launch argument, if any.
+
+    Handles bare package refs (`markitdown-mcp@0.0.1a4`) and npm-scoped ones
+    (`@playwright/mcp@latest`), where a leading `@` names the scope, not a
+    version boundary: only an `@` found after the first character counts.
+    """
+    if not isinstance(arg, str):
+        return None
+    tail = arg[1:] if arg.startswith("@") else arg
+    if "@" not in tail:
+        return None
+    return tail.rsplit("@", 1)[1]
+
+
+def _launch_reference_version(spec):
+    """The version suffix baked into this server's launch args, if any."""
+    _, args, _ = _launch_of(spec)
+    for arg in args:
+        version = _version_from_arg(arg)
+        if version:
+            return version
+    return None
+
+
+def _audit_install(name, spec, findings):
+    """Surface an unpinned or inconsistently-pinned package reference.
+
+    Detection-only (isc_ai.resources.mcp-suite.json §Suite Manifest Install Metadata):
+    an absent install block or `pinned: false` never installs, upgrades, or writes
+    anything by itself; it only changes what the audit report says. HTTP-transport
+    servers have no installable package version at all, so they are never checked.
+    """
+    _, _, url = _launch_of(spec)
+    if url:
+        return
+    install = spec.get("install")
+    pinned = install.get("pinned") if install else None
+    launch_version = _launch_reference_version(spec)
+    looks_unpinned = launch_version is None or launch_version == "latest"
+    if (install is None or pinned is False) and looks_unpinned:
+        reason = install.get("pin_reason") if install else None
+        findings.append(Finding(
+            "VERSION_UNPINNED", WARNING, server=name,
+            message=f"'{name}' launches an unpinned package reference"
+                    + (f" ({reason})" if reason else ""),
+        ))
+    if install and pinned is True:
+        pin = install.get("pin")
+        if pin and launch_version != pin:
+            findings.append(Finding(
+                "INSTALL_PIN_MISMATCH", ERROR, server=name,
+                message=f"'{name}' declares install.pin={pin} but the launch command "
+                        f"actually runs {launch_version or '<unpinned>'}",
+            ))
+
+
 def _unwrap(entry):
     """`cmd /c <real command>` states the same intent as the bare command.
 
@@ -344,6 +401,7 @@ def classify(suite, entries, findings, clients=None):
         by_client.setdefault(entry.client, []).append(entry)
 
     for name, spec in suite["servers"].items():
+        _audit_install(name, spec, findings)
         canonical = _normalize_name(name)
         aliases = {_normalize_name(alias) for alias in spec.get("aliases", [])}
         per_client = {}

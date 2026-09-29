@@ -201,6 +201,90 @@ class ClassificationTests(AuditTestCase):
         self.assertEqual(self.run_audit()["servers"]["beta"]["opencode"]["state"], "OK")
 
 
+class InstallPinTests(AuditTestCase):
+    """S3: per-server install/version-pin metadata surfaces drift instead of hiding it."""
+
+    def suite_with_servers(self, extra_servers):
+        suite = json.loads(json.dumps(SUITE))
+        suite["servers"].update(extra_servers)
+        return suite
+
+    def run_audit_with_suite(self, suite):
+        suite_file = self.root / "suite-install.json"
+        suite_file.write_text(json.dumps(suite), encoding="utf-8")
+        return audit.run_audit(project_dir=self.project, home=self.home,
+                                environ=self.environ, suite_path=suite_file)
+
+    def test_missing_install_block_with_unpinned_launch_is_a_warning(self):
+        suite = self.suite_with_servers({
+            "delta-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "npx", "args": ["@vendor/delta-pkg@latest"]},
+                "aliases": [], "settings": {},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertIn("VERSION_UNPINNED", self.codes(report, "delta-pkg"))
+
+    def test_pinned_server_matching_its_pin_has_no_finding(self):
+        suite = self.suite_with_servers({
+            "gamma-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "uvx", "args": ["gamma-pkg@1.2.3"]},
+                "aliases": [], "settings": {},
+                "install": {"manager": "uvx", "pin": "1.2.3", "pinned": True},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertNotIn("VERSION_UNPINNED", self.codes(report, "gamma-pkg"))
+        self.assertNotIn("INSTALL_PIN_MISMATCH", self.codes(report, "gamma-pkg"))
+
+    def test_declared_pin_disagreeing_with_launch_args_is_an_error(self):
+        suite = self.suite_with_servers({
+            "gamma-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "uvx", "args": ["gamma-pkg@1.2.3"]},
+                "aliases": [], "settings": {},
+                "install": {"manager": "uvx", "pin": "9.9.9", "pinned": True},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        mismatches = [item for item in report["findings"] if item["code"] == "INSTALL_PIN_MISMATCH"]
+        self.assertEqual(len(mismatches), 1)
+        self.assertEqual(mismatches[0]["severity"], "error")
+
+    def test_a_recorded_but_not_yet_adopted_pin_is_still_a_warning_not_an_error(self):
+        # pinned:false + a candidate pin that does not match today's launch args yet
+        # is the deliberate "identified but not applied" state, not an authoring error.
+        suite = self.suite_with_servers({
+            "epsilon-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "npx", "args": ["epsilon-pkg@latest"]},
+                "aliases": [], "settings": {},
+                "install": {"manager": "npx", "pin": "2.0.0", "pinned": False,
+                            "pin_reason": "no version has been evaluated yet"},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertIn("VERSION_UNPINNED", self.codes(report, "epsilon-pkg"))
+        self.assertNotIn("INSTALL_PIN_MISMATCH", self.codes(report, "epsilon-pkg"))
+
+    def test_a_server_without_an_install_block_still_classifies_exactly_as_today(self):
+        # 'alpha' (from SUITE) never declared an install block. Adding install-pin
+        # detection must not change its per-client classification state at all.
+        self.write_opencode({"alpha": {"command": ["python", "-c", "pass"],
+                                        "environment": {"ALPHA_TOKEN": "{env:ALPHA_TOKEN}"}}})
+        report = self.run_audit()
+        self.assertEqual(report["servers"]["alpha"]["opencode"]["state"], "OK")
+        self.assertNotIn("SERVER_DRIFT", self.codes(report, "alpha"))
+        self.assertNotIn("INSTALL_PIN_MISMATCH", self.codes(report, "alpha"))
+
+    def test_http_transport_servers_are_never_flagged_unpinned(self):
+        # A hosted HTTP endpoint has no installable package version to pin at all.
+        report = self.run_audit()
+        self.assertNotIn("VERSION_UNPINNED", self.codes(report, "beta"))
+
+
 class ClientAndAmbiguityTests(AuditTestCase):
     def test_an_absent_client_reports_whether_its_installer_is_available(self):
         report = self.run_audit()
