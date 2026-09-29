@@ -4,7 +4,7 @@
     "ai-enablement/claude-code-marketplace": {
       "repo_url": "git@gitlab.iscinternal.com:ai-enablement/coding-assistants/claude-code-marketplace.git",
       "commit": "613ed5eeeea9081a87fd06d9819290d1c0f4c639",
-      "synced_at": "2026-09-29T14:25:22+00:00",
+      "synced_at": "2026-09-29T15:02:18+00:00",
       "license": "none",
       "license_note": "No LICENSE file in the source repository; InterSystems-internal content; redistribution confirmation pending with ai-enablement@intersystems.com.",
       "plugins": [
