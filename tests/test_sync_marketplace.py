@@ -88,7 +88,12 @@ class MarketplaceFixture(unittest.TestCase):
             json.dumps({"name": name, "version": version}), encoding="utf-8")
         skill_dir = plugin_dir / "skills" / skill_name
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        # write_bytes, not write_text: Path.write_text's default newline=None translates
+        # every "\n" to os.linesep on write, which on Windows silently turns this pure-LF
+        # literal into CRLF on disk *before it is ever committed* -- exactly the ambiguity
+        # LineEndingIntegrityTests below must not have. Authoring with explicit bytes keeps
+        # the fixture's on-disk content byte-for-byte what the test asserts about.
+        (skill_dir / "SKILL.md").write_bytes(skill_text.encode("utf-8"))
 
     def manifest(self):
         return json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -112,7 +117,7 @@ class PinVerificationTests(MarketplaceFixture):
 class PlanTests(MarketplaceFixture):
     def test_plan_mode_writes_nothing(self):
         root = sm.resolve_source(str(self.repo), self.commit)
-        result = sm.plan(root, ["alpha", "beta"])
+        result = sm.plan(root, ["alpha", "beta"], commit=self.commit)
 
         self.assertTrue(result.ok)
         self.assertFalse(list((self.harness / "skills").iterdir()))
@@ -123,7 +128,7 @@ class PlanTests(MarketplaceFixture):
 
     def test_allowlist_respected_only_requested_plugins_are_planned(self):
         root = sm.resolve_source(str(self.repo), self.commit)
-        result = sm.plan(root, ["alpha"])
+        result = sm.plan(root, ["alpha"], commit=self.commit)
 
         self.assertTrue(result.ok)
         self.assertEqual(set(result.skills_by_plugin), {"alpha"})
@@ -137,7 +142,7 @@ class PlanTests(MarketplaceFixture):
                                             encoding="utf-8")
 
         root = sm.resolve_source(str(self.repo), self.commit)
-        result = sm.plan(root, ["alpha"])
+        result = sm.plan(root, ["alpha"], commit=self.commit)
 
         self.assertFalse(result.ok)
         self.assertIn("alpha-skill", result.collisions)
@@ -153,20 +158,20 @@ class PlanTests(MarketplaceFixture):
         commit = _run_git(["rev-parse", "HEAD"], cwd=self.repo)
 
         root = sm.resolve_source(str(self.repo), commit)
-        result = sm.plan(root, ["alpha"])
+        result = sm.plan(root, ["alpha"], commit=commit)
 
         self.assertFalse(result.ok)
         self.assertTrue(result.problems)
 
 
 class ApplyTests(MarketplaceFixture):
-    def _apply(self, plugins, audiences=None):
-        root = sm.resolve_source(str(self.repo), self.commit)
-        result = sm.plan(root, plugins)
+    def _apply(self, plugins, audiences=None, commit=None):
+        root = sm.resolve_source(str(self.repo), commit or self.commit)
+        result = sm.plan(root, plugins, commit=commit or self.commit)
         self.assertTrue(result.ok, f"unexpected problems/collisions: "
                                     f"{result.problems} {result.collisions}")
         sm.apply_plan(result, repo_url="git@example.invalid:fake/marketplace.git",
-                       commit=self.commit, marketplace_label="fake-marketplace",
+                       commit=commit or self.commit, marketplace_label="fake-marketplace",
                        audiences=audiences or {})
         return result
 
@@ -222,6 +227,121 @@ class ApplyTests(MarketplaceFixture):
         self.assertTrue(second.ok)
         manifest = self.manifest()
         self.assertEqual(manifest["bundle_version"], 3)
+
+    def test_a_different_plugin_claiming_an_already_vendored_skill_name_is_a_collision(self):
+        self._apply(["alpha"])  # vendors "alpha-skill" and records it as owned by "alpha"
+
+        # A second, unrelated plugin happens to name one of its skills the same thing.
+        # Re-syncing the SAME plugin is idempotent (tested above); a DIFFERENT plugin
+        # claiming that name must still be refused, or it would silently overwrite
+        # content another plugin owns.
+        self._write_plugin("gamma", "1.0.0", "alpha-skill",
+                            "# Not alpha's alpha-skill at all\n")
+        _run_git(["add", "."], cwd=self.repo)
+        _run_git(["commit", "-m", "gamma also declares a skill named alpha-skill"],
+                  cwd=self.repo)
+        commit = _run_git(["rev-parse", "HEAD"], cwd=self.repo)
+
+        root = sm.resolve_source(str(self.repo), commit)
+        result = sm.plan(root, ["gamma"], commit=commit)
+
+        self.assertFalse(result.ok)
+        self.assertIn("alpha-skill", result.collisions)
+        # the real owner's file must be provably untouched
+        owned = self.harness / "skills" / "alpha-skill" / "SKILL.md"
+        self.assertNotIn(b"Not alpha's alpha-skill at all", owned.read_bytes())
+
+
+class LineEndingIntegrityTests(MarketplaceFixture):
+    """Vendored bytes must come from the pinned commit's git blob, not from whatever a
+    particular local checkout happens to have on disk. A checkout made under
+    core.autocrlf=true silently rewrites LF blobs to CRLF in the working tree; reading
+    `path.read_bytes()` off such a checkout would vendor those CRLF bytes and make the
+    recorded sha256 depend on the machine that ran the sync, not on the pinned commit.
+    """
+
+    def test_vendored_bytes_match_the_git_blob_not_a_disk_copy_translated_by_autocrlf(self):
+        skill_md = self.repo / "plugins" / "alpha" / "skills" / "alpha-skill" / "SKILL.md"
+        original_lf_bytes = skill_md.read_bytes()
+        self.assertNotIn(b"\r\n", original_lf_bytes,
+                          "fixture must author pure-LF content (see _write_plugin)")
+
+        # Simulate a checkout made under core.autocrlf=true: the committed blob stays
+        # exactly as authored (LF), but this working tree's copy of the file has been
+        # translated to CRLF by git's own checkout filter -- exactly what the tool must
+        # not read bytes from.
+        skill_md.write_bytes(original_lf_bytes.replace(b"\n", b"\r\n"))
+        self.assertNotEqual(skill_md.read_bytes(), original_lf_bytes)
+
+        root = sm.resolve_source(str(self.repo), self.commit)
+        result = sm.plan(root, ["alpha"], commit=self.commit)
+
+        candidate = next(c for c in result.candidates
+                          if c[0] == "skills/alpha-skill/SKILL.md")
+        vendored_bytes = candidate[1]
+        self.assertEqual(vendored_bytes, original_lf_bytes)
+        self.assertNotIn(b"\r\n", vendored_bytes)
+
+    def test_apply_writes_the_git_blob_bytes_even_when_the_local_checkout_is_crlf(self):
+        skill_md = self.repo / "plugins" / "alpha" / "skills" / "alpha-skill" / "SKILL.md"
+        original_lf_bytes = skill_md.read_bytes()
+        skill_md.write_bytes(original_lf_bytes.replace(b"\n", b"\r\n"))
+
+        root = sm.resolve_source(str(self.repo), self.commit)
+        result = sm.plan(root, ["alpha"], commit=self.commit)
+        self.assertTrue(result.ok)
+        sm.apply_plan(result, repo_url="git@example.invalid:fake/marketplace.git",
+                       commit=self.commit, marketplace_label="fake-marketplace",
+                       audiences={})
+
+        vendored_path = self.harness / "skills" / "alpha-skill" / "SKILL.md"
+        vendored_bytes = vendored_path.read_bytes()
+        self.assertEqual(vendored_bytes, original_lf_bytes)
+        manifest = self.manifest()
+        entry = next(item for item in manifest["files"]
+                     if item["destination"] == "skills/alpha-skill/SKILL.md")
+        self.assertEqual(entry["sha256"], hashlib.sha256(original_lf_bytes).hexdigest())
+
+
+class UnsafeMemberTests(unittest.TestCase):
+    """Pure-function coverage for the symlink/path-escape guard. Real symlinks need a
+    privilege this sandbox does not have (WinError 1314 without Developer Mode/admin), so
+    the guard is exercised directly with real, non-symlinked paths plus an explicit
+    `is_symlink` flag rather than through an actual symlinked fixture -- the same class of
+    hermetic-gap already accepted for WU-S12's real `git ls-remote` probe.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.skill_dir = pathlib.Path(self._tmp.name) / "skill"
+        self.skill_dir.mkdir()
+        self.member = self.skill_dir / "SKILL.md"
+        self.member.write_bytes(b"# fine\n")
+
+        self.outside_dir = pathlib.Path(self._tmp.name) / "outside"
+        self.outside_dir.mkdir()
+        self.outside_member = self.outside_dir / "escaped.md"
+        self.outside_member.write_bytes(b"# escaped\n")
+
+    def test_a_symlink_flagged_member_is_refused_even_if_it_points_inside(self):
+        problem = sm._refuse_unsafe_member(self.member, self.skill_dir, is_symlink=True)
+        self.assertIsNotNone(problem)
+        self.assertIn("symlink", problem.lower())
+
+    def test_a_member_that_resolves_outside_its_own_skill_dir_is_refused(self):
+        # Simulates what a symlinked directory would cause: the member's resolved path
+        # is not under skill_dir at all, even though it was not itself flagged as a
+        # symlink (matching how rglob yields files reached *through* a symlinked
+        # ancestor directory as plain, non-symlink file entries).
+        problem = sm._refuse_unsafe_member(self.outside_member, self.skill_dir,
+                                            is_symlink=False)
+        self.assertIsNotNone(problem)
+        self.assertIn("outside", problem.lower())
+
+    def test_a_safe_member_is_not_refused(self):
+        problem = sm._refuse_unsafe_member(self.member, self.skill_dir, is_symlink=False)
+        self.assertIsNone(problem)
 
 
 if __name__ == "__main__":

@@ -7,10 +7,10 @@ of the harness bundle without isc-ai adopting a second plugin/marketplace mechan
 runtime? The isc-ai harness install stays the single source of truth for every client; the
 marketplace is only ever a build-time input, vendored (like Go's vendor/ directory) at a
 pinned commit so a later, unreviewed marketplace change cannot silently change what ships.
-
 Every vendored file still passes the same packaging gate (tools/bundle_gate.py) that
-add_doctrine_skills.py enforces, and a name collision with an existing, non-vendored skill is
-refused rather than silently overwritten -- vendoring must never clobber isc-ai's own doctrine.
+add_doctrine_skills.py enforces, and a name collision with a skill this tool did not
+already vendor under that same plugin is refused rather than silently overwritten --
+vendoring must never clobber isc-ai's own doctrine, nor a different plugin's content.
 Provenance (source URL, pinned commit, per-plugin version and audience, and the fact that the
 marketplace ships no LICENSE file) is recorded in vendor-provenance.json and mirrored onto each
 vendored file's own manifest entry, so a later slice (package `owner`, the technical-extension
@@ -137,27 +137,79 @@ def load_provenance(provenance_path=None):
     return {"schema": data.get("schema", "isc-ai.harness-vendor-provenance.v1"), "sources": sources}
 
 
-def known_vendored_skill_names(provenance, manifest):
-    """Skill directory names this tool has already vendored, from either record -- the
-    provenance file is the primary source, the manifest's own `vendor` entries are a
-    fallback in case provenance was ever hand-edited away."""
-    names = set()
+def _read_blob(root, commit, relative_path):
+    """Return the exact bytes git stored for `relative_path` at `commit`.
+
+    Uses `git cat-file blob`, a plumbing command that returns the object exactly as
+    stored -- unlike reading the working tree file with `path.read_bytes()`, this is not
+    affected by a local checkout's core.autocrlf/eol line-ending translation. Without
+    this, a clone made under core.autocrlf=true would silently vendor CRLF-translated
+    bytes and the recorded sha256 would depend on the machine that ran the sync rather
+    than on the pinned commit.
+    """
+    result = subprocess.run(
+        ["git", "cat-file", "blob", f"{commit}:{relative_path}"],
+        cwd=root, capture_output=True,
+    )
+    if result.returncode != 0:
+        raise SyncError(
+            f"cannot read {relative_path!r} from git blob at {commit}: "
+            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    return result.stdout
+
+
+def _refuse_unsafe_member(path, skill_dir, *, is_symlink):
+    """Return a problem string if `path` (a member of `skill_dir`) must be refused, or
+    None if it is safe to vendor.
+
+    Two independent checks, because either alone misses a case the other catches:
+    a symlink is refused outright regardless of where it points (vendoring must never
+    ship a link, even one that happens to point back inside skill_dir); a path that
+    resolves outside skill_dir is refused even when it is not itself a symlink -- this
+    is how `rglob` yields the *files* reached through a symlinked ancestor directory
+    (those file entries are not symlinks themselves, only an ancestor is).
+    """
+    if is_symlink:
+        return f"{path}: symlinks are not allowed in vendored skill content"
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(skill_dir.resolve())
+    except ValueError:
+        return f"{path}: resolves outside its own skill directory"
+    return None
+
+
+def known_vendored_skills(provenance, manifest):
+    """Map skill directory name -> the plugin that vendored it, from either record --
+    the provenance file is the primary source, the manifest's own `vendor` entries are a
+    fallback in case provenance was ever hand-edited away.
+
+    Scoped by plugin (not just by name) so that a *different* plugin declaring a skill
+    with the same directory name as one this tool already vendored is still treated as
+    a collision -- only a re-sync of the *same* plugin's own, already-vendored skill is
+    idempotent.
+    """
+    owners = {}
     for source in provenance.get("sources", {}).values():
-        for plugin in source.get("plugins", []):
-            names.update(plugin.get("skills", []))
+        for plugin_entry in source.get("plugins", []):
+            plugin_name = plugin_entry.get("name")
+            for skill in plugin_entry.get("skills", []):
+                owners[skill] = plugin_name
     for entry in manifest.get("files", []):
-        if entry.get("category") == "skill" and "vendor" in entry:
+        vendor = entry.get("vendor")
+        if entry.get("category") == "skill" and vendor:
             parts = entry["destination"].split("/")
             if len(parts) >= 2:
-                names.add(parts[1])
-    return names
+                owners.setdefault(parts[1], vendor.get("plugin"))
+    return owners
 
 
 class PlanResult:
     def __init__(self):
         self.candidates = []       # [(destination, raw_bytes, plugin, skill_name), ...]
         self.problems = []         # packaging-gate findings, as strings
-        self.collisions = []       # skill names that collide with a non-vendored directory
+        self.collisions = []       # skill names that collide with a differently-owned skill
         self.plugin_versions = {}  # plugin -> version string
         self.skills_by_plugin = {}  # plugin -> [skill_name, ...] (only the non-colliding ones)
 
@@ -166,13 +218,19 @@ class PlanResult:
         return not self.problems and not self.collisions
 
 
-def plan(root, plugins, *, harness_dir=None, manifest=None, provenance=None):
-    """Compute what a sync of `plugins` (from the marketplace checkout at `root`) would do,
-    without writing anything. Always safe to call, including with --apply omitted."""
+def plan(root, plugins, *, commit, harness_dir=None, manifest=None, provenance=None):
+    """Compute what a sync of `plugins` (from the marketplace checkout at `root`, pinned
+    at `commit`) would do, without writing anything. Always safe to call, including with
+    --apply omitted.
+
+    `commit` is required (not inferred from `root`'s current HEAD) so every candidate's
+    bytes are read from that exact git blob via `_read_blob`, never from whatever a
+    particular local checkout happens to have translated onto disk.
+    """
     harness_dir = harness_dir or HARNESS
     manifest = manifest if manifest is not None else load_manifest()
     provenance = provenance if provenance is not None else load_provenance()
-    known = known_vendored_skill_names(provenance, manifest)
+    known = known_vendored_skills(provenance, manifest)
 
     result = PlanResult()
     for plugin in sorted(set(plugins)):
@@ -180,16 +238,22 @@ def plan(root, plugins, *, harness_dir=None, manifest=None, provenance=None):
         skill_names = []
         for skill_name, skill_dir in discover_skills(root, plugin):
             target_dir = harness_dir / "skills" / skill_name
-            if target_dir.exists() and skill_name not in known:
+            owner = known.get(skill_name)
+            if target_dir.exists() and owner != plugin:
                 result.collisions.append(skill_name)
                 continue
             skill_names.append(skill_name)
             for path in sorted(skill_dir.rglob("*")):
+                unsafe = _refuse_unsafe_member(path, skill_dir, is_symlink=path.is_symlink())
+                if unsafe:
+                    result.problems.append(unsafe)
+                    continue
                 if not path.is_file():
                     continue
                 relative = path.relative_to(skill_dir).as_posix()
                 destination = f"skills/{skill_name}/{relative}"
-                raw = path.read_bytes()
+                git_relative = path.relative_to(root).as_posix()
+                raw = _read_blob(root, commit, git_relative)
                 found = gate(destination, raw.decode("utf-8", errors="replace"))
                 if found:
                     result.problems.extend(found)
@@ -291,7 +355,7 @@ def main(argv=None):
 
     try:
         root = resolve_source(args.source, args.commit)
-        result = plan(root, args.plugins)
+        result = plan(root, args.plugins, commit=args.commit)
         audiences = _parse_kv_pairs(args.audiences)
     except SyncError as exc:
         print(f"error: {exc}")
@@ -303,7 +367,7 @@ def main(argv=None):
 
     if result.collisions:
         print()
-        print("BLOCKED: name collision with an existing, non-vendored skill:")
+        print("BLOCKED: name collision with a skill this plugin does not already own:")
         for name in sorted(set(result.collisions)):
             print(f"  {name}")
 
