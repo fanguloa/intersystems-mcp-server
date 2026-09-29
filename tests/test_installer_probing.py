@@ -89,5 +89,58 @@ class InstallPs1ProbingParityTests(unittest.TestCase):
             self.assertIn(marker, self.text)
 
 
+class ExtensionRefPinningTests(unittest.TestCase):
+    """Fix round: `@main` in the actual install command was a hardcoded ref, not a
+    placeholder. Neither script has published a first tag yet (MANUAL-2), so the
+    literal `main` fallback must live in one grep-able, commented variable instead
+    of being baked directly into the install command string."""
+
+    def test_install_sh_never_hardcodes_a_bare_main_ref_in_the_install_command(self):
+        text = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertNotIn("@main", text)
+        self.assertIn("MANUAL-2", text)
+        self.assertIn("ISC_AI_TECHNICAL_REF", text)
+
+    def test_install_ps1_never_hardcodes_a_bare_main_ref_in_the_install_command(self):
+        text = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertNotIn("@main", text)
+        self.assertIn("MANUAL-2", text)
+        self.assertIn("ISC_AI_TECHNICAL_REF", text)
+
+
+class GitTerminalPromptCleanupTests(unittest.TestCase):
+    """Fix round: GIT_TERMINAL_PROMPT cleanup must run even if the git call itself
+    throws a terminating error (install.ps1 sets $ErrorActionPreference = "Stop"),
+    or the env var leaks into every subsequent command in the same process."""
+
+    def test_install_ps1_wraps_the_probe_git_call_in_try_finally(self):
+        text = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        start = text.index("function Probe-Extension")
+        end = text.index("function Report-Extensions")
+        body = text[start:end]
+        try_index = body.index("try {")
+        git_index = body.index("git ls-remote")
+        finally_index = body.index("finally {")
+        remove_index = body.index("Remove-Item Env:\\GIT_TERMINAL_PROMPT")
+        self.assertLess(try_index, git_index)
+        self.assertLess(git_index, finally_index)
+        self.assertLess(finally_index, remove_index)
+
+
+class AccessAmbiguityMessageTests(unittest.TestCase):
+    """Fix round: GitLab's git wire protocol returns the same 404-shaped response
+    for a repository that does not exist and one that exists but is forbidden (it
+    deliberately does not leak which). The 'not-found' outcome's message must say
+    so instead of asserting the repo definitely does not exist."""
+
+    def test_install_sh_not_found_message_admits_the_ambiguity(self):
+        text = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("not found or no access", text)
+
+    def test_install_ps1_not_found_message_admits_the_ambiguity(self):
+        text = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("not found or no access", text)
+
+
 if __name__ == "__main__":
     unittest.main()

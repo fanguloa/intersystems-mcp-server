@@ -15,16 +15,28 @@ $Extensions = @(
     @{ Name = "isc-ai-technical"; Url = "https://gitlab.iscinternal.com/isc-ai-squad/isc-ai-technical.git" }
 )
 $ExtensionAccessUrl = "https://gitlab.iscinternal.com/groups/isc-ai-squad/technical-users"
+# pre-first-release: set this to the first published tag once isc-ai-technical
+# cuts one (MANUAL-2); until then it installs whatever HEAD of the default
+# branch currently is, same behaviour as before this ref was pulled into a
+# named, grep-able variable.
+$ISC_AI_TECHNICAL_REF = "main"
 
 function Probe-Extension {
     # Returns one of: ok / not-found / forbidden / auth-failed
     param([string]$Url)
     # GIT_TERMINAL_PROMPT=0: fail immediately instead of hanging on a
     # credential prompt when no cached git credentials are available.
+    # The env var is set/cleared around the call in a try/finally so a
+    # terminating error from `git` itself (this script runs with
+    # $ErrorActionPreference = "Stop") can never leave it set for every
+    # later command in this process.
     $env:GIT_TERMINAL_PROMPT = "0"
-    $output = & git ls-remote $Url HEAD 2>&1
-    $exitCode = $LASTEXITCODE
-    Remove-Item Env:\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+    try {
+        $output = & git ls-remote $Url HEAD 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        Remove-Item Env:\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+    }
     if ($exitCode -eq 0) { return "ok" }
     $text = [string]::Join("`n", $output)
     if ($text -match "Authentication failed|could not read Username|terminal prompts disabled|401") {
@@ -50,13 +62,13 @@ function Report-Extensions {
             "ok" {
                 if ($DoApply) {
                     Write-Output "Installing extension $($extension.Name)..."
-                    & uv tool install --with "git+$($extension.Url)@main" isc-ai
+                    & uv tool install --with "git+$($extension.Url)@$ISC_AI_TECHNICAL_REF" isc-ai
                 } else {
                     Write-Output "  extension $($extension.Name): reachable, would install with -Apply"
                 }
             }
             "not-found" {
-                Write-Warning "Skipping extension $($extension.Name): repository not found."
+                Write-Warning "Skipping extension $($extension.Name): not found or no access (GitLab returns 404 for both). Request access: $ExtensionAccessUrl"
             }
             "forbidden" {
                 Write-Warning "Skipping extension $($extension.Name): no access (forbidden). Request access: $ExtensionAccessUrl"

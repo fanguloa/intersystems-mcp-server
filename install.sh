@@ -7,6 +7,11 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Baked in on purpose: no URL is ever discovered at runtime, only probed.
 EXTENSIONS="isc-ai-technical:https://gitlab.iscinternal.com/isc-ai-squad/isc-ai-technical.git"
 EXTENSION_ACCESS_URL="https://gitlab.iscinternal.com/groups/isc-ai-squad/technical-users"
+# pre-first-release: set this to the first published tag once isc-ai-technical
+# cuts one (MANUAL-2); until then it installs whatever HEAD of the default
+# branch currently is, same behaviour as before this ref was pulled into a
+# named, grep-able variable.
+ISC_AI_TECHNICAL_REF="main"
 
 usage() {
   printf '%s\n' "Usage: ./install.sh [--apply]" \
@@ -69,13 +74,14 @@ report_extensions() {
       ok)
         if [ "$apply" = "1" ]; then
           printf 'Installing extension %s...\n' "$ext_name"
-          uv tool install --with "git+${ext_url}@main" isc-ai
+          uv tool install --with "git+${ext_url}@${ISC_AI_TECHNICAL_REF}" isc-ai
         else
           printf '  extension %s: reachable, would install with --apply\n' "$ext_name"
         fi
         ;;
       "not-found")
-        printf 'Skipping extension %s: repository not found.\n' "$ext_name" >&2
+        printf 'Skipping extension %s: not found or no access (GitLab returns 404 for both). Request access: %s\n' \
+          "$ext_name" "$EXTENSION_ACCESS_URL" >&2
         ;;
       forbidden)
         printf 'Skipping extension %s: no access (forbidden). Request access: %s\n' \
