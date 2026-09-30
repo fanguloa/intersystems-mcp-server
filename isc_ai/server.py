@@ -3762,7 +3762,7 @@ class AtelierClient:
 
         If flowOK {{
             Set centralID = "", centralName = "", pollOK = 1
-            For listAttempt=1:1:3 {{
+            For listAttempt=1:1:6 {{
                 If 'pollOK {{
                     Quit
                 }}
@@ -3813,7 +3813,7 @@ class AtelierClient:
                 If centralID'="" {{
                     Quit
                 }}
-                If pollOK&&(listAttempt<3) {{
+                If pollOK&&(listAttempt<6) {{
                     Hang 1
                 }}
             }}
@@ -3897,7 +3897,7 @@ class AtelierClient:
                 Write "ERROR_LOCAL_ITEMSET|local_id=", localID, "|local_name=|message=Local ItemSet has no Name", !
             }} Else {{
                 Set centralID = "", centralName = "", pollOK = 1
-                For listAttempt=1:1:3 {{
+                For listAttempt=1:1:6 {{
                     If 'pollOK {{
                         Quit
                     }}
@@ -3948,7 +3948,7 @@ class AtelierClient:
                     If centralID'="" {{
                         Quit
                     }}
-                    If pollOK&&(listAttempt<3) {{
+                    If pollOK&&(listAttempt<6) {{
                         Hang 1
                     }}
                 }}
@@ -4102,7 +4102,7 @@ class AtelierClient:
                                 Write "ERROR_DIRECT_UPLOAD|local_id=", localID, "|local_name=", $ZConvert(localName, "O", "URL"), "|message=", $ZConvert(errorText, "O", "URL"), !
                             }} Else {{
                                 Set verifiedID = "", verifiedName = "", postPollOK = 1
-                                For verifyAttempt=1:1:3 {{
+                                For verifyAttempt=1:1:6 {{
                                     If 'postPollOK {{
                                         Quit
                                     }}
@@ -4153,7 +4153,7 @@ class AtelierClient:
                                     If verifiedID'="" {{
                                         Quit
                                     }}
-                                    If postPollOK&&(verifyAttempt<3) {{
+                                    If postPollOK&&(verifyAttempt<6) {{
                                         Hang 1
                                     }}
                                 }}
