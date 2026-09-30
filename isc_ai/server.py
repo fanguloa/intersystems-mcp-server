@@ -808,7 +808,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
     lines = [line.strip() for line in str(result).splitlines() if line.strip()]
     stages = ["DOWNLOADED", "IMPORTED"]
     if load:
-        stages.extend(["LOADED_OS", "LOADED_NS"])
+        stages.extend(["LOADED_OS", "LOADED_NS", "CONFIRMED"])
 
     def validate_stage(line, stage, imported_id):
         if stage == "DOWNLOADED":
@@ -824,6 +824,10 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
         elif stage == "LOADED_OS":
             if line != "LOADED_OS":
                 raise ValueError("Malformed LOADED_OS record")
+        elif stage == "CONFIRMED":
+            fields = _parse_pipe_record(line, stage)
+            if set(fields) != {"isid"} or fields["isid"] != str(expected_itemset_id):
+                raise ValueError("Malformed CONFIRMED record")
         else:
             fields = _parse_pipe_record(line, stage)
             if set(fields) != {"itemset"} or fields["itemset"] != imported_id:
@@ -849,6 +853,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
             "ERROR_IMPORT": ("import", 1),
             "ERROR_LOADTOOS": ("load_to_os", 2),
             "ERROR_LOADTONS": ("load_to_ns", 3),
+            "ERROR_CONFIRM": ("confirm", 4),
             "ERROR_CONTROL": ("control", 0),
         }
         error_code = error_line.split(":", 1)[0].split("|", 1)[0]
@@ -856,7 +861,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
         prior_is_exact = len(valid_stages) == error_index
         if expected_prior is not None and (not prior_is_exact or len(valid_stages) != expected_prior):
             failed_phase = "unknown"
-        load_attempted = "LOADED_OS" in valid_stages or error_code in {"ERROR_LOADTOOS", "ERROR_LOADTONS"}
+        load_attempted = "LOADED_OS" in valid_stages or error_code in {"ERROR_LOADTOOS", "ERROR_LOADTONS", "ERROR_CONFIRM"}
         load_may_have_started = load_attempted or (load and "IMPORTED" in valid_stages)
         failure_state = {
             "status": "DOWNLOAD_LOAD_FAILED",
@@ -874,6 +879,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
         "IMPORTED": "import",
         "LOADED_OS": "load_to_os",
         "LOADED_NS": "load_to_ns",
+        "CONFIRMED": "confirm",
     }
     valid_stages = []
     imported_id = None
@@ -1250,11 +1256,13 @@ class AtelierClient:
                           "HA-node and route policy are unknown. Run 'isc-ai init' in the deployment directory.")
         role = self._configured_role()
         if promotion:
-            if role == "UAT" and not self._is_direct_ha_node():
-                return "UAT_PROMOTION", "Promotion route: configured UAT target."
-            if role == "UAT":
-                return None, "Direct HA node promotion blocked; use the configured canonical VIP."
-            return None, "CCR promotion requires the configured UAT role."
+            # Sanctioned ItemSet promotion is admitted in every configured environment
+            # (BASE, UAT, TEST, LIVE...) and on direct HA nodes: the ItemSet comes only
+            # from the central CCR server by ISID, the runner embeds the same-process
+            # CONTROLLED_ACTIVE guard, and a mirror backup fails at its read-only database.
+            if role in ("BASE", "UAT", "TEST", "QA", "LIVE"):
+                return "PROMOTION", f"Promotion route: configured {role} target."
+            return None, "CCR promotion requires a configured BASE, UAT, TEST, QA or LIVE role."
         if role == "BASE":
             if self._is_direct_ha_node():
                 return None, "Direct HA node mutation blocked; use the configured canonical VIP."
@@ -1276,12 +1284,14 @@ class AtelierClient:
 
     def is_code_write_route_allowed(self, promotion=False):
         """Static CODE WRITE preflight: production, configured role and route. No network
-        except fresh active-node evidence for configured UAT exceptions; never a runner."""
-        reason = self._production_gate_reason()
-        if reason:
-            return False, reason
-        if self._configured_role() not in self.policy.non_production_roles:
-            return False, "Code write requires an explicit configured non-production role."
+        except fresh active-node evidence for configured UAT exceptions; never a runner.
+        CCR promotion is admitted in every configured environment, production included."""
+        if not promotion:
+            reason = self._production_gate_reason()
+            if reason:
+                return False, reason
+            if self._configured_role() not in self.policy.non_production_roles:
+                return False, "Code write requires an explicit configured non-production role."
         route, detail = self._code_write_route(promotion=promotion)
         if route is None:
             return False, detail
@@ -1349,10 +1359,10 @@ class AtelierClient:
           route is BASE or a configured UAT exception, and the document is cataloged.
         - anything else, or guard failure: blocked. UNKNOWN is never an outcome.
         """
-        reason = self._production_gate_reason()
+        reason = None if promotion else self._production_gate_reason()
         if reason:
             return False, reason
-        if self._configured_role() not in self.policy.non_production_roles:
+        if not promotion and self._configured_role() not in self.policy.non_production_roles:
             return False, "Code write requires an explicit configured non-production role."
         if document_name is not None:
             self._validate_document_name(document_name)
@@ -1370,8 +1380,8 @@ class AtelierClient:
         if state == "SUSPENDED":
             return False, "CCR SUSPENDED in the guard process; code write blocked."
         if state == "CONTROLLED_ACTIVE":
-            if route not in ("BASE", "UAT_PROMOTION"):
-                return False, "CCR CONTROLLED_ACTIVE: only BASE tracked changes or UAT promotion are admitted."
+            if route not in ("BASE", "PROMOTION"):
+                return False, "CCR CONTROLLED_ACTIVE: only BASE tracked changes or CCR promotion are admitted."
             if not (isinstance(ccr_tracking, str) and ccr_tracking.strip()):
                 return False, ("CCR CONTROLLED_ACTIVE: this operation does not track the change under "
                                "an explicit CCR; blocked. Use the CCR-tracked tool variant.")
@@ -1379,7 +1389,7 @@ class AtelierClient:
         if state == "ABSENT":
             if require_controlled:
                 return False, "Operation requires CCR CONTROLLED_ACTIVE; ABSENT namespace blocked."
-            if route == "UAT_PROMOTION":
+            if route == "PROMOTION":
                 return False, "CCR promotion requires CONTROLLED_ACTIVE; ABSENT namespace blocked."
             if document_name is None:
                 return False, ("CCR ABSENT: only cataloged package documents may be written on this "
@@ -1406,6 +1416,8 @@ class AtelierClient:
             raise LocalPolicyError("CCR-tracked operations require an explicit CCR reference.")
         self._require_code_write_route(promotion=promotion)
         code = "\n".join(self._GUARD_STATE_LINES + self._GUARD_REQUIRE_CONTROLLED_LINES) + "\n" + code_str
+        if promotion:
+            return self.execute_runtime_code(code, promotion=True)
         return self.execute_runtime_code(code)
 
     def is_runtime_operation_allowed(self):
@@ -1547,17 +1559,31 @@ class AtelierClient:
             raise LocalPolicyError(failure)
         return True
 
-    def execute_runtime_code(self, code_str):
+    def execute_runtime_code(self, code_str, promotion=False):
         """Run an Ensemble runtime operation through the ephemeral runner.
 
         Gated by is_runtime_operation_allowed only (production gate), never by
         CCR discovery. Cleanup and residue verification are mandatory.
+        promotion=True is set only internally by _run_guarded_ccr_runner for CCR
+        ItemSet promotion, already admitted by the promotion route and carrying the
+        embedded CONTROLLED_ACTIVE guard; it skips the production/role gates.
         """
         import uuid
 
-        self._require_runtime_operation()
+        if not promotion:
+            self._require_runtime_operation()
         runner_class = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
-        self._require_ephemeral_runner(runner_class)
+        self._require_ephemeral_runner(runner_class, promotion=promotion)
+        if promotion:
+            # Only this exact runner, for this call, passes the promotion runner check.
+            self.__dict__["_promotion_runner"] = runner_class
+        try:
+            return self._execute_runtime_runner(runner_class, code_str)
+        finally:
+            if promotion:
+                self.__dict__.pop("_promotion_runner", None)
+
+    def _execute_runtime_runner(self, runner_class, code_str):
         content = self._runner_class_content(runner_class, code_str)
         if self._ephemeral_runner_has_pending_change(runner_class):
             raise LocalPolicyError("Runner blocked by pre-existing source-control residue.")
@@ -1583,12 +1609,17 @@ class AtelierClient:
             raise failure
         return output
 
-    def _require_ephemeral_runner(self, class_name):
-        """Authorize only the fixed direct-tool runner in configured non-production."""
+    def _require_ephemeral_runner(self, class_name, promotion=False):
+        """Authorize only the fixed direct-tool runner in configured non-production
+        (or, for CCR ItemSet promotion, any configured environment)."""
         self._validate_target()
         if (not isinstance(class_name, str)
                 or not self._EPHEMERAL_RUNNER_RE.fullmatch(class_name)):
             raise LocalPolicyError("Invalid ephemeral runner identity.")
+        if promotion or (class_name == self.__dict__.get("_promotion_runner")):
+            if not self._configured_role():
+                raise LocalPolicyError("CCR promotion runner requires an explicit configured environment role.")
+            return
         # Separate, explicit path: ONLY the runner that _run_live_window_runner is
         # executing right now, for a grant issued by the LIVE CONFIG WINDOW gate on
         # this exact target. No tool argument can set it; every other runner
@@ -4197,21 +4228,30 @@ class AtelierClient:
         """
         return self.execute_runtime_code(code).strip()
 
-    def ccr_download_load(self, itemset_id, load=True, token=""):
+    def ccr_download_load(self, itemset_id, load=True, token="", ccr_id=""):
         """CCR PROMOTION: download an APPROVED ItemSet from the central server by its
-        ServerItemSetID and, when load=1, load it (LoadToOS + LoadToNS). Mirrors the
-        CCRItemSetTask.OnTask flow: WSDownload -> Import -> LoadToOS -> LoadToNS. This is the
+        ServerItemSetID and, when load=1, load it (LoadToOS + LoadToNS) and confirm the load
+        to the central server (WSConfirmLoad). Mirrors the CCRItemSetTask.OnTask flow:
+        WSDownload -> Import -> LoadToOS -> LoadToNS -> WSConfirmLoad. This is the
         sanctioned promotion channel: it only downloads by ISID from the central server and
-        never loads an arbitrary local file.
+        never loads an arbitrary local file. WSDownload/WSConfirmLoad need the CCR job
+        (ccr_id, e.g. ACHS1046) and a CCR access token (ccr-portal ccr_upload_token).
 
-        Its own gate: the configured UAT role on the VIP (never a direct node) and the
+        Its own gate: any configured environment role (BASE, UAT, TEST, LIVE) and the
         same-process CONTROLLED_ACTIVE guard embedded in the very runner that loads."""
         itemset_id = int(itemset_id)
         token_esc = self._escape_cos(token)
+        # WSDownload pJob is the CCR / Perforce job (e.g. ACHS1046); Org^Sys makes the central
+        # web service fail with <SUBSCRIPT> (subscript 2 is "").
+        ccr_id = (ccr_id or "").strip()
+        if ccr_id:
+            ccr_id = self._require_ccr_id(ccr_id)
+        ccr_esc = self._escape_cos(ccr_id)
         do_load = "1" if load else "0"
         code = f"""
         Set env = $$Env^%buildccr
-        Set job = $$Org^%buildccr _ "^" _ $$Sys^%buildccr
+        Set job = "{ccr_esc}"
+        If job = "" Set job = $$Org^%buildccr _ "^" _ $$Sys^%buildccr
         Set isid = {itemset_id}
         Set isFile = ""
         Set sc = ##class(%Studio.SourceControl.ItemSet).WSDownload(job, env, "{token_esc}", "", .isid, .isFile)
@@ -4245,6 +4285,16 @@ class AtelierClient:
                 Quit
             }}
             Write "LOADED_NS|itemset=", IS.%Id(), !
+            // Report the load to the central CCR server (like CCRItemSetTask): without it the
+            // portal keeps the client ItemSet undeployed and blocks markMoveTo<Env>Complete.
+            Set confirmJob = $Select(IS.CCR '= "": IS.CCR, 1: job)
+            Set confirmLog = IS.Log
+            Set sc = ##class(%Studio.SourceControl.ItemSet).WSConfirmLoad(isid, confirmJob, env, "{token_esc}", $$$OK, .confirmLog)
+            If $$$ISERR(sc) {{
+                Write "ERROR_CONFIRM: ", $System.Status.GetErrorText(sc), !
+                Quit
+            }}
+            Write "CONFIRMED|isid=", isid, !
         }}
         Write "SUCCESS", !
         """
@@ -5637,7 +5687,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_download_load",
-                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Only on the configured UAT role at the VIP (never a direct HA node) and with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, production (LIVE) or any error block, even with load=false. It never loads arbitrary local files.",
+                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Admitted in every configured environment (BASE, UAT, TEST, LIVE), on the VIP or a direct HA node (a mirror backup fails at its read-only database), always with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, an unconfigured role or any error block, even with load=false. It never loads arbitrary local files.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -5662,6 +5712,7 @@ class IRISMCPServer:
                             "items": {"type": "string"},
                             "description": "Non-empty list, without case-insensitive duplicates, of exact documents with a valid extension that must already exist in UAT. It takes snapshots before loading and checks afterwards that each document changed; it is accepted only with load=true."
                         },
+                        "ccr_id": {"type": "string", "description": "CCR / Perforce job the ItemSet belongs to (e.g. 'ACHS1046'). WSDownload requires it together with a CCR access token (ccr-portal ccr_upload_token)."},
                         "token": {
                             "type": "string",
                             "description": "Optional session token for the download. Empty by default (download scoped to the environment)."
@@ -7587,7 +7638,7 @@ class IRISMCPServer:
                 log_debug(f"CCR promotion: download+load ItemSet {itemset_id} (load={load}) in {client.namespace}...")
                 output = f"### CCR promotion: ItemSet `{itemset_id}` on {server_id} ({client.namespace})\n\n"
                 try:
-                    result = client.ccr_download_load(itemset_id, load=load, token=token)
+                    result = client.ccr_download_load(itemset_id, load=load, token=token, ccr_id=arguments.get("ccr_id") or "")
                 except Exception:
                     failure_state = {
                         "status": "DOWNLOAD_LOAD_FAILED",

@@ -88,7 +88,7 @@ class ProductionReadGateTests(HermeticTestCase):
                 self.assertTrue(client.is_read_allowed()[0])
                 self.assertFalse(client.is_runtime_operation_allowed()[0])
                 self.assertFalse(client.is_code_write_route_allowed()[0])
-                self.assertFalse(client.is_code_write_route_allowed(promotion=True)[0])
+                self.assertTrue(client.is_code_write_route_allowed(promotion=True)[0])
                 self.assertFalse(client.is_code_write_allowed(CATALOGED, "ACHS0875")[0])
                 blocked = (
                     lambda: client.execute_runtime_code("Write 1"),

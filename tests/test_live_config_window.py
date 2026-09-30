@@ -391,7 +391,7 @@ class LiveWindowKeepsOtherGatesClosedTests(LiveWindowTestCase):
         self.assertTrue(client.is_read_allowed()[0])
         self.assertFalse(client.is_runtime_operation_allowed()[0])
         self.assertFalse(client.is_code_write_route_allowed()[0])
-        self.assertFalse(client.is_code_write_route_allowed(promotion=True)[0])
+        self.assertTrue(client.is_code_write_route_allowed(promotion=True)[0])
         blocked = (
             lambda: client.execute_runtime_code("Write 1"),
             lambda: client._execute_direct_objectscript("Write 1"),
@@ -422,7 +422,6 @@ class LiveWindowKeepsOtherGatesClosedTests(LiveWindowTestCase):
             ("iris_ccr_checkout", {"class_name": "Custom.ACHS.Tests.Sample", "ccr_id": "ACHS0875"}),
             ("iris_ccr_commit", {"change_ids": [1], "ccr_id": "ACHS0875"}),
             ("iris_ccr_create", {"title": "t", "description": "d"}),
-            ("iris_ccr_download_load", {"itemset_id": 1}),
             ("iris_unlock_questionnaire", {"win_code": "X"}),
             ("iris_dump_global", {"global_name": "^X"}),
             ("iris_ensemble_queue_control", {"action": "abort_message", "message_id": 1}),

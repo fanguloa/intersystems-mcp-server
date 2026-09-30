@@ -39,7 +39,7 @@ def download_result(load=True):
         "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT",
     ]
     if load:
-        lines.extend(["LOADED_OS", "LOADED_NS|itemset=7"])
+        lines.extend(["LOADED_OS", "LOADED_NS|itemset=7", "CONFIRMED|isid=42"])
     lines.append("SUCCESS")
     return "\n".join(lines)
 
@@ -76,8 +76,10 @@ class FakeToolClient(AtelierClient):
         self.calls.append(("list", ccr_id, env, token))
         return self._result()
 
-    def ccr_download_load(self, itemset_id, load=True, token=""):
+    def ccr_download_load(self, itemset_id, load=True, token="", ccr_id=""):
         self.calls.append(("download_load", itemset_id, load, token))
+        if getattr(self, "use_real_download_load", False):
+            return AtelierClient.ccr_download_load(self, itemset_id, load=load, token=token, ccr_id=ccr_id)
         return self._result()
 
     def get_document(self, document_name, strict=False):
@@ -1076,6 +1078,38 @@ class ToolContractTests(HermeticTestCase):
         self.assertFalse(failure["load_attempted"])
         self.assertFalse(failure["possible_partial_load"])
         self.assertNotIn("Posible carga parcial", result["content"][0]["text"])
+
+    def test_download_load_confirm_error_after_load_marks_failure_without_retry(self):
+        client = FakeToolClient(
+            "DOWNLOADED|isid=42|file=item.xml\n"
+            "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT\n"
+            "LOADED_OS\nLOADED_NS|itemset=7\nERROR_CONFIRM: Invalid Token",
+            promotion=True,
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        failure = result["structuredContent"]
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(failure["phase_reached"], "LOADED_NS")
+        self.assertEqual(failure["failed_phase"], "confirm")
+        self.assertTrue(failure["load_attempted"])
+        self.assertFalse(failure["automatic_retry"])
+
+    def test_download_load_runner_confirms_load_with_ccr_job(self):
+        client = FakeToolClient(download_result(), promotion=True)
+        client.use_real_download_load = True
+        captured = []
+        client._run_guarded_ccr_runner = lambda code, tracking, promotion=False: (captured.append(code), download_result())[1]
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", ccr_id="ACHS0875",
+        )
+        self.assertFalse(result.get("isError", False), result)
+        code = captured[0]
+        self.assertIn('Set job = "ACHS0875"', code)
+        self.assertLess(code.index("LoadToNS("), code.index("WSConfirmLoad("))
 
     def test_download_load_loadtoos_error_marks_partial_and_no_retry(self):
         client = FakeToolClient(

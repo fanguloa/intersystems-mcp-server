@@ -267,7 +267,7 @@ def script_guarded_runner(client, output=""):
     """Capture code sent through the runtime runner (used by guarded CCR operations)."""
     captured = []
 
-    def run(code):
+    def run(code, promotion=False):
         captured.append(code)
         return output
 
