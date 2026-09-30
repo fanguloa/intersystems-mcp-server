@@ -533,7 +533,7 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         self.assertNotIn("SELECT TOP 1 ID, Name, ItemSetFile", code)
         self.assertIn("If newCount'=1", code)
         self.assertIn("ERROR_ITEMSET_COUNT", code)
-        self.assertIn("For listAttempt=1:1:3", code)
+        self.assertIn("For listAttempt=1:1:6", code)
         # The native Commit already uploads the ItemSet: the commit runner must never
         # issue a second WSUpload (it produced duplicate add+edit commits in Perforce).
         self.assertEqual(code.count("WSUpload("), 0)
@@ -625,8 +625,8 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         client.ccr_reupload_itemset(1080, "ACHS0875", "test-token", sanitize=True)
 
         code = captured[0]
-        self.assertIn("For listAttempt=1:1:3", code)
-        self.assertIn("For verifyAttempt=1:1:3", code)
+        self.assertIn("For listAttempt=1:1:6", code)
+        self.assertIn("For verifyAttempt=1:1:6", code)
         self.assertEqual(code.count("WSUpload("), 1)
         self.assertEqual(code.count("WSList(ccr, env, token"), 2)
         self.assertIn("CopyFile(path, backupPath(fIdx), 0)", code)
