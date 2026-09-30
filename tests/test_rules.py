@@ -170,6 +170,12 @@ class ExceptionRuleParsingTests(HermeticTestCase):
         with self.assertRaisesRegex(ConfigError, "Unknown keys"):
             self._exception(bogus="x")
 
+    def test_runner_namespace_only_allowed_for_runner_capability(self):
+        exc = self._exception(capability="runner", runner_namespace="USER")
+        self.assertEqual(exc.runner_namespace, "USER")
+        with self.assertRaisesRegex(ConfigError, "runner_namespace"):
+            self._exception(capability="code_write", runner_namespace="USER")
+
 
 class MatchingExceptionsTests(HermeticTestCase):
     """R2/R3 query helpers: matching_exceptions, expiring_within, validate."""

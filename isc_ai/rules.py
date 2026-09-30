@@ -28,7 +28,8 @@ _RULES_TOP_LEVEL_KEYS = frozenset({"version", "packages", "exceptions", "$schema
 _PACKAGE_GRANT_KEYS = frozenset({"prefix", "class", "document", "roles", "servers", "expires"})
 _EXCEPTION_REQUIRED_KEYS = frozenset({"id", "label", "ticket", "expires", "capability"})
 _EXCEPTION_OPTIONAL_KEYS = frozenset({"roles", "servers", "hosts", "namespaces", "path_prefixes",
-                                      "requires_active_node", "active_node_evidence_namespace"})
+                                      "requires_active_node", "active_node_evidence_namespace",
+                                      "runner_namespace"})
 _EXCEPTION_ALLOWED_KEYS = _EXCEPTION_REQUIRED_KEYS | _EXCEPTION_OPTIONAL_KEYS
 
 _expect = isc_config._expect
@@ -103,6 +104,9 @@ class ExceptionRule:
     path_prefixes: frozenset = None
     requires_active_node: bool = True
     active_node_evidence_namespace: str = None
+    # runner-only: the ephemeral runner destination when this exception's
+    # capability is "runner". No other capability sets this.
+    runner_namespace: str = None
 
     def is_expired(self, today=None):
         return _is_expired(self.expires, today)
@@ -228,10 +232,17 @@ def _parse_exception(item, index):
             isc_config._string(item["active_node_evidence_namespace"], f"{path}.active_node_evidence_namespace"),
             f"{path}.active_node_evidence_namespace",
         )
+    runner_namespace = None
+    if "runner_namespace" in item:
+        runner_namespace = _namespace_value(
+            isc_config._string(item["runner_namespace"], f"{path}.runner_namespace"),
+            f"{path}.runner_namespace",
+        )
+        _expect(capability == "runner", f"{path}.runner_namespace only applies to the 'runner' capability.")
     return ExceptionRule(id=id_, label=label, ticket=ticket, expires=expires, capability=capability,
                          roles=roles, servers=servers, hosts=hosts, namespaces=namespaces,
                          path_prefixes=path_prefixes, requires_active_node=requires_active_node,
-                         active_node_evidence_namespace=evidence)
+                         active_node_evidence_namespace=evidence, runner_namespace=runner_namespace)
 
 
 def _parse_exceptions(data):
