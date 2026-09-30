@@ -42,7 +42,7 @@ def plans_dir(project_dir):
     return Path(project_dir) / config_module.STATE_DIR / PLANS_DIRNAME
 
 
-def _read_rules_data(project_dir):
+def read_rules_data(project_dir):
     path = rules_path_for(project_dir)
     if not path.is_file():
         return {"version": rules_module.RULES_VERSION, "packages": {}, "exceptions": []}
@@ -92,7 +92,7 @@ def execute_or_plan(project_dir, action, description, new_data, apply):
 
     Returns (executed, fingerprint_or_none, plan).
     """
-    base_data = _read_rules_data(project_dir)
+    base_data = read_rules_data(project_dir)
     plan = {"action": action, "description": description, "base": base_data, "new": new_data}
     if not apply:
         fp = save_plan(project_dir, plan)
@@ -106,7 +106,7 @@ def apply_pending_plan(project_dir, fp):
     plan = load_plan(project_dir, fp)
     if plan is None:
         return False, "unknown_or_stale_fingerprint"
-    current = _read_rules_data(project_dir)
+    current = read_rules_data(project_dir)
     if current != plan["base"]:
         return False, "drift"
     _write_rules_data(project_dir, plan["new"])
@@ -118,7 +118,7 @@ def apply_pending_plan(project_dir, fp):
 # ---------------------------------------------------------------------------
 
 def add_exception(project_dir, item, apply):
-    base_data = _read_rules_data(project_dir)
+    base_data = read_rules_data(project_dir)
     existing_ids = {existing.get("id") for existing in base_data.get("exceptions", [])}
     if item.get("id") in existing_ids:
         raise ValueError(f"An exception with id '{item['id']}' already exists.")
@@ -147,14 +147,14 @@ def _with_renewed_expiry(base_data, target_id, expires):
 
 
 def renew_exception(project_dir, target_id, expires, apply):
-    base_data = _read_rules_data(project_dir)
+    base_data = read_rules_data(project_dir)
     new_data = _with_renewed_expiry(base_data, target_id, expires)
     rules_module.parse_rules(new_data)
     return execute_or_plan(project_dir, "renew", f"renew exception '{target_id}' to {expires}", new_data, apply)
 
 
 def renew_expiring_within(project_dir, days, expires, apply, today=None):
-    base_data = _read_rules_data(project_dir)
+    base_data = read_rules_data(project_dir)
     ruleset = rules_module.parse_rules(base_data)
     targets = [exc.id for exc in rules_module.expiring_within(ruleset, days, today=today)]
     new_data = base_data
@@ -169,7 +169,7 @@ def renew_expiring_within(project_dir, days, expires, apply, today=None):
 
 
 def remove_exception(project_dir, target_id, apply):
-    base_data = _read_rules_data(project_dir)
+    base_data = read_rules_data(project_dir)
     new_exceptions = [item for item in base_data.get("exceptions", []) if item.get("id") != target_id]
     if len(new_exceptions) == len(base_data.get("exceptions", [])):
         raise ValueError(f"No exception with id '{target_id}'.")

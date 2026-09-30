@@ -713,12 +713,7 @@ def _run_config(args):
 
 def _exception_to_dict(exc):
     """ExceptionRule as a JSON-serializable dict: frozensets become sorted lists."""
-    import dataclasses as _dataclasses
-    data = {}
-    for field in _dataclasses.fields(exc):
-        value = getattr(exc, field.name)
-        data[field.name] = sorted(value) if isinstance(value, frozenset) else value
-    return data
+    return isc_rules.exception_to_dict(exc)
 
 
 def _report_rules_write(executed, fp, plan):

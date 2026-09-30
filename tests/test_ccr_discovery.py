@@ -2410,7 +2410,7 @@ class GateMatrixTests(HermeticTestCase):
         server = object.__new__(IRISMCPServer)
         names = {tool["name"] for tool in server.handle_tools_list()["tools"]}
         categories = (IRISMCPServer.READ_TOOLS, IRISMCPServer.RUNTIME_TOOLS, IRISMCPServer.CODE_WRITE_TOOLS,
-                      IRISMCPServer.LIVE_CONFIG_WINDOW_TOOLS)
+                      IRISMCPServer.LIVE_CONFIG_WINDOW_TOOLS, IRISMCPServer.PROJECT_TOOLS)
         self.assertEqual(set().union(*categories) | {"iris_list_servers"}, names)
         for first in categories:
             for second in categories:

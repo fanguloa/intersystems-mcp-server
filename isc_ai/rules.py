@@ -362,3 +362,14 @@ def render_template(site_prefix):
     every other prefix grant already uses -- a literal '.*' would fail
     _validate_package_prefix's pattern)."""
     return {"prefix": f"Custom.{site_prefix}"}
+
+
+def exception_to_dict(exc):
+    """ExceptionRule as a JSON-serializable dict: frozensets become sorted
+    lists. Shared by the CLI ('rules show') and the iris_rules MCP tool."""
+    import dataclasses as _dataclasses
+    data = {}
+    for field in _dataclasses.fields(exc):
+        value = getattr(exc, field.name)
+        data[field.name] = sorted(value) if isinstance(value, frozenset) else value
+    return data

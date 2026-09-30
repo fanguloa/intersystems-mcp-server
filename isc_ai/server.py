@@ -4341,6 +4341,10 @@ class IRISMCPServer:
     # LIVE CONFIG WINDOW category: gated per action inside the handler ('get' ->
     # READ gate; 'set' -> LIVE CONFIG WINDOW gate, audited).
     LIVE_CONFIG_WINDOW_TOOLS = frozenset({"iris_ensemble_item_setting"})
+    # PROJECT category: no IRIS client at all; reads/edits the project's
+    # isc-ai.rules.json. Widening edits are plan-only (a human applies them
+    # with 'isc-ai rules apply <fingerprint>').
+    PROJECT_TOOLS = frozenset({"iris_rules"})
     # Runtime actions that, on a PRODUCTION target and only while a window is
     # configured, route through the LIVE CONFIG WINDOW gate instead of RUNTIME.
     _LIVE_WINDOW_RUNTIME_ACTIONS = {
@@ -4906,6 +4910,26 @@ class IRISMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
+                }
+            },
+            {
+                "name": "iris_rules",
+                "description": "Reads and edits the project's isc-ai.rules.json (package grants and expiring gate exceptions). No IRIS connection. 'list', 'show', 'check' and 'audit' only read. NARROWING edits apply directly with a backup and an audit line: 'remove', and 'renew' to an EARLIER or equal date. WIDENING edits never write: 'add' and 'renew' to a later date only save a plan and return a fingerprint that a HUMAN applies with `isc-ai rules apply <fingerprint>`; this tool cannot apply plans.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "show", "check", "audit", "remove", "renew", "add"]},
+                        "id": {"type": "string", "description": "Exception id (show, remove, renew)."},
+                        "expires": {"type": "string", "description": "New expiry YYYY-MM-DD (renew)."},
+                        "exception": {"type": "object", "description": "Full exception object (add): id, label, ticket, expires, capability and optional scope."},
+                        "capability": {"type": "string", "description": "check: code_write, ensemble_control, runner or read."},
+                        "namespace": {"type": "string"},
+                        "host": {"type": "string"},
+                        "role": {"type": "string"},
+                        "server": {"type": "string", "description": "Configured server id (check)."},
+                        "path_prefix": {"type": "string"},
+                    },
+                    "required": ["action"],
                 }
             },
             {
@@ -6319,6 +6343,95 @@ class IRISMCPServer:
         return self._write_document(client, doc_name, content, arguments, failure_verb="patch",
                                     header_lines=(f"**Patch applied**: {actual} replacement(s)",))
 
+    def _handle_rules_tool(self, arguments):
+        """iris_rules: read the rules; apply only NARROWING edits; plan widening ones."""
+        import datetime as _datetime
+        from isc_ai import rules as isc_rules
+        from isc_ai import rules_write as isc_rules_write
+
+        if self.runtime_config is None or self.runtime_config.project_dir is None:
+            raise LocalPolicyError("iris_rules requires a loaded project configuration.")
+        project_dir = Path(self.runtime_config.project_dir)
+        ruleset = self.policy.rules or isc_rules.RuleSet(packages={}, exceptions=())
+        action = arguments.get("action")
+        today = _datetime.date.today()
+
+        def reply(data, text):
+            return {"structuredContent": data, "content": [{"type": "text", "text": text}]}
+
+        def find(exc_id):
+            match = next((exc for exc in ruleset.exceptions if exc.id == exc_id), None)
+            if match is None:
+                raise LocalPolicyError(f"No exception with id '{exc_id}'.")
+            return match
+
+        def audit(record):
+            record = dict(record, ts=_datetime.datetime.now(_datetime.timezone.utc).isoformat(), via="mcp")
+            _append_jsonl_locked(project_dir / ".backup" / "rules" / "audit.jsonl", record)
+
+        def written(executed, fp, plan):
+            if executed:
+                return reply({"applied": True, "fingerprint": None, "description": plan["description"]},
+                             f"Applied (narrowing): {plan['description']}. A backup of isc-ai.rules.json was kept.")
+            return reply({"applied": False, "fingerprint": fp, "description": plan["description"]},
+                         f"Not applied (widening): {plan['description']}.\n"
+                         f"A human must review and run: `isc-ai rules apply {fp}`")
+
+        try:
+            if action == "list":
+                rows, lines = [], []
+                for exc in ruleset.exceptions:
+                    expiry = isc_rules._parse_expiry_date(exc.expires)
+                    days = None if expiry is None else (expiry - today).days
+                    rows.append(dict(isc_rules.exception_to_dict(exc), days_left=days))
+                    state = "EXPIRED" if days is None or days < 0 else f"{days} day(s) left"
+                    lines.append(f"- `{exc.id}` [{exc.capability}] {exc.label} (ticket {exc.ticket}) "
+                                 f"until {exc.expires}: {state}")
+                return reply({"exceptions": rows}, "\n".join(lines) or "No exceptions configured.")
+            if action == "show":
+                match = find(arguments.get("id"))
+                return reply({"exception": isc_rules.exception_to_dict(match)}, json.dumps(
+                    isc_rules.exception_to_dict(match), indent=2, ensure_ascii=False))
+            if action == "check":
+                capability = arguments.get("capability")
+                if capability not in isc_rules.EXCEPTION_CAPABILITIES:
+                    raise LocalPolicyError(f"capability must be one of {sorted(isc_rules.EXCEPTION_CAPABILITIES)}.")
+                matches = self.policy.effective_capability_exceptions(
+                    capability, namespace=arguments.get("namespace"), host=arguments.get("host"),
+                    role=arguments.get("role"), server=arguments.get("server"),
+                    path_prefix=arguments.get("path_prefix"), servers=self.servers)
+                ids = [exc.id for exc in matches]
+                text = (f"Allowed for {capability} by: {', '.join(ids)}" if ids
+                        else f"No active exception allows {capability} for that scope.")
+                return reply({"allowed": bool(ids), "matches": ids}, text)
+            if action == "audit":
+                issues = isc_rules.validate(ruleset, today=today)
+                soon = [exc.id for exc in isc_rules.expiring_within(ruleset, 7, today=today)]
+                text = "\n".join(issues + [f"Expires within 7 days: {', '.join(soon)}" if soon else ""]).strip()
+                return reply({"issues": issues, "expiring_within_7_days": soon}, text or "No issues.")
+            if action == "remove":
+                exc_id = arguments.get("id")
+                find(exc_id)
+                audit({"action": "remove", "id": exc_id})
+                return written(*isc_rules_write.remove_exception(project_dir, exc_id, apply=True))
+            if action == "renew":
+                exc_id, expires = arguments.get("id"), arguments.get("expires")
+                find(exc_id)
+                base = isc_rules_write.read_rules_data(project_dir)
+                narrowing = isc_rules_write.is_renewal_narrowing(base, exc_id, expires)
+                if narrowing:
+                    audit({"action": "renew", "id": exc_id, "expires": expires})
+                return written(*isc_rules_write.renew_exception(project_dir, exc_id, expires, apply=narrowing))
+            if action == "add":
+                item = arguments.get("exception")
+                if not isinstance(item, dict):
+                    raise LocalPolicyError("add requires an 'exception' object.")
+                return written(*isc_rules_write.add_exception(project_dir, item, apply=False))
+        except (ConfigError, ValueError) as exc:
+            raise LocalPolicyError(str(exc)) from None
+        raise LocalPolicyError("Unknown iris_rules action; use list, show, check, audit, remove, renew or add "
+                               "(plans are applied only by a human with 'isc-ai rules apply').")
+
     def handle_tool_call(self, name, arguments):
         try:
             # Validate locally before client construction or any metadata request.
@@ -6402,6 +6515,9 @@ class IRISMCPServer:
                             "id", "canonical_server_id", "status", "host", "port", "path_prefix", "namespace", "reason"))
                         output += "| " + " | ".join(_markdown_table_cell(value) for value in fields) + " |\n"
                 return {"structuredContent": {"servers": result_servers}, "content": [{"type": "text", "text": output}]}
+
+            if name == "iris_rules":
+                return self._handle_rules_tool(arguments)
                 
             server_id = arguments.get("server_id")
             canonical_server_id, server_config = self._resolve_server_config(server_id)
