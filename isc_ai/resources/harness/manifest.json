@@ -1,6 +1,6 @@
 {
   "schema": "isc-ai.harness-manifest.v1",
-  "bundle_version": 6,
+  "bundle_version": 7,
   "reviewed": true,
   "omitted": [
     "commands/sdd-new.md",
@@ -189,7 +189,7 @@
       "category": "skill",
       "source": "skills/intersystems-development/references/environment-package-policy.md",
       "destination": "skills/intersystems-development/references/environment-package-policy.md",
-      "sha256": "25edfe2bfab9ff875b267ab809f79af57d71df2de3d7ace8c903feafa71335b2"
+      "sha256": "1fa501d20eff1fe29b9874428f3ca84f8319fe95bf49c058fc1b52ce2c3bc3bc"
     },
     {
       "category": "skill",
