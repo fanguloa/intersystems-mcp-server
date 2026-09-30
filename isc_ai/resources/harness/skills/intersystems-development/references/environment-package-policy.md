@@ -23,10 +23,12 @@ For TrakCare control, inspect namespace source-control configuration, the separa
 | UAT / TEST, controlled-active | Approved central ItemSet promotion only; no arbitrary local-file load or direct code edits |
 | UAT, absent | Direct write only where an exact existing project exception below applies, with explicit approval and all preservation gates |
 | TEST / QA / other unconfigured targets | Block until canonical topology, package scope and route are explicitly configured; do not extrapolate UAT exceptions |
-| LIVE / PROD | No writes or promotion. An override such as `IRIS_ALLOW_PROD=1` is never authorization |
+| LIVE / PROD | No writes or promotion, except an explicit, expiring, audited exception in `<deployment>/isc-ai.rules.json` that names the exact capability, scope and ticket. An override such as `IRIS_ALLOW_PROD=1` is never authorization |
 | Any suspended / unknown target | Block writes, including compilation, checkout and persistent execution |
 
 Read-only diagnosis still requires permitted tools/network/data scope. Arbitrary execution, deletion, CCR upload/promotion, shared-package changes and any allowed UAT direct write are gated by explicit approval. Perforce MCP is read-only; product delivery uses the approved CCR/Perforce process, never an ad hoc submit. Cleanup is a write and inherits these gates.
+
+Every relaxation of these gates (direct HA-node writes, UAT write exceptions, LIVE operations, runner hosts, production reads) lives only in `<deployment>/isc-ai.rules.json` as an exception with a mandatory `expires` and `ticket`; an expired exception is inert. Inspect with `isc-ai rules list|check`. An agent may apply only narrowing edits (remove, shorten expiry); widening edits are plans a human applies with `isc-ai rules apply <fingerprint>`.
 
 ## Allowed-package catalog
 
@@ -38,7 +40,7 @@ The catalog is per deployment and lives with the deployment, not in this shared 
 
 | Where | What it holds |
 | --- | --- |
-| `<deployment>/.iris-mcp/config.json`, `packages.<namespace>` | The effective catalog, enforced by code on every write. `isc-ai docs` renders it into the deployment workflow and `isc-ai audit` reports drift |
+| `<deployment>/isc-ai.rules.json`, `packages.<namespace>` (legacy: `.iris-mcp/config.json` `packages`) | The effective catalog, enforced by code on every write; `Custom.{SITE}` is the baseline grant, `{SITE}` = the site CCR prefix. `isc-ai docs` renders it into the deployment workflow and `isc-ai audit` reports drift |
 | `<deployment>/.agents/skills/.../references/package-catalog.md` | The provenance the policy file cannot hold: why each prefix is allowed, when it was approved, under which CCR, and the extra gate that applies to it |
 
 Rules that hold for every deployment, whatever its catalog says:

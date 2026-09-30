@@ -529,6 +529,33 @@ Secciones del archivo:
 
 Este archivo es **commitable** cuando sus secretos son referencias `{env:VAR}`.
 
+### Reglas y excepciones — `<proyecto>/isc-ai.rules.json`
+
+Único lugar donde se relajan los gates. Vive en la raíz del proyecto (no cambia el
+discovery) y se commitea. Si no existe, rigen solo los gates base; si no parsea, falla
+cerrado.
+
+- `packages.<namespace>`: grants de escritura (`prefix`, `class` o `document`, con
+  `roles`/`servers` opcionales). `Custom.{SITE}` es la regla base (`{SITE}` = prefijo CCR
+  del sitio). Sin vencimiento salvo que se indique `expires`.
+- `exceptions[]`: `id`, `label`, `ticket`, `expires` (**obligatorio**) y `capability`
+  (`code_write`, `ensemble_control`, `runner`, `read`) más su alcance (`roles`, `servers`,
+  `hosts`, `namespaces`, `path_prefixes`, `requires_active_node`). Vencida = inerte.
+
+```text
+isc-ai rules migrate [--apply]          mueve las claves legacy de config.json (con backup)
+isc-ai rules list | show <id> | validate
+isc-ai rules check <capability> --namespace NS --role ROLE --host HOST
+isc-ai rules renew <id> --expires 2027-03-31 [--apply]
+isc-ai rules renew --expiring-within 30 --expires 2027-03-31 [--apply]
+isc-ai rules add|remove ... [--apply]   sin --apply solo muestra el plan y su huella
+isc-ai rules apply <huella>             aplica un plan pendiente (si el archivo no cambió)
+```
+
+La tool MCP `iris_rules` lee y audita libremente, aplica solo cambios que **restringen**
+(quitar, acortar vencimiento) y para los que **amplían** (agregar, extender) deja un plan
+que aplica una persona con `isc-ai rules apply <huella>`.
+
 ### Capa 2: servidores del usuario — `~/.iris-mcp/servers.json`
 
 ```json
@@ -560,7 +587,8 @@ La variable `IRIS_EXTRA_PACKAGES` (`NAMESPACE:pkg1,pkg2;NAMESPACE2:pkg3`) sigue
 aplicándose como grant aditivo **solo para el rol `BASE`** al cargar la
 configuración. El archivo `.env` del directorio padre **ya no se lee**: solo cuenta
 el entorno del proceso MCP. Se aplican las mismas raíces prohibidas que en
-`packages`. Preferir la sección `packages` del `config.json` del proyecto.
+`packages`. Preferir la sección `packages` del `config.json` del proyecto. Se ignora
+(con aviso) cuando existe `isc-ai.rules.json`: ahí todo grant debe ser explícito.
 
 ### CLI
 

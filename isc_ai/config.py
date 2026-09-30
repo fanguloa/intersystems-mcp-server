@@ -229,6 +229,17 @@ class SitePolicy:
     # routes.live_config_window. None (the default) means no window: production
     # targets keep every write, runner and RUNTIME operation blocked.
     live_config_window: LiveConfigWindow = None
+    # Backup/audit root for the LIVE CONFIG WINDOW gate (ensemble_control). Set
+    # whenever the project is configured, regardless of whether the window comes
+    # from routes.live_config_window or an isc-ai.rules.json exception: the
+    # backup location is a per-project constant, not a per-window one, so a
+    # rules-file-only exception gets identical audit/backup behavior.
+    live_config_window_backup_root: Path = None
+    # Parsed isc-ai.rules.json (isc_ai.rules.RuleSet), or None when the project
+    # has no rules file at all. Distinct from "an empty rules file" (a RuleSet
+    # with no packages/exceptions): callers that gate IRIS_EXTRA_PACKAGES and
+    # legacy/rules-file dual-definition need to tell the two apart.
+    rules: object = None
 
     # -- CCR identifier -------------------------------------------------
 
@@ -301,6 +312,38 @@ class SitePolicy:
             return entry
         return None
 
+    # -- Explicit exceptions (isc-ai.rules.json) -------------------------
+
+    def capability_candidates(self, capability, servers=None):
+        """Legacy-translated + rules-file exceptions for one capability, as-is
+        (no scope/expiry filtering). Used by gates whose own per-item checks
+        need to see - and report on - an expired or out-of-scope candidate
+        (the LIVE CONFIG WINDOW gate's distinct diagnostics), unlike
+        effective_capability_exceptions which narrows and drops expired ones."""
+        from isc_ai import rules as _rules
+        translator = _LEGACY_EXCEPTION_TRANSLATORS.get(capability)
+        legacy = translator(self, servers) if translator is not None else ()
+        from_rules = tuple(exc for exc in (self.rules.exceptions if self.rules is not None else ())
+                           if exc.capability == capability)
+        return legacy + from_rules
+
+    def effective_capability_exceptions(self, capability, *, namespace=None, host=None, role=None,
+                                        server=None, path_prefix=None, servers=None, today=None):
+        """Unified, narrowed view of every exception for one capability.
+
+        Merges the legacy per-capability configuration (routes.uat_write_exceptions,
+        routes.live_config_window, runtime.runner_hosts, per-server production_read)
+        translated into isc_ai.rules.ExceptionRule, with isc-ai.rules.json's own
+        exceptions for the same capability, then narrows and expiry-filters the
+        combination exactly like isc_ai.rules.matching_exceptions. `servers` is
+        the resolved server map (needed only for "read"; production_read lives
+        per server entry, not in this policy).
+        """
+        from isc_ai import rules as _rules
+        combined = _rules.RuleSet(packages={}, exceptions=self.capability_candidates(capability, servers))
+        return _rules.matching_exceptions(combined, capability, namespace=namespace, host=host,
+                                          role=role, server=server, path_prefix=path_prefix, today=today)
+
     # -- Packages -------------------------------------------------------
 
     def package_allowed(self, namespace, role, document_name):
@@ -312,6 +355,10 @@ class SitePolicy:
         for grant in self.packages.get(namespace, ()):
             if grant.allows(document_name, stem, role):
                 return True
+        if self.rules is not None:
+            for grant in self.rules.packages.get(namespace, ()):
+                if grant.allows(document_name, stem, role):
+                    return True
         return False
 
     def with_extra_packages(self, raw):
@@ -734,8 +781,13 @@ def _parse_mutation(data, policy_kwargs, project_dir):
     policy_kwargs["mutation_source_root"] = (Path(project_dir) / root).resolve()
 
 
-def parse_policy(data, project_dir):
-    """Build a SitePolicy from the project configuration mapping."""
+def parse_policy(data, project_dir, rules_data=None):
+    """Build a SitePolicy from the project configuration mapping.
+
+    rules_data is the already-loaded isc-ai.rules.json mapping (or None when
+    the file is absent); it is parsed here, after the site prefix is known,
+    so {SITE} in package prefixes resolves against site.ccr_id.prefix.
+    """
     _expect(isinstance(data, dict), "Project configuration must be a JSON object.")
     version = data.get("version", CONFIG_VERSION)
     _expect(version == CONFIG_VERSION, f"Unsupported configuration version {version!r}; expected {CONFIG_VERSION}.")
@@ -749,7 +801,119 @@ def parse_policy(data, project_dir):
     _parse_packages(data, kwargs)
     _parse_agents(data, kwargs)
     _parse_mutation(data, kwargs, project_dir)
+    kwargs["live_config_window_backup_root"] = (Path(project_dir) / LIVE_CONFIG_WINDOW_BACKUP_RELATIVE).resolve()
+    if rules_data is not None:
+        from isc_ai import rules as _rules
+        kwargs["rules"] = _rules.parse_rules(rules_data, site_prefix=kwargs.get("ccr_prefix"))
     return SitePolicy(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# isc-ai.rules.json integration: legacy translation and dual-definition guard
+# ---------------------------------------------------------------------------
+
+def _legacy_code_write_as_exceptions(policy, servers=None):
+    """routes.uat_write_exceptions as code_write ExceptionRule entries.
+
+    hosts=None ("any configured direct HA node" in the legacy schema) is
+    materialized to the concrete direct_ha_nodes set: isc_ai.rules' generic
+    matcher treats an unset hosts scope as "any host at all", which is wider
+    than the legacy meaning.
+    """
+    from isc_ai import rules as _rules
+    exceptions = []
+    for exc in policy.uat_write_exceptions:
+        hosts = exc.hosts if exc.hosts is not None else frozenset(policy.direct_ha_nodes)
+        exceptions.append(_rules.ExceptionRule(
+            id=f"legacy-uat-write:{exc.label}", label=exc.label, ticket="", expires=None,
+            capability="code_write", roles=frozenset({"UAT"}), hosts=hosts,
+            namespaces=frozenset({exc.namespace}),
+            path_prefixes=exc.path_prefixes, requires_active_node=exc.requires_active_node,
+        ))
+    return tuple(exceptions)
+
+
+def _legacy_live_window_as_exception(policy, servers=None):
+    """routes.live_config_window as a single ensemble_control ExceptionRule."""
+    from isc_ai import rules as _rules
+    window = policy.live_config_window
+    if window is None:
+        return ()
+    return (_rules.ExceptionRule(
+        id="legacy-live-config-window", label=window.label, ticket=window.ticket,
+        expires=window.expires, capability="ensemble_control",
+        hosts=window.hosts, namespaces=window.namespaces,
+        active_node_evidence_namespace=window.active_node_evidence_namespace,
+    ),)
+
+
+def _legacy_runner_hosts_as_exceptions(policy, servers=None):
+    """runtime.runner_hosts as runner ExceptionRule entries.
+
+    The runner destination (RunnerHost.runner_namespace) has no equivalent
+    scope dimension on ExceptionRule, so it rides along on the dedicated
+    runner_namespace field instead of being encoded as a scope.
+    """
+    from isc_ai import rules as _rules
+    exceptions = []
+    for entry in policy.runner_hosts:
+        exceptions.append(_rules.ExceptionRule(
+            id=f"legacy-runner:{entry.namespace}",
+            label=f"runner_hosts:{entry.namespace}->{entry.runner_namespace}",
+            ticket="", expires=None, capability="runner", roles=entry.roles, hosts=entry.hosts,
+            namespaces=frozenset({entry.namespace}), runner_namespace=entry.runner_namespace,
+        ))
+    return tuple(exceptions)
+
+
+def _legacy_production_read_as_exceptions(servers):
+    """Per-server production_read: true flags as read ExceptionRule entries."""
+    from isc_ai import rules as _rules
+    if not isinstance(servers, dict):
+        return ()
+    exceptions = []
+    for server_id, entry in servers.items():
+        if isinstance(entry, dict) and entry.get("production_read") is True:
+            exceptions.append(_rules.ExceptionRule(
+                id=f"legacy-production-read:{server_id}", label=f"production_read:{server_id}",
+                ticket="", expires=None, capability="read", servers=frozenset({server_id}),
+            ))
+    return tuple(exceptions)
+
+
+_LEGACY_EXCEPTION_TRANSLATORS = {
+    "code_write": _legacy_code_write_as_exceptions,
+    "ensemble_control": _legacy_live_window_as_exception,
+    "runner": _legacy_runner_hosts_as_exceptions,
+    "read": lambda policy, servers: _legacy_production_read_as_exceptions(servers),
+}
+
+
+def _exception_signature(exc):
+    """Identity used to detect the same logical exception defined twice.
+
+    Deliberately excludes id/label/ticket (those are free text) and includes
+    every scope dimension isc_ai.rules.ExceptionRule has, so a duplicate is
+    never missed just because it lacks one of the dimensions legacy routes
+    happen to use (roles/hosts/path_prefixes for code_write).
+    """
+    return (exc.capability, frozenset(exc.roles or ()), frozenset(exc.servers or ()),
+            frozenset(exc.hosts or ()), frozenset(exc.namespaces or ()), frozenset(exc.path_prefixes or ()))
+
+
+def _check_no_duplicate_exceptions(legacy_exceptions, rules_exceptions):
+    """Fail closed when a rules-file exception has the same signature as a
+    legacy-configured one: the two sources must never silently diverge."""
+    legacy_by_signature = {}
+    for exc in legacy_exceptions:
+        legacy_by_signature.setdefault(_exception_signature(exc), exc)
+    for exc in rules_exceptions:
+        other = legacy_by_signature.get(_exception_signature(exc))
+        if other is not None:
+            raise ConfigError(
+                f"isc-ai.rules.json exception '{exc.id}' ({exc.label}) duplicates the legacy exception "
+                f"'{other.label}' for capability '{exc.capability}'; keep only one."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -935,14 +1099,20 @@ def load_runtime_config(project_dir=None, environ=None, home=None):
     project_data = {}
     if config_path.is_file():
         project_data = read_json(config_path)
-        policy = parse_policy(project_data, project_dir)
+        from isc_ai import rules as _rules
+        rules_data = _rules.load_rules_data(project_dir)
+        policy = parse_policy(project_data, project_dir, rules_data=rules_data)
     else:
         notes.append(f"No project configuration at {config_path}; site policy is unconfigured "
                      "and code-write routes are blocked (run 'isc-ai init').")
         policy = SitePolicy()
     extra = environ.get(EXTRA_PACKAGES_ENV)
     if extra:
-        policy = policy.with_extra_packages(extra)
+        if policy.rules is not None:
+            notes.append(f"{EXTRA_PACKAGES_ENV} ignored: isc-ai.rules.json is present; "
+                         "add package grants there instead.")
+        else:
+            policy = policy.with_extra_packages(extra)
 
     servers = {}
     legacy_path = legacy_user_servers_path(home)
@@ -958,6 +1128,12 @@ def load_runtime_config(project_dir=None, environ=None, home=None):
     project_servers = project_data.get("servers", {})
     _expect(isinstance(project_servers, dict), "servers must be an object keyed by server id.")
     servers.update(project_servers)
+
+    if policy.rules is not None:
+        legacy_all = (_legacy_code_write_as_exceptions(policy) + _legacy_live_window_as_exception(policy)
+                     + _legacy_runner_hosts_as_exceptions(policy)
+                     + _legacy_production_read_as_exceptions(servers))
+        _check_no_duplicate_exceptions(legacy_all, policy.rules.exceptions)
 
     # The secret stores extend the environment for reference resolution, never replace
     # it: a value exported in the shell or by CI must keep winning. Imported here to

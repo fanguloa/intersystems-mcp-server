@@ -155,6 +155,74 @@ MESSAGES = {
     ),
     "flag.migrate.force": "overwrite the destination file",
 
+    # -- rules -------------------------------------------------------------
+    "cmd.rules.help": "explicit package grants and capability exceptions (isc-ai.rules.json)",
+    "cmd.rules.examples": (
+        "isc-ai rules list\n"
+        "isc-ai rules show base-direct-node\n"
+        "isc-ai rules check code_write --namespace UAT-SITE --host 10.0.0.1 --role UAT\n"
+        "isc-ai rules add --id ticket-123 --label \"UAT hotfix\" --ticket TCK-1 --expires 2026-12-31 "
+        "--capability code_write\n"
+        "isc-ai rules migrate --apply"
+    ),
+    "cmd.rules.list.help": "list every exception with its days-to-expiry",
+    "cmd.rules.list.examples": "isc-ai rules list",
+    "cmd.rules.show.help": "print one exception in full",
+    "cmd.rules.show.examples": "isc-ai rules show base-direct-node",
+    "cmd.rules.check.help": "evaluate one capability against a namespace/host/role/server/path-prefix",
+    "cmd.rules.check.examples": "isc-ai rules check code_write --namespace UAT-SITE --host 10.0.0.1 --role UAT",
+    "cmd.rules.validate.help": "report expired exceptions and package grants",
+    "cmd.rules.validate.examples": "isc-ai rules validate",
+    "cmd.rules.add.help": "add a new exception (plan by default, --apply to write)",
+    "cmd.rules.add.examples": (
+        "isc-ai rules add --id ticket-123 --label \"UAT hotfix\" --ticket TCK-1 --expires 2026-12-31 "
+        "--capability code_write --roles UAT --namespaces INT --path-prefixes /uat01\n"
+        "isc-ai rules add --id ticket-123 ... --apply"
+    ),
+    "cmd.rules.renew.help": "extend or shorten an exception's expiry (plan by default, --apply to write)",
+    "cmd.rules.renew.examples": (
+        "isc-ai rules renew base-direct-node --expires 2027-01-01 --apply\n"
+        "isc-ai rules renew --expiring-within 7 --expires 2027-01-01 --apply"
+    ),
+    "cmd.rules.remove.help": "remove an exception (plan by default, --apply to write)",
+    "cmd.rules.remove.examples": "isc-ai rules remove base-direct-node --apply",
+    "cmd.rules.apply.help": "apply a pending plan by its fingerprint (from a plan-only run or the iris_rules MCP tool)",
+    "cmd.rules.apply.examples": "isc-ai rules apply 3f9a1c2b7e4d5601",
+    "cmd.rules.migrate.help": "move legacy config.json/servers.json keys into isc-ai.rules.json",
+    "cmd.rules.migrate.examples": (
+        "isc-ai rules migrate\n"
+        "isc-ai rules migrate --apply"
+    ),
+    "flag.rules.id": "exception id",
+    "flag.rules.label": "human-readable label",
+    "flag.rules.ticket": "ticket reference",
+    "flag.rules.expires": "expiry date, YYYY-MM-DD",
+    "flag.rules.capability": "code_write, ensemble_control, runner or read",
+    "flag.rules.roles": "comma-separated roles",
+    "flag.rules.hosts": "comma-separated hosts",
+    "flag.rules.namespaces": "comma-separated namespaces",
+    "flag.rules.servers": "comma-separated server ids",
+    "flag.rules.path_prefixes": "comma-separated path prefixes",
+    "flag.rules.active_node_evidence_namespace": "namespace used to prove the node is active",
+    "flag.rules.runner_namespace": "runner capability only: the runner's destination namespace",
+    "flag.rules.apply": "write the change (default: only plan it)",
+    "flag.rules.expiring_within": "renew every exception expiring within this many days, instead of one by id",
+    "flag.rules.check_namespace": "namespace to check",
+    "flag.rules.check_host": "host to check",
+    "flag.rules.check_role": "role to check",
+    "flag.rules.check_server": "server id to check",
+    "flag.rules.check_path_prefix": "path prefix to check",
+    "msg.rules.list.none": "no exceptions are configured in isc-ai.rules.json",
+    "msg.rules.list.entry": "{name}: {detail} -- expires {value} ({count} day(s) left)",
+    "msg.rules.list.entry_expired": "{name}: {detail} -- EXPIRED on {value}",
+    "msg.rules.list.expiring_soon": "  WARNING: expires within 7 days",
+    "msg.rules.check.allowed": "allowed by: {names}",
+    "msg.rules.check.denied": "denied: no exception matches capability '{value}'",
+    "msg.rules.validate.ok": "no issues found",
+    "msg.rules.plan": "plan: {detail} (fingerprint {value}; run 'isc-ai rules apply {value}' or repeat with --apply)",
+    "msg.rules.applied": "applied: {detail}",
+    "msg.rules.apply.ok": "applied pending plan {value}",
+
     # -- facility --------------------------------------------------------
     "cmd.facility.help": "MCP.CCRMutation facility for the configured site",
     "cmd.facility.examples": (
@@ -360,12 +428,18 @@ MESSAGES = {
     "error.subcommand.servers": "a servers sub-command is required",
     "error.subcommand.secrets": "a secrets sub-command is required: list, set or unset",
     "error.subcommand.facility": "a facility sub-command is required",
+    "error.rules.id_or_expiring_within_required": "either an id or --expiring-within is required",
+    "error.rules.unknown_id": "no exception with id '{value}'",
+    "error.rules.plan_not_found": "no pending plan for fingerprint '{value}'",
+    "error.rules.plan_drift": "isc-ai.rules.json changed since this plan was made; re-plan before applying",
+    "error.subcommand.rules": "a rules sub-command is required",
     "error.upgrade_requires_sha": "--upgrade requires --expected-current-sha256",
     "error.sha_requires_upgrade": "--expected-current-sha256 requires --upgrade",
     "error.with_opencode_requires_apply": "--with-opencode requires --apply",
     "error.unsupported.config": "Unsupported config command.",
     "error.unsupported.servers": "Unsupported servers command.",
     "error.unsupported.facility": "Unsupported facility command.",
+    "error.unsupported.rules": "Unsupported rules command.",
     "error.unsupported.command": "Unsupported command.",
 
     # -- prefixes --------------------------------------------------------

@@ -246,21 +246,21 @@ def _live_window_today():
     return datetime.date.today()
 
 
-def _live_window_audit_path(window):
-    path = Path(window.backup_root) / LIVE_WINDOW_AUDIT_FILE
+def _live_window_audit_path(backup_root):
+    path = Path(backup_root) / LIVE_WINDOW_AUDIT_FILE
     if not path.is_absolute():
         raise LocalPolicyError("LIVE config window audit path must be absolute.")
     return path
 
 
-def _append_live_window_audit(window, record):
+def _append_live_window_audit(backup_root, record):
     """One JSON line per window operation, same locked appender as the runtime audit."""
-    _append_jsonl_locked(_live_window_audit_path(window), record)
+    _append_jsonl_locked(_live_window_audit_path(backup_root), record)
 
 
-def _live_window_audit_preflight(window):
+def _live_window_audit_preflight(backup_root):
     """Prove the audit file can be created, locked and appended BEFORE any write."""
-    path = _live_window_audit_path(window)
+    path = _live_window_audit_path(backup_root)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
     fd = os.open(str(path), flags, 0o600)
@@ -491,14 +491,14 @@ def _production_canonical_without(root, item_name, target, setting):
     return canonical(root)
 
 
-def _live_window_write_backup(window, namespace, production, lines, stamp=None):
+def _live_window_write_backup(backup_root, namespace, production, lines, stamp=None):
     """Immutable, timestamped local copy of the production class; never overwrites."""
     from datetime import datetime, timezone
     namespace = validate_namespace(namespace)
     AtelierClient._validate_identifier(production)
     if production.startswith("%"):
         raise LocalPolicyError("Production names under % are not configurable through the window.")
-    root = Path(window.backup_root)
+    root = Path(backup_root)
     directory = root / namespace
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if stamp is None:
@@ -1265,10 +1265,24 @@ class AtelierClient:
             return None, "CCR promotion requires a configured BASE, UAT, TEST, QA or LIVE role."
         if role == "BASE":
             if self._is_direct_ha_node():
+                exceptions = list(self.policy.effective_capability_exceptions(
+                    "code_write", namespace=self.namespace, host=self.host,
+                    path_prefix=self.path_prefix, role=role))
+                for exception in exceptions:
+                    if not exception.requires_active_node:
+                        return "BASE", f"Configured BASE write exception '{exception.label}'."
+                for exception in exceptions:
+                    if active_node(self.namespace, self._read_metadata_query):
+                        return "BASE", (f"Configured BASE write exception '{exception.label}' on the "
+                                        "ACTIVE mirror node (production jobs observed).")
+                    return None, (f"Direct HA node mutation blocked: node is not executing the production "
+                                 f"for '{exception.label}' (backup or stopped); use the active node or the configured VIP.")
                 return None, "Direct HA node mutation blocked; use the configured canonical VIP."
             return "BASE", "BASE environment route."
         if role == "UAT":
-            exceptions = list(self.policy.matching_write_exceptions(self.namespace, self.host, self.path_prefix))
+            exceptions = list(self.policy.effective_capability_exceptions(
+                "code_write", namespace=self.namespace, host=self.host,
+                path_prefix=self.path_prefix, role=role))
             for exception in exceptions:
                 if not exception.requires_active_node:
                     return "UAT_EXCEPTION", f"Configured UAT write exception '{exception.label}'."
@@ -1451,37 +1465,22 @@ class AtelierClient:
     # other gate: it never changes READ, RUNTIME, CODE WRITE or CCR decisions.
     # ------------------------------------------------------------------
 
-    def _live_window_prefix(self):
-        window = self.policy.live_config_window
-        return f"LIVE CONFIG WINDOW '{window.label}' (ticket {window.ticket})"
-
-    def is_live_config_allowed(self):
-        """LIVE CONFIG WINDOW gate for Ensemble configuration on production targets.
-
-        Allowed only if ALL hold: a project policy is loaded; routes.live_config_window
-        is configured and its expiry date (local MCP host date, inclusive) has not
-        passed; the target is production-flagged; namespace and host are listed in
-        the window; the host is a configured direct HA node; the READ gate is open
-        (production_read), because backups and verification read over REST; and
-        fresh evidence obtained NOW shows Interoperability jobs in the window's
-        active_node_evidence_namespace on this node (mirror primary). No environment
-        variable is consulted. Never a runner.
-        """
-        if not self.policy.configured:
-            return False, "LIVE CONFIG WINDOW blocked: no project configuration loaded."
-        window = self.policy.live_config_window
-        if window is None:
-            return False, "LIVE CONFIG WINDOW blocked: routes.live_config_window is not configured."
-        prefix = self._live_window_prefix()
-        if window.expiry_date() is None:
+    def _evaluate_live_config_window(self, window):
+        """Per-candidate LIVE CONFIG WINDOW checks (one ExceptionRule, legacy-
+        translated or from isc-ai.rules.json). Same checks and wording as
+        before this became a loop over candidates instead of one field."""
+        from isc_ai import rules as _rules
+        prefix = f"LIVE CONFIG WINDOW '{window.label}' (ticket {window.ticket})"
+        expiry_date = _rules._parse_expiry_date(window.expires)
+        if expiry_date is None:
             return False, f"{prefix} blocked: expires '{window.expires}' is not a valid YYYY-MM-DD date; window closed."
-        if not window.is_open(_live_window_today()):
+        if _live_window_today() > expiry_date:
             return False, f"{prefix} blocked: window expired on {window.expires} (local MCP host date)."
         if self._production_gate_reason() is None:
             return False, f"{prefix} blocked: the window applies to production targets only; it grants nothing here."
-        if self.namespace.upper() not in window.namespaces:
+        if self.namespace.upper() not in (window.namespaces or frozenset()):
             return False, f"{prefix} blocked: namespace '{self.namespace}' is not listed in the window."
-        if self.host.lower() not in window.hosts:
+        if self.host.lower() not in (window.hosts or frozenset()):
             return False, f"{prefix} blocked: host '{self.host}' is not listed in the window."
         if self.host.lower() not in {host.lower() for host in self.policy.direct_ha_nodes}:
             return False, f"{prefix} blocked: host '{self.host}' is not a configured direct HA node."
@@ -1496,12 +1495,43 @@ class AtelierClient:
         return True, (f"{prefix}: allowed on the ACTIVE node '{self.host}' (jobs observed in '{evidence}') "
                       f"for namespace '{self.namespace}', expires {window.expires}.")
 
+    def _resolve_open_live_config_window(self):
+        """The first ensemble_control candidate whose checks all pass, and the
+        reason; (None, reason) when none does (the last-checked reason, or the
+        "not configured" reason when there are no candidates at all)."""
+        if not self.policy.configured:
+            return None, "LIVE CONFIG WINDOW blocked: no project configuration loaded."
+        windows = self.policy.capability_candidates("ensemble_control")
+        if not windows:
+            return None, "LIVE CONFIG WINDOW blocked: routes.live_config_window is not configured."
+        reason = None
+        for window in windows:
+            allowed, reason = self._evaluate_live_config_window(window)
+            if allowed:
+                return window, reason
+        return None, reason
+
+    def is_live_config_allowed(self):
+        """LIVE CONFIG WINDOW gate for Ensemble configuration on production targets.
+
+        Allowed only if ALL hold: a project policy is loaded; an ensemble_control
+        exception (routes.live_config_window, or an isc-ai.rules.json exception)
+        is configured and its expiry date (local MCP host date, inclusive) has not
+        passed; the target is production-flagged; namespace and host are listed in
+        the window; the host is a configured direct HA node; the READ gate is open
+        (production_read), because backups and verification read over REST; and
+        fresh evidence obtained NOW shows Interoperability jobs in the window's
+        active_node_evidence_namespace on this node (mirror primary). No environment
+        variable is consulted. Never a runner.
+        """
+        window, reason = self._resolve_open_live_config_window()
+        return window is not None, reason
+
     def _issue_live_window_grant(self):
         """Evaluate the gate NOW and return (per-call grant, reason), or raise the denial."""
-        allowed, reason = self.is_live_config_allowed()
-        if not allowed:
+        window, reason = self._resolve_open_live_config_window()
+        if window is None:
             raise LocalPolicyError(reason)
-        window = self.policy.live_config_window
         grant = _LiveWindowGrant(window.label, window.ticket, self.base_url)
         self.__dict__.setdefault("_live_window_grants", []).append(grant)
         return grant, reason
@@ -2216,13 +2246,16 @@ class AtelierClient:
     def _runner_host_client(self):
         """Client whose namespace hosts the ephemeral runner for this target.
 
-        Only an explicit runtime.runner_hosts entry for this namespace AND the
-        configured role selects another namespace; otherwise the target itself hosts
-        the runner. The sibling shares host, port, prefix, scheme, credentials,
+        Only an explicit runner exception (legacy runtime.runner_hosts, or the
+        rules-file "runner" capability) for this namespace AND the configured
+        role selects another namespace; otherwise the target itself hosts the
+        runner. The sibling shares host, port, prefix, scheme, credentials,
         production flags and role; only namespace/base_url differ and stay canonical.
         """
         import copy
-        entry = self.policy.runner_host_for(self.namespace, self._configured_role(), self.host)
+        candidates = self.policy.effective_capability_exceptions(
+            "runner", namespace=self.namespace, host=self.host, role=self._configured_role())
+        entry = next((exc for exc in candidates if exc.runner_namespace), None)
         if entry is None:
             return self
         runner_namespace = validate_namespace(entry.runner_namespace)
@@ -4358,6 +4391,10 @@ class IRISMCPServer:
     # LIVE CONFIG WINDOW category: gated per action inside the handler ('get' ->
     # READ gate; 'set' -> LIVE CONFIG WINDOW gate, audited).
     LIVE_CONFIG_WINDOW_TOOLS = frozenset({"iris_ensemble_item_setting"})
+    # PROJECT category: no IRIS client at all; reads/edits the project's
+    # isc-ai.rules.json. Widening edits are plan-only (a human applies them
+    # with 'isc-ai rules apply <fingerprint>').
+    PROJECT_TOOLS = frozenset({"iris_rules"})
     # Runtime actions that, on a PRODUCTION target and only while a window is
     # configured, route through the LIVE CONFIG WINDOW gate instead of RUNTIME.
     _LIVE_WINDOW_RUNTIME_ACTIONS = {
@@ -4488,9 +4525,14 @@ class IRISMCPServer:
 
     def _get_client_direct(self, server_id, namespace_override=None):
         # Historical method name retained; aliases cannot bypass resolution here.
-        _, s = self._resolve_server_config(server_id)
+        current, s = self._resolve_server_config(server_id)
         self._validate_connection_config(s)
         target_namespace = namespace_override if namespace_override is not None else s["namespace"]
+        # production_read is the merged legacy-flag-or-rules-file "read" exception for
+        # this resolved server id; effective_capability_exceptions already covers the
+        # legacy per-server flag, so the raw config value is not read separately here.
+        production_read = bool(self.policy.effective_capability_exceptions(
+            "read", server=current, servers=self.servers))
         return AtelierClient(
             host=s["host"],
             port=s.get("port", 80),
@@ -4504,7 +4546,7 @@ class IRISMCPServer:
             policy=self.policy,
             scheme=s.get("scheme", "http"),
             verify_ssl=s.get("verify_ssl", True),
-            production_read=s.get("production_read", False),
+            production_read=production_read,
         )
 
     def get_client(self, server_id, namespace_override=None):
@@ -4587,15 +4629,18 @@ class IRISMCPServer:
 
     def _live_window_audit(self, client, server_id, tool, action, result, reason, production=None,
                            item=None, target=None, setting=None, before=None, after=None,
-                           ticket=None, extra=None):
+                           ticket=None, extra=None, window_label=None):
         """Append one audit line; returns a warning string when it could not be written.
 
         Never stores connection credentials; values of sensitive-looking settings are
-        recorded as SHA-256 digests only.
+        recorded as SHA-256 digests only. Works identically whether the ensemble_control
+        exception in force comes from routes.live_config_window or isc-ai.rules.json:
+        the backup/audit root is a per-project constant (self.policy.live_config_window_backup_root),
+        not a per-window one.
         """
-        window = self.policy.live_config_window
-        if window is None:
+        if not self.policy.capability_candidates("ensemble_control"):
             return None
+        backup_root = self.policy.live_config_window_backup_root
         sensitive = isinstance(setting, str) and _LIVE_WINDOW_SENSITIVE_SETTING_RE.search(setting)
 
         def shown(value):
@@ -4612,7 +4657,7 @@ class IRISMCPServer:
             "namespace": client.namespace, "tool": tool, "action": action,
             "production": production, "item": item, "target": target, "setting": setting,
             "before": shown(before), "after": shown(after), "ticket": ticket,
-            "window": window.label, "result": result, "reason": reason,
+            "window": window_label, "result": result, "reason": reason,
         }
         if extra:
             record.update(extra)
@@ -4620,7 +4665,7 @@ class IRISMCPServer:
             record = {key: (AtelierClient._redact_secret(value, password) if isinstance(value, str) else value)
                       for key, value in record.items()}
         try:
-            _append_live_window_audit(window, record)
+            _append_live_window_audit(backup_root, record)
         except Exception:
             log_debug("LIVE config window audit line could not be written.")
             return "WARNING: the LIVE config window audit line could not be written; record this operation manually."
@@ -4684,10 +4729,12 @@ class IRISMCPServer:
         ticket = arguments.get("ticket")
         fields = {"production": production, "item": item, "target": target, "setting": setting,
                   "ticket": ticket}
+        state = {"window_label": None}
 
         def finish(result, reason, is_error=True, before=None, after=None, extra=None, text=None):
             warning = self._live_window_audit(client, server_id, tool, "set", result, reason,
-                                              before=before, after=after, extra=extra, **fields)
+                                              window_label=state["window_label"], before=before,
+                                              after=after, extra=extra, **fields)
             body = text or f"LIVE CONFIG WINDOW set {result}: {reason}"
             if warning:
                 body += f"\n\n{warning}"
@@ -4696,9 +4743,10 @@ class IRISMCPServer:
             return {"isError": is_error or bool(warning), "structuredContent": structured,
                     "content": [{"type": "text", "text": body}]}
 
-        window = self.policy.live_config_window
-        if window is None:
-            return finish("DENIED", "routes.live_config_window is not configured; 'set' is never "
+        candidates = self.policy.capability_candidates("ensemble_control")
+        if not candidates:
+            return finish("DENIED", "No ensemble_control exception is configured (routes.live_config_window "
+                                    "is not configured and isc-ai.rules.json has none either); 'set' is never "
                                     "available outside the LIVE CONFIG WINDOW.")
         value = arguments.get("value")
         expected = arguments.get("expected_current_value")
@@ -4709,7 +4757,8 @@ class IRISMCPServer:
                 raise LocalPolicyError("'expected_current_value' is required for set (compare-and-set).")
             self._live_window_text_value(value, "value")
             self._live_window_text_value(expected, "expected_current_value")
-            if not isinstance(ticket, str) or ticket != window.ticket:
+            valid_tickets = {candidate.ticket for candidate in candidates}
+            if not isinstance(ticket, str) or ticket not in valid_tickets:
                 raise LocalPolicyError("'ticket' is required and must equal the window ticket.")
         except LocalPolicyError as exc:
             return finish("DENIED", str(exc))
@@ -4717,6 +4766,8 @@ class IRISMCPServer:
             grant, gate_reason = client._issue_live_window_grant()
         except LocalPolicyError as exc:
             return finish("DENIED", str(exc))
+        state["window_label"] = grant.label
+        backup_root = self.policy.live_config_window_backup_root
 
         try:
             before_lines = client.get_document(document, strict=True)
@@ -4736,12 +4787,12 @@ class IRISMCPServer:
         except LocalPolicyError as exc:
             return finish("FAILED", f"{exc} Nothing was written.", before=current)
         try:
-            _live_window_audit_preflight(window)
+            _live_window_audit_preflight(backup_root)
         except Exception:
             return finish("DENIED", "The LIVE config window audit file is not writable; nothing was written.",
                           before=current)
         try:
-            backup_path, backup_sha = _live_window_write_backup(window, client.namespace, production, before_lines)
+            backup_path, backup_sha = _live_window_write_backup(backup_root, client.namespace, production, before_lines)
         except Exception as exc:
             detail = str(exc) if isinstance(exc, LocalPolicyError) else "local I/O error"
             return finish("FAILED", f"Backup could not be written ({detail}); nothing was written.", before=current)
@@ -4815,13 +4866,14 @@ class IRISMCPServer:
     def _live_window_ensemble_control(self, name, client, server_id, arguments):
         """Production/component runtime actions on a production target, window-gated."""
         action = arguments.get("action")
-        window = self.policy.live_config_window
         prod_name = arguments.get("production_name")
         comp_name = arguments.get("component_name")
-        fields = {"production": prod_name, "item": comp_name, "ticket": window.ticket}
+        fields = {"production": prod_name, "item": comp_name, "ticket": None}
+        state = {"window_label": None}
 
         def finish(result, reason, text=None):
-            warning = self._live_window_audit(client, server_id, name, action, result, reason, **fields)
+            warning = self._live_window_audit(client, server_id, name, action, result, reason,
+                                              window_label=state["window_label"], **fields)
             body = text or f"LIVE CONFIG WINDOW {name} '{action}' {result}: {reason}"
             if warning:
                 body += f"\n\n{warning}"
@@ -4841,8 +4893,11 @@ class IRISMCPServer:
             grant, gate_reason = client._issue_live_window_grant()
         except LocalPolicyError as exc:
             return finish("DENIED", str(exc))
+        fields["ticket"] = grant.ticket
+        state["window_label"] = grant.label
+        backup_root = self.policy.live_config_window_backup_root
         try:
-            _live_window_audit_preflight(window)
+            _live_window_audit_preflight(backup_root)
         except Exception:
             return finish("DENIED", "The LIVE config window audit file is not writable; nothing was executed.")
 
@@ -4905,6 +4960,26 @@ class IRISMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
+                }
+            },
+            {
+                "name": "iris_rules",
+                "description": "Reads and edits the project's isc-ai.rules.json (package grants and expiring gate exceptions). No IRIS connection. 'list', 'show', 'check' and 'audit' only read. NARROWING edits apply directly with a backup and an audit line: 'remove', and 'renew' to an EARLIER or equal date. WIDENING edits never write: 'add' and 'renew' to a later date only save a plan and return a fingerprint that a HUMAN applies with `isc-ai rules apply <fingerprint>`; this tool cannot apply plans.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "show", "check", "audit", "remove", "renew", "add"]},
+                        "id": {"type": "string", "description": "Exception id (show, remove, renew)."},
+                        "expires": {"type": "string", "description": "New expiry YYYY-MM-DD (renew)."},
+                        "exception": {"type": "object", "description": "Full exception object (add): id, label, ticket, expires, capability and optional scope."},
+                        "capability": {"type": "string", "description": "check: code_write, ensemble_control, runner or read."},
+                        "namespace": {"type": "string"},
+                        "host": {"type": "string"},
+                        "role": {"type": "string"},
+                        "server": {"type": "string", "description": "Configured server id (check)."},
+                        "path_prefix": {"type": "string"},
+                    },
+                    "required": ["action"],
                 }
             },
             {
@@ -6319,6 +6394,95 @@ class IRISMCPServer:
         return self._write_document(client, doc_name, content, arguments, failure_verb="patch",
                                     header_lines=(f"**Patch applied**: {actual} replacement(s)",))
 
+    def _handle_rules_tool(self, arguments):
+        """iris_rules: read the rules; apply only NARROWING edits; plan widening ones."""
+        import datetime as _datetime
+        from isc_ai import rules as isc_rules
+        from isc_ai import rules_write as isc_rules_write
+
+        if self.runtime_config is None or self.runtime_config.project_dir is None:
+            raise LocalPolicyError("iris_rules requires a loaded project configuration.")
+        project_dir = Path(self.runtime_config.project_dir)
+        ruleset = self.policy.rules or isc_rules.RuleSet(packages={}, exceptions=())
+        action = arguments.get("action")
+        today = _datetime.date.today()
+
+        def reply(data, text):
+            return {"structuredContent": data, "content": [{"type": "text", "text": text}]}
+
+        def find(exc_id):
+            match = next((exc for exc in ruleset.exceptions if exc.id == exc_id), None)
+            if match is None:
+                raise LocalPolicyError(f"No exception with id '{exc_id}'.")
+            return match
+
+        def audit(record):
+            record = dict(record, ts=_datetime.datetime.now(_datetime.timezone.utc).isoformat(), via="mcp")
+            _append_jsonl_locked(project_dir / ".backup" / "rules" / "audit.jsonl", record)
+
+        def written(executed, fp, plan):
+            if executed:
+                return reply({"applied": True, "fingerprint": None, "description": plan["description"]},
+                             f"Applied (narrowing): {plan['description']}. A backup of isc-ai.rules.json was kept.")
+            return reply({"applied": False, "fingerprint": fp, "description": plan["description"]},
+                         f"Not applied (widening): {plan['description']}.\n"
+                         f"A human must review and run: `isc-ai rules apply {fp}`")
+
+        try:
+            if action == "list":
+                rows, lines = [], []
+                for exc in ruleset.exceptions:
+                    expiry = isc_rules._parse_expiry_date(exc.expires)
+                    days = None if expiry is None else (expiry - today).days
+                    rows.append(dict(isc_rules.exception_to_dict(exc), days_left=days))
+                    state = "EXPIRED" if days is None or days < 0 else f"{days} day(s) left"
+                    lines.append(f"- `{exc.id}` [{exc.capability}] {exc.label} (ticket {exc.ticket}) "
+                                 f"until {exc.expires}: {state}")
+                return reply({"exceptions": rows}, "\n".join(lines) or "No exceptions configured.")
+            if action == "show":
+                match = find(arguments.get("id"))
+                return reply({"exception": isc_rules.exception_to_dict(match)}, json.dumps(
+                    isc_rules.exception_to_dict(match), indent=2, ensure_ascii=False))
+            if action == "check":
+                capability = arguments.get("capability")
+                if capability not in isc_rules.EXCEPTION_CAPABILITIES:
+                    raise LocalPolicyError(f"capability must be one of {sorted(isc_rules.EXCEPTION_CAPABILITIES)}.")
+                matches = self.policy.effective_capability_exceptions(
+                    capability, namespace=arguments.get("namespace"), host=arguments.get("host"),
+                    role=arguments.get("role"), server=arguments.get("server"),
+                    path_prefix=arguments.get("path_prefix"), servers=self.servers)
+                ids = [exc.id for exc in matches]
+                text = (f"Allowed for {capability} by: {', '.join(ids)}" if ids
+                        else f"No active exception allows {capability} for that scope.")
+                return reply({"allowed": bool(ids), "matches": ids}, text)
+            if action == "audit":
+                issues = isc_rules.validate(ruleset, today=today)
+                soon = [exc.id for exc in isc_rules.expiring_within(ruleset, 7, today=today)]
+                text = "\n".join(issues + [f"Expires within 7 days: {', '.join(soon)}" if soon else ""]).strip()
+                return reply({"issues": issues, "expiring_within_7_days": soon}, text or "No issues.")
+            if action == "remove":
+                exc_id = arguments.get("id")
+                find(exc_id)
+                audit({"action": "remove", "id": exc_id})
+                return written(*isc_rules_write.remove_exception(project_dir, exc_id, apply=True))
+            if action == "renew":
+                exc_id, expires = arguments.get("id"), arguments.get("expires")
+                find(exc_id)
+                base = isc_rules_write.read_rules_data(project_dir)
+                narrowing = isc_rules_write.is_renewal_narrowing(base, exc_id, expires)
+                if narrowing:
+                    audit({"action": "renew", "id": exc_id, "expires": expires})
+                return written(*isc_rules_write.renew_exception(project_dir, exc_id, expires, apply=narrowing))
+            if action == "add":
+                item = arguments.get("exception")
+                if not isinstance(item, dict):
+                    raise LocalPolicyError("add requires an 'exception' object.")
+                return written(*isc_rules_write.add_exception(project_dir, item, apply=False))
+        except (ConfigError, ValueError) as exc:
+            raise LocalPolicyError(str(exc)) from None
+        raise LocalPolicyError("Unknown iris_rules action; use list, show, check, audit, remove, renew or add "
+                               "(plans are applied only by a human with 'isc-ai rules apply').")
+
     def handle_tool_call(self, name, arguments):
         try:
             # Validate locally before client construction or any metadata request.
@@ -6402,6 +6566,9 @@ class IRISMCPServer:
                             "id", "canonical_server_id", "status", "host", "port", "path_prefix", "namespace", "reason"))
                         output += "| " + " | ".join(_markdown_table_cell(value) for value in fields) + " |\n"
                 return {"structuredContent": {"servers": result_servers}, "content": [{"type": "text", "text": output}]}
+
+            if name == "iris_rules":
+                return self._handle_rules_tool(arguments)
                 
             server_id = arguments.get("server_id")
             canonical_server_id, server_config = self._resolve_server_config(server_id)
@@ -6531,7 +6698,7 @@ class IRISMCPServer:
 
             if name in self.LIVE_CONFIG_WINDOW_TOOLS:
                 return self._live_window_item_setting(client, server_id, arguments)
-            if (self.policy.live_config_window is not None
+            if (self.policy.capability_candidates("ensemble_control")
                     and arguments.get("action") in self._LIVE_WINDOW_RUNTIME_ACTIONS.get(name, ())
                     and client._production_gate_reason() is not None):
                 return self._live_window_ensemble_control(name, client, server_id, arguments)

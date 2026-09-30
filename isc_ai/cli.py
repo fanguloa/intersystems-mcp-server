@@ -21,6 +21,7 @@ verdicts, facility states and configuration keys stay English in every language.
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -38,6 +39,9 @@ from isc_ai import docs as isc_docs
 from isc_ai import suite as isc_suite
 from isc_ai import wizard as isc_wizard
 from isc_ai import migrate as isc_migrate
+from isc_ai import rules as isc_rules
+from isc_ai import rules_migrate as isc_rules_migrate
+from isc_ai import rules_write as isc_rules_write
 from isc_ai.audit import run_audit
 from isc_ai.ccr_discovery import LocalPolicyError
 from isc_ai.config import ConfigError
@@ -290,6 +294,63 @@ def _parse_cli_args(argv):
     p_migrate = _add_parser(servers_sub, "migrate", "cmd.servers.migrate.help", "cmd.servers.migrate.examples")
     p_migrate.add_argument("--force", action="store_true", help=t("flag.migrate.force"))
 
+    p_rules = _add_parser(sub, "rules", "cmd.rules.help", "cmd.rules.examples")
+    _add_project_dir(p_rules)
+    rules_sub = p_rules.add_subparsers(dest="rules_command", title=t("chrome.group.subcommands"),
+                                       metavar="<sub-command>")
+
+    _add_parser(rules_sub, "list", "cmd.rules.list.help", "cmd.rules.list.examples")
+
+    p_rshow = _add_parser(rules_sub, "show", "cmd.rules.show.help", "cmd.rules.show.examples")
+    p_rshow.add_argument("id")
+
+    p_rcheck = _add_parser(rules_sub, "check", "cmd.rules.check.help", "cmd.rules.check.examples")
+    p_rcheck.add_argument("capability", choices=sorted(isc_rules.EXCEPTION_CAPABILITIES))
+    p_rcheck.add_argument("--namespace", help=t("flag.rules.check_namespace"))
+    p_rcheck.add_argument("--host", help=t("flag.rules.check_host"))
+    p_rcheck.add_argument("--role", help=t("flag.rules.check_role"))
+    p_rcheck.add_argument("--server", help=t("flag.rules.check_server"))
+    p_rcheck.add_argument("--path-prefix", help=t("flag.rules.check_path_prefix"))
+
+    _add_parser(rules_sub, "validate", "cmd.rules.validate.help", "cmd.rules.validate.examples")
+
+    p_radd = _add_parser(rules_sub, "add", "cmd.rules.add.help", "cmd.rules.add.examples")
+    p_radd.add_argument("--id", required=True, help=t("flag.rules.id"))
+    p_radd.add_argument("--label", required=True, help=t("flag.rules.label"))
+    p_radd.add_argument("--ticket", required=True, help=t("flag.rules.ticket"))
+    p_radd.add_argument("--expires", required=True, help=t("flag.rules.expires"))
+    p_radd.add_argument("--capability", required=True, choices=sorted(isc_rules.EXCEPTION_CAPABILITIES),
+                        help=t("flag.rules.capability"))
+    p_radd.add_argument("--roles", help=t("flag.rules.roles"))
+    p_radd.add_argument("--hosts", help=t("flag.rules.hosts"))
+    p_radd.add_argument("--namespaces", help=t("flag.rules.namespaces"))
+    p_radd.add_argument("--servers", help=t("flag.rules.servers"))
+    p_radd.add_argument("--path-prefixes", dest="path_prefixes", help=t("flag.rules.path_prefixes"))
+    p_radd.add_argument("--requires-active-node", dest="requires_active_node", action="store_true", default=None)
+    p_radd.add_argument("--no-requires-active-node", dest="requires_active_node", action="store_false")
+    p_radd.add_argument("--active-node-evidence-namespace", dest="active_node_evidence_namespace",
+                        help=t("flag.rules.active_node_evidence_namespace"))
+    p_radd.add_argument("--runner-namespace", dest="runner_namespace", help=t("flag.rules.runner_namespace"))
+    p_radd.add_argument("--apply", action="store_true", help=t("flag.rules.apply"))
+
+    p_rrenew = _add_parser(rules_sub, "renew", "cmd.rules.renew.help", "cmd.rules.renew.examples")
+    p_rrenew.add_argument("id", nargs="?")
+    p_rrenew.add_argument("--expiring-within", dest="expiring_within", type=_positive_int,
+                          help=t("flag.rules.expiring_within"))
+    p_rrenew.add_argument("--expires", required=True, help=t("flag.rules.expires"))
+    p_rrenew.add_argument("--apply", action="store_true", help=t("flag.rules.apply"))
+
+    p_rremove = _add_parser(rules_sub, "remove", "cmd.rules.remove.help", "cmd.rules.remove.examples")
+    p_rremove.add_argument("id")
+    p_rremove.add_argument("--apply", action="store_true", help=t("flag.rules.apply"))
+
+    p_rapply = _add_parser(rules_sub, "apply", "cmd.rules.apply.help", "cmd.rules.apply.examples")
+    p_rapply.add_argument("fingerprint")
+
+    p_rmigrate = _add_parser(rules_sub, "migrate", "cmd.rules.migrate.help", "cmd.rules.migrate.examples")
+    p_rmigrate.add_argument("--apply", action="store_true", help=t("flag.migrate.apply"))
+    p_rmigrate.add_argument("--no-user", action="store_true", help=t("flag.migrate.no_user"))
+
     p_facility = _add_parser(sub, "facility", "cmd.facility.help", "cmd.facility.examples")
     _add_project_dir(p_facility)
     facility_sub = p_facility.add_subparsers(dest="facility_command", title=t("chrome.group.subcommands"),
@@ -390,6 +451,10 @@ def _parse_cli_args(argv):
         _require_subcommand(p_config, t("error.subcommand.config"))
     if args.command == "servers" and not args.servers_command:
         _require_subcommand(p_servers, t("error.subcommand.servers"))
+    if args.command == "rules" and not args.rules_command:
+        _require_subcommand(p_rules, t("error.subcommand.rules"))
+    if args.command == "rules" and args.rules_command == "renew" and not args.id and args.expiring_within is None:
+        p_rrenew.error(t("error.rules.id_or_expiring_within_required"))
     if args.command == "secrets" and not args.secrets_command:
         _require_subcommand(p_secrets, t("error.subcommand.secrets"))
     if args.command == "facility":
@@ -646,6 +711,133 @@ def _run_config(args):
     raise ConfigError(t("error.unsupported.config"))
 
 
+def _exception_to_dict(exc):
+    """ExceptionRule as a JSON-serializable dict: frozensets become sorted lists."""
+    return isc_rules.exception_to_dict(exc)
+
+
+def _report_rules_write(executed, fp, plan):
+    if executed:
+        _emit(t("msg.rules.applied", detail=plan["description"]))
+    else:
+        _emit(t("msg.rules.plan", detail=plan["description"], value=fp))
+    return 0
+
+
+def _run_rules(args):
+    project_dir, _ = _project_paths(args)
+    command = args.rules_command
+
+    if command == "list":
+        runtime = isc_config.load_runtime_config(project_dir)
+        ruleset = runtime.policy.rules or isc_rules.RuleSet(packages={}, exceptions=())
+        if not ruleset.exceptions:
+            _emit(t("msg.rules.list.none"))
+            return 0
+        today = datetime.date.today()
+        for exc in ruleset.exceptions:
+            detail = f"{exc.label} / {exc.capability}"
+            expiry_date = isc_rules._parse_expiry_date(exc.expires)
+            if expiry_date is None or today > expiry_date:
+                _emit(t("msg.rules.list.entry_expired", name=exc.id, detail=detail, value=exc.expires))
+            else:
+                days_left = (expiry_date - today).days
+                _emit(t("msg.rules.list.entry", name=exc.id, detail=detail, value=exc.expires, count=days_left))
+                if days_left <= 7:
+                    _emit(t("msg.rules.list.expiring_soon"))
+        return 0
+
+    if command == "show":
+        runtime = isc_config.load_runtime_config(project_dir)
+        ruleset = runtime.policy.rules or isc_rules.RuleSet(packages={}, exceptions=())
+        match = next((exc for exc in ruleset.exceptions if exc.id == args.id), None)
+        if match is None:
+            raise ConfigError(t("error.rules.unknown_id", value=args.id))
+        _emit(json.dumps(_exception_to_dict(match), indent=2, ensure_ascii=False))
+        return 0
+
+    if command == "check":
+        runtime = isc_config.load_runtime_config(project_dir)
+        matches = runtime.policy.effective_capability_exceptions(
+            args.capability, namespace=args.namespace, host=args.host, role=args.role,
+            server=args.server, path_prefix=args.path_prefix, servers=runtime.servers)
+        if matches:
+            names = ", ".join(exc.id for exc in matches)
+            _emit(t("msg.rules.check.allowed", names=names))
+            return 0
+        _emit(t("msg.rules.check.denied", value=args.capability))
+        return 1
+
+    if command == "validate":
+        runtime = isc_config.load_runtime_config(project_dir)
+        ruleset = runtime.policy.rules or isc_rules.RuleSet(packages={}, exceptions=())
+        issues = isc_rules.validate(ruleset)
+        if issues:
+            for issue in issues:
+                _emit(issue)
+            return 1
+        _emit(t("msg.rules.validate.ok"))
+        return 0
+
+    if command == "add":
+        item = {"id": args.id, "label": args.label, "ticket": args.ticket, "expires": args.expires,
+                "capability": args.capability}
+        for key, raw in (("roles", args.roles), ("hosts", args.hosts), ("namespaces", args.namespaces),
+                         ("servers", args.servers), ("path_prefixes", args.path_prefixes)):
+            if raw:
+                item[key] = [value.strip() for value in raw.split(",") if value.strip()]
+        if args.requires_active_node is not None:
+            item["requires_active_node"] = args.requires_active_node
+        if args.active_node_evidence_namespace:
+            item["active_node_evidence_namespace"] = args.active_node_evidence_namespace
+        if args.runner_namespace:
+            item["runner_namespace"] = args.runner_namespace
+        try:
+            executed, fp, plan = isc_rules_write.add_exception(project_dir, item, apply=args.apply)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
+        return _report_rules_write(executed, fp, plan)
+
+    if command == "renew":
+        try:
+            if args.expiring_within is not None:
+                (executed, fp, plan), targets = isc_rules_write.renew_expiring_within(
+                    project_dir, args.expiring_within, args.expires, apply=args.apply)
+                if not targets:
+                    _emit(t("msg.rules.list.none"))
+                    return 0
+            else:
+                executed, fp, plan = isc_rules_write.renew_exception(
+                    project_dir, args.id, args.expires, apply=args.apply)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
+        return _report_rules_write(executed, fp, plan)
+
+    if command == "remove":
+        try:
+            executed, fp, plan = isc_rules_write.remove_exception(project_dir, args.id, apply=args.apply)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
+        return _report_rules_write(executed, fp, plan)
+
+    if command == "apply":
+        ok, reason = isc_rules_write.apply_pending_plan(project_dir, args.fingerprint)
+        if not ok:
+            if reason == "drift":
+                raise ConfigError(t("error.rules.plan_drift"))
+            raise ConfigError(t("error.rules.plan_not_found", value=args.fingerprint))
+        _emit(t("msg.rules.apply.ok", value=args.fingerprint))
+        return 0
+
+    if command == "migrate":
+        runner = isc_rules_migrate.apply if args.apply else isc_rules_migrate.plan
+        report = runner(project_dir, home=None if args.no_user else Path.home())
+        _emit(json.dumps(report, indent=2, ensure_ascii=False))
+        return 1 if report["conflicts"] else 0
+
+    raise ConfigError(t("error.unsupported.rules"))
+
+
 def _validate(project_dir):
     runtime = isc_config.load_runtime_config(project_dir)
     problems = []
@@ -882,6 +1074,8 @@ def main(argv=None):
             return _run_config(args)
         if args.command == "servers":
             return _run_servers(args)
+        if args.command == "rules":
+            return _run_rules(args)
         if args.command == "facility":
             return _run_facility(args)
         if args.command == "audit":
