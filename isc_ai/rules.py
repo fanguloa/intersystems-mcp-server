@@ -357,5 +357,8 @@ def validate(ruleset, today=None):
 
 def render_template(site_prefix):
     """The baseline package grant written by 'isc-ai init'/'rules migrate'
-    into a fresh isc-ai.rules.json: Custom.{SITE}.* with SITE resolved."""
-    return {"prefix": f"Custom.{site_prefix}.*"}
+    into a fresh isc-ai.rules.json: Custom.{SITE} with SITE resolved (the
+    trailing wildcard is implicit in PackageRule.allows(), the same contract
+    every other prefix grant already uses -- a literal '.*' would fail
+    _validate_package_prefix's pattern)."""
+    return {"prefix": f"Custom.{site_prefix}"}

@@ -355,6 +355,10 @@ class SitePolicy:
         for grant in self.packages.get(namespace, ()):
             if grant.allows(document_name, stem, role):
                 return True
+        if self.rules is not None:
+            for grant in self.rules.packages.get(namespace, ()):
+                if grant.allows(document_name, stem, role):
+                    return True
         return False
 
     def with_extra_packages(self, raw):

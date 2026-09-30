@@ -239,7 +239,16 @@ class MatchingExceptionsTests(HermeticTestCase):
 
 class RenderTemplateTests(HermeticTestCase):
     def test_produces_the_baseline_prefix_grant(self):
-        self.assertEqual(isc_rules.render_template("ACHS"), {"prefix": "Custom.ACHS.*"})
+        self.assertEqual(isc_rules.render_template("ACHS"), {"prefix": "Custom.ACHS"})
+
+    def test_the_rendered_grant_actually_parses_and_matches(self):
+        # Regression: an earlier version rendered "Custom.ACHS.*" literally, which
+        # _validate_package_prefix rejects (no '*' in the allowed prefix pattern).
+        ruleset = isc_rules.parse_rules({"version": 1, "packages": {
+            "BASE-ACHS": [isc_rules.render_template("ACHS")],
+        }})
+        grant = ruleset.packages["BASE-ACHS"][0]
+        self.assertTrue(grant.allows("Custom.ACHS.Foo.cls", "Custom.ACHS.Foo", "BASE"))
 
 
 if __name__ == "__main__":
