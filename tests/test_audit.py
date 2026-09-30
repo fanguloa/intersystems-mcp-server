@@ -284,6 +284,142 @@ class InstallPinTests(AuditTestCase):
         report = self.run_audit()
         self.assertNotIn("VERSION_UNPINNED", self.codes(report, "beta"))
 
+    def test_a_pep508_exact_pin_counts_as_pinned(self):
+        # uvx accepts `pkg==1.2.3` as well as `pkg@1.2.3`; both are the same exact pin.
+        suite = self.suite_with_servers({
+            "gamma-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "uvx", "args": ["gamma-pkg==1.2.3"]},
+                "aliases": [], "settings": {},
+                "install": {"manager": "uvx", "pin": "1.2.3", "pinned": True},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertNotIn("VERSION_UNPINNED", self.codes(report, "gamma-pkg"))
+        self.assertNotIn("INSTALL_PIN_MISMATCH", self.codes(report, "gamma-pkg"))
+
+    def test_a_version_range_is_not_a_pin(self):
+        suite = self.suite_with_servers({
+            "delta-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "uvx", "args": ["delta-pkg>=1.2.3"]},
+                "aliases": [], "settings": {},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertIn("VERSION_UNPINNED", self.codes(report, "delta-pkg"))
+
+    def test_a_wildcard_after_double_equals_is_not_a_pin(self):
+        suite = self.suite_with_servers({
+            "delta-pkg": {
+                "transport": "stdio",
+                "launch": {"command": "uvx", "args": ["delta-pkg==1.*"]},
+                "aliases": [], "settings": {},
+            },
+        })
+        report = self.run_audit_with_suite(suite)
+        self.assertIn("VERSION_UNPINNED", self.codes(report, "delta-pkg"))
+
+    def test_version_extraction_per_reference_form(self):
+        cases = {
+            "gamma-pkg==1.2.3": "1.2.3",
+            "gamma-pkg===1.2.3": "1.2.3",   # PEP 440 arbitrary equality is still exact
+            "gamma-pkg==1.*": None,
+            "gamma-pkg==1.2.*": None,
+            "gamma-pkg==": None,
+            "gamma-pkg>=1.2.3": None,
+            # The `@` forms behave exactly as before.
+            "markitdown-mcp@0.0.1a4": "0.0.1a4",
+            "@playwright/mcp@latest": "latest",
+            "@playwright/mcp": None,
+            "mcp-atlassian": None,
+        }
+        for arg, expected in cases.items():
+            with self.subTest(arg=arg):
+                self.assertEqual(audit._version_from_arg(arg), expected)
+
+
+class PackagedAtlassianEntryTests(unittest.TestCase):
+    """The shipped atlassian-cloud entry: Jira Cloud required, Confluence optional and separate.
+
+    Read from the packaged baseline itself, because that file is what `isc-ai suite`
+    writes and what `isc-ai mcp audit` compares against. Classification runs on
+    synthetic entries with `which` stubbed, so the result does not depend on whether
+    uvx happens to be installed on the machine running the tests.
+    """
+
+    NAME = "atlassian-cloud"
+    LIVE_ENV = {
+        "JIRA_URL": "https://example.atlassian.net",
+        "JIRA_USERNAME": "someone@example.invalid",
+        "JIRA_API_TOKEN": "{env:JIRA_API_TOKEN}",
+        "CONFLUENCE_URL": "https://confluence.example.invalid",
+        "CONFLUENCE_PERSONAL_TOKEN": "{env:CONFLUENCE_PERSONAL_TOKEN}",
+    }
+
+    def setUp(self):
+        self.suite = audit.load_suite()
+        self.spec = self.suite["servers"][self.NAME]
+
+    def classify(self, env, args=("mcp-atlassian==0.23.1",)):
+        entry = audit.Entry(client="opencode", scope="user", path=Path("opencode.json"),
+                            name=self.NAME, command="uvx", args=tuple(args), env=dict(env))
+        suite = {"clients": {}, "servers": {self.NAME: self.spec}, "out_of_suite": {}}
+        findings = []
+        with patch("isc_ai.audit.shutil.which", side_effect=lambda name: f"/probe/{name}"):
+            servers, _ = audit.classify(suite, [entry], findings, clients=["opencode"])
+        return servers[self.NAME]["opencode"]["state"], [item.code for item in findings]
+
+    def test_the_launch_is_pinned_and_agrees_with_the_install_pin(self):
+        self.assertEqual(audit._launch_of(self.spec), ("uvx", ("mcp-atlassian==0.23.1",), ""))
+        self.assertEqual(self.spec["requires"]["on_path"], ["uvx"])
+        self.assertEqual(self.spec["install"]["pin"], "0.23.1")
+        self.assertTrue(self.spec["install"]["pinned"])
+        findings = []
+        audit._audit_install(self.NAME, self.spec, findings)
+        self.assertEqual(findings, [], "a pinned launch that matches its install pin is clean")
+
+    def test_jira_settings_stay_required_and_confluence_settings_are_optional(self):
+        settings = self.spec["settings"]
+        for key in ("JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"):
+            self.assertTrue(settings[key]["required"], key)
+        self.assertFalse(settings["CONFLUENCE_URL"]["required"])
+        self.assertFalse(settings["CONFLUENCE_URL"]["secret"])
+        self.assertFalse(settings["CONFLUENCE_PERSONAL_TOKEN"]["required"])
+        self.assertTrue(settings["CONFLUENCE_PERSONAL_TOKEN"]["secret"])
+        self.assertNotIn("default", settings["CONFLUENCE_URL"], "a site URL is a value, not baseline")
+
+    def test_confluence_names_no_longer_alias_the_jira_settings(self):
+        aliases = {alias for rule in self.spec["settings"].values() for alias in rule.get("aliases", [])}
+        self.assertFalse({alias for alias in aliases if alias.startswith("CONFLUENCE_")})
+        # The legacy Claude 'jira' entry keeps resolving through its ATLASSIAN_* names.
+        self.assertEqual(self.spec["settings"]["JIRA_URL"]["aliases"], ["ATLASSIAN_BASE_URL", "ATLASSIAN_URL"])
+        self.assertEqual(self.spec["settings"]["JIRA_USERNAME"]["aliases"],
+                         ["ATLASSIAN_EMAIL", "ATLASSIAN_USERNAME"])
+        self.assertEqual(self.spec["settings"]["JIRA_API_TOKEN"]["aliases"], ["ATLASSIAN_API_TOKEN"])
+
+    def test_jira_cloud_with_confluence_server_is_clean(self):
+        state, codes = self.classify(self.LIVE_ENV)
+        self.assertEqual(state, "OK")
+        for code in ("SERVER_DRIFT", "SETTING_MISSING", "SETTING_UNKNOWN", "SECRET_LEAK",
+                     "VERSION_UNPINNED", "INSTALL_PIN_MISMATCH"):
+            self.assertNotIn(code, codes)
+
+    def test_jira_alone_is_clean_because_confluence_is_optional(self):
+        jira_only = {key: value for key, value in self.LIVE_ENV.items() if key.startswith("JIRA_")}
+        state, codes = self.classify(jira_only)
+        self.assertEqual(state, "OK")
+        self.assertNotIn("SETTING_MISSING", codes)
+
+    def test_a_literal_confluence_token_is_still_a_leak(self):
+        state, codes = self.classify(dict(self.LIVE_ENV, CONFLUENCE_PERSONAL_TOKEN="literal-pat-value"))
+        self.assertIn("SECRET_LEAK", codes)
+
+    def test_an_unpinned_client_entry_is_reported_as_drift(self):
+        state, codes = self.classify(self.LIVE_ENV, args=("mcp-atlassian",))
+        self.assertIn("DRIFT", state)
+        self.assertIn("SERVER_DRIFT", codes)
+
 
 class InstallIntegrityTests(AuditTestCase):
     """S3 fix round: git-sourced installs pin a tag AND an expected commit SHA.

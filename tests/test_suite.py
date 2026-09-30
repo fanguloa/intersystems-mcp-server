@@ -248,5 +248,112 @@ class TransactionTests(SuiteTestCase):
         self.assertFalse(self.opencode.exists(), "check must not create anything")
 
 
+class AtlassianEntryTests(SuiteTestCase):
+    """The packaged atlassian-cloud entry, written into synthetic client files.
+
+    Jira Cloud and a separate Confluence (Server/Data Center here) is a real shape:
+    writing the suite must keep it, not fold the Confluence values into the Jira ones.
+    """
+
+    NAME = "atlassian-cloud"
+
+    def setUp(self):
+        super().setUp()
+        from isc_ai import audit
+        spec = audit.load_suite()["servers"][self.NAME]
+        suite = json.loads(json.dumps(SUITE))
+        suite["servers"] = {self.NAME: spec}
+        self.suite_file.write_text(json.dumps(suite), encoding="utf-8")
+
+    def live_entry(self):
+        return {"type": "local", "command": ["uvx", "mcp-atlassian==0.23.1"], "enabled": True,
+                "environment": {
+                    "JIRA_URL": "https://example.atlassian.net",
+                    "JIRA_USERNAME": "someone@example.invalid",
+                    "JIRA_API_TOKEN": "{env:JIRA_API_TOKEN}",
+                    "CONFLUENCE_URL": "https://confluence.example.invalid",
+                    "CONFLUENCE_PERSONAL_TOKEN": "{env:CONFLUENCE_PERSONAL_TOKEN}",
+                }}
+
+    def test_the_launch_is_written_pinned(self):
+        self.apply()
+        self.assertEqual(self.read(self.opencode)["mcp"][self.NAME]["command"],
+                         ["uvx", "mcp-atlassian==0.23.1"])
+        claude = self.read(self.claude)["mcpServers"][self.NAME]
+        self.assertEqual((claude["command"], claude["args"]), ("uvx", ["mcp-atlassian==0.23.1"]))
+
+    def test_jira_cloud_with_confluence_server_is_left_as_it_is(self):
+        self.write(self.opencode, {"mcp": {self.NAME: self.live_entry()}})
+        report = self.apply()
+        self.assertFalse([change for change in report["changes"] if change.startswith("opencode:")],
+                         "the suite must not revert a configuration that already matches it")
+        self.assertEqual(self.read(self.opencode)["mcp"][self.NAME], self.live_entry())
+
+    def test_the_confluence_url_is_its_own_value_not_the_jira_url(self):
+        self.write(self.opencode, {"mcp": {self.NAME: self.live_entry()}})
+        self.apply()
+        env = self.read(self.claude)["mcpServers"][self.NAME]["env"]
+        self.assertEqual(env["JIRA_URL"], "https://example.atlassian.net")
+        self.assertEqual(env["CONFLUENCE_URL"], "https://confluence.example.invalid")
+        self.assertEqual(env["CONFLUENCE_PERSONAL_TOKEN"], "${CONFLUENCE_PERSONAL_TOKEN}")
+
+    def test_without_confluence_nothing_is_invented_or_asked_for(self):
+        report = self.apply()
+        env = self.read(self.opencode)["mcp"][self.NAME]["environment"]
+        self.assertNotIn("CONFLUENCE_URL", env, "an optional value nobody has is omitted, not guessed")
+        unknown = [item for item in report["findings"] if item["code"] == "VALUE_UNKNOWN"]
+        self.assertFalse([item for item in unknown if "CONFLUENCE_" in item["message"]])
+        # An optional secret nobody configured is not referenced in any client, and
+        # VS Code gets no input for it, so nobody is prompted for a token they lack.
+        self.assertNotIn("CONFLUENCE_PERSONAL_TOKEN", env)
+        self.assertNotIn("CONFLUENCE_PERSONAL_TOKEN", self.read(self.claude)["mcpServers"][self.NAME]["env"])
+        vscode = self.read(self.vscode)
+        self.assertNotIn("CONFLUENCE_PERSONAL_TOKEN", vscode["servers"][self.NAME]["env"])
+        self.assertNotIn("confluence-personal-token", [item["id"] for item in vscode.get("inputs", [])])
+
+    def test_required_secrets_are_still_rendered_with_nothing_configured(self):
+        self.apply()
+        self.assertEqual(self.read(self.opencode)["mcp"][self.NAME]["environment"]["JIRA_API_TOKEN"],
+                         "{env:JIRA_API_TOKEN}")
+        self.assertEqual(self.read(self.claude)["mcpServers"][self.NAME]["env"]["JIRA_API_TOKEN"],
+                         "${JIRA_API_TOKEN}")
+        vscode = self.read(self.vscode)
+        self.assertEqual(vscode["servers"][self.NAME]["env"]["JIRA_API_TOKEN"], "${input:jira-api-token}")
+        self.assertIn("jira-api-token", [item["id"] for item in vscode["inputs"]])
+
+    def test_an_optional_secret_one_client_has_is_kept_and_propagated(self):
+        self.write(self.opencode, {"mcp": {self.NAME: self.live_entry()}})
+        report = self.apply()
+        self.assertEqual(self.read(self.opencode)["mcp"][self.NAME]["environment"]["CONFLUENCE_PERSONAL_TOKEN"],
+                         "{env:CONFLUENCE_PERSONAL_TOKEN}")
+        vscode = self.read(self.vscode)
+        self.assertEqual(vscode["servers"][self.NAME]["env"]["CONFLUENCE_PERSONAL_TOKEN"],
+                         "${input:confluence-personal-token}")
+        self.assertIn("vscode: declared secret input 'confluence-personal-token'", report["changes"])
+
+    def test_an_optional_literal_secret_counts_as_configured_and_becomes_a_reference(self):
+        self.write(self.claude, {"mcpServers": {self.NAME: {"command": "uvx", "args": ["mcp-atlassian==0.23.1"],
+                                                            "env": {"CONFLUENCE_PERSONAL_TOKEN": "literal-pat"}}}})
+        self.apply()
+        self.assertNotIn("literal-pat", self.claude.read_text(encoding="utf-8"))
+        self.assertEqual(self.read(self.claude)["mcpServers"][self.NAME]["env"]["CONFLUENCE_PERSONAL_TOKEN"],
+                         "${CONFLUENCE_PERSONAL_TOKEN}")
+
+    def test_a_global_claude_entry_keeps_confluence_apart_from_jira(self):
+        # The legacy global 'jira' entry: ATLASSIAN_* still renames to JIRA_*, but a
+        # CONFLUENCE_URL next to it is no longer folded into (and overwriting) JIRA_URL.
+        global_file = self.home / ".claude.json"
+        self.write(global_file, {"mcpServers": {"jira": {"command": "uvx", "args": ["mcp-atlassian"], "env": {
+            "ATLASSIAN_BASE_URL": "https://example.atlassian.net",
+            "CONFLUENCE_URL": "https://confluence.example.invalid",
+        }}}})
+        before = global_file.read_bytes()
+        report = isc_suite.prune_claude_global(home=self.home, environ=self.environ,
+                                               suite_path=self.suite_file, apply_changes=False)
+        self.assertIn("renamed setting ATLASSIAN_BASE_URL to JIRA_URL in 'jira'", report["changes"])
+        self.assertFalse([change for change in report["changes"] if "CONFLUENCE_URL" in change])
+        self.assertEqual(global_file.read_bytes(), before, "check mode writes nothing")
+
+
 if __name__ == "__main__":
     unittest.main()
