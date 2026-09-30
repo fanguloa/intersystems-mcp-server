@@ -1257,10 +1257,24 @@ class AtelierClient:
             return None, "CCR promotion requires the configured UAT role."
         if role == "BASE":
             if self._is_direct_ha_node():
+                exceptions = list(self.policy.effective_capability_exceptions(
+                    "code_write", namespace=self.namespace, host=self.host,
+                    path_prefix=self.path_prefix, role=role))
+                for exception in exceptions:
+                    if not exception.requires_active_node:
+                        return "BASE", f"Configured BASE write exception '{exception.label}'."
+                for exception in exceptions:
+                    if active_node(self.namespace, self._read_metadata_query):
+                        return "BASE", (f"Configured BASE write exception '{exception.label}' on the "
+                                        "ACTIVE mirror node (production jobs observed).")
+                    return None, (f"Direct HA node mutation blocked: node is not executing the production "
+                                 f"for '{exception.label}' (backup or stopped); use the active node or the configured VIP.")
                 return None, "Direct HA node mutation blocked; use the configured canonical VIP."
             return "BASE", "BASE environment route."
         if role == "UAT":
-            exceptions = list(self.policy.matching_write_exceptions(self.namespace, self.host, self.path_prefix))
+            exceptions = list(self.policy.effective_capability_exceptions(
+                "code_write", namespace=self.namespace, host=self.host,
+                path_prefix=self.path_prefix, role=role))
             for exception in exceptions:
                 if not exception.requires_active_node:
                     return "UAT_EXCEPTION", f"Configured UAT write exception '{exception.label}'."
@@ -1439,37 +1453,22 @@ class AtelierClient:
     # other gate: it never changes READ, RUNTIME, CODE WRITE or CCR decisions.
     # ------------------------------------------------------------------
 
-    def _live_window_prefix(self):
-        window = self.policy.live_config_window
-        return f"LIVE CONFIG WINDOW '{window.label}' (ticket {window.ticket})"
-
-    def is_live_config_allowed(self):
-        """LIVE CONFIG WINDOW gate for Ensemble configuration on production targets.
-
-        Allowed only if ALL hold: a project policy is loaded; routes.live_config_window
-        is configured and its expiry date (local MCP host date, inclusive) has not
-        passed; the target is production-flagged; namespace and host are listed in
-        the window; the host is a configured direct HA node; the READ gate is open
-        (production_read), because backups and verification read over REST; and
-        fresh evidence obtained NOW shows Interoperability jobs in the window's
-        active_node_evidence_namespace on this node (mirror primary). No environment
-        variable is consulted. Never a runner.
-        """
-        if not self.policy.configured:
-            return False, "LIVE CONFIG WINDOW blocked: no project configuration loaded."
-        window = self.policy.live_config_window
-        if window is None:
-            return False, "LIVE CONFIG WINDOW blocked: routes.live_config_window is not configured."
-        prefix = self._live_window_prefix()
-        if window.expiry_date() is None:
+    def _evaluate_live_config_window(self, window):
+        """Per-candidate LIVE CONFIG WINDOW checks (one ExceptionRule, legacy-
+        translated or from isc-ai.rules.json). Same checks and wording as
+        before this became a loop over candidates instead of one field."""
+        from isc_ai import rules as _rules
+        prefix = f"LIVE CONFIG WINDOW '{window.label}' (ticket {window.ticket})"
+        expiry_date = _rules._parse_expiry_date(window.expires)
+        if expiry_date is None:
             return False, f"{prefix} blocked: expires '{window.expires}' is not a valid YYYY-MM-DD date; window closed."
-        if not window.is_open(_live_window_today()):
+        if _live_window_today() > expiry_date:
             return False, f"{prefix} blocked: window expired on {window.expires} (local MCP host date)."
         if self._production_gate_reason() is None:
             return False, f"{prefix} blocked: the window applies to production targets only; it grants nothing here."
-        if self.namespace.upper() not in window.namespaces:
+        if self.namespace.upper() not in (window.namespaces or frozenset()):
             return False, f"{prefix} blocked: namespace '{self.namespace}' is not listed in the window."
-        if self.host.lower() not in window.hosts:
+        if self.host.lower() not in (window.hosts or frozenset()):
             return False, f"{prefix} blocked: host '{self.host}' is not listed in the window."
         if self.host.lower() not in {host.lower() for host in self.policy.direct_ha_nodes}:
             return False, f"{prefix} blocked: host '{self.host}' is not a configured direct HA node."
@@ -1484,12 +1483,43 @@ class AtelierClient:
         return True, (f"{prefix}: allowed on the ACTIVE node '{self.host}' (jobs observed in '{evidence}') "
                       f"for namespace '{self.namespace}', expires {window.expires}.")
 
+    def _resolve_open_live_config_window(self):
+        """The first ensemble_control candidate whose checks all pass, and the
+        reason; (None, reason) when none does (the last-checked reason, or the
+        "not configured" reason when there are no candidates at all)."""
+        if not self.policy.configured:
+            return None, "LIVE CONFIG WINDOW blocked: no project configuration loaded."
+        windows = self.policy.capability_candidates("ensemble_control")
+        if not windows:
+            return None, "LIVE CONFIG WINDOW blocked: routes.live_config_window is not configured."
+        reason = None
+        for window in windows:
+            allowed, reason = self._evaluate_live_config_window(window)
+            if allowed:
+                return window, reason
+        return None, reason
+
+    def is_live_config_allowed(self):
+        """LIVE CONFIG WINDOW gate for Ensemble configuration on production targets.
+
+        Allowed only if ALL hold: a project policy is loaded; an ensemble_control
+        exception (routes.live_config_window, or an isc-ai.rules.json exception)
+        is configured and its expiry date (local MCP host date, inclusive) has not
+        passed; the target is production-flagged; namespace and host are listed in
+        the window; the host is a configured direct HA node; the READ gate is open
+        (production_read), because backups and verification read over REST; and
+        fresh evidence obtained NOW shows Interoperability jobs in the window's
+        active_node_evidence_namespace on this node (mirror primary). No environment
+        variable is consulted. Never a runner.
+        """
+        window, reason = self._resolve_open_live_config_window()
+        return window is not None, reason
+
     def _issue_live_window_grant(self):
         """Evaluate the gate NOW and return (per-call grant, reason), or raise the denial."""
-        allowed, reason = self.is_live_config_allowed()
-        if not allowed:
+        window, reason = self._resolve_open_live_config_window()
+        if window is None:
             raise LocalPolicyError(reason)
-        window = self.policy.live_config_window
         grant = _LiveWindowGrant(window.label, window.ticket, self.base_url)
         self.__dict__.setdefault("_live_window_grants", []).append(grant)
         return grant, reason
@@ -2185,13 +2215,16 @@ class AtelierClient:
     def _runner_host_client(self):
         """Client whose namespace hosts the ephemeral runner for this target.
 
-        Only an explicit runtime.runner_hosts entry for this namespace AND the
-        configured role selects another namespace; otherwise the target itself hosts
-        the runner. The sibling shares host, port, prefix, scheme, credentials,
+        Only an explicit runner exception (legacy runtime.runner_hosts, or the
+        rules-file "runner" capability) for this namespace AND the configured
+        role selects another namespace; otherwise the target itself hosts the
+        runner. The sibling shares host, port, prefix, scheme, credentials,
         production flags and role; only namespace/base_url differ and stay canonical.
         """
         import copy
-        entry = self.policy.runner_host_for(self.namespace, self._configured_role(), self.host)
+        candidates = self.policy.effective_capability_exceptions(
+            "runner", namespace=self.namespace, host=self.host, role=self._configured_role())
+        entry = next((exc for exc in candidates if exc.runner_namespace), None)
         if entry is None:
             return self
         runner_namespace = validate_namespace(entry.runner_namespace)
@@ -4438,9 +4471,14 @@ class IRISMCPServer:
 
     def _get_client_direct(self, server_id, namespace_override=None):
         # Historical method name retained; aliases cannot bypass resolution here.
-        _, s = self._resolve_server_config(server_id)
+        current, s = self._resolve_server_config(server_id)
         self._validate_connection_config(s)
         target_namespace = namespace_override if namespace_override is not None else s["namespace"]
+        # production_read is the merged legacy-flag-or-rules-file "read" exception for
+        # this resolved server id; effective_capability_exceptions already covers the
+        # legacy per-server flag, so the raw config value is not read separately here.
+        production_read = bool(self.policy.effective_capability_exceptions(
+            "read", server=current, servers=self.servers))
         return AtelierClient(
             host=s["host"],
             port=s.get("port", 80),
@@ -4454,7 +4492,7 @@ class IRISMCPServer:
             policy=self.policy,
             scheme=s.get("scheme", "http"),
             verify_ssl=s.get("verify_ssl", True),
-            production_read=s.get("production_read", False),
+            production_read=production_read,
         )
 
     def get_client(self, server_id, namespace_override=None):

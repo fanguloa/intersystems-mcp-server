@@ -104,6 +104,18 @@ class EffectiveCapabilityExceptionsTests(RulesConfigTestCase):
         self.assertEqual(policy.effective_capability_exceptions("read", server="other", servers=servers), ())
 
 
+class ProjectDiscoveryUnaffectedTests(RulesConfigTestCase):
+    def test_rules_file_presence_does_not_change_project_root_resolution(self):
+        self.write_config(reference_policy_data())
+        nested = self.project / "BASE-ACHS" / "src" / "Custom"
+        nested.mkdir(parents=True)
+        without_rules = iris_mcp_config.find_project_root(nested)
+        self.write_rules({"version": 1})
+        with_rules = iris_mcp_config.find_project_root(nested)
+        self.assertEqual(without_rules, self.project)
+        self.assertEqual(with_rules, self.project)
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

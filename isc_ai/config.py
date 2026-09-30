@@ -308,6 +308,19 @@ class SitePolicy:
 
     # -- Explicit exceptions (isc-ai.rules.json) -------------------------
 
+    def capability_candidates(self, capability, servers=None):
+        """Legacy-translated + rules-file exceptions for one capability, as-is
+        (no scope/expiry filtering). Used by gates whose own per-item checks
+        need to see - and report on - an expired or out-of-scope candidate
+        (the LIVE CONFIG WINDOW gate's distinct diagnostics), unlike
+        effective_capability_exceptions which narrows and drops expired ones."""
+        from isc_ai import rules as _rules
+        translator = _LEGACY_EXCEPTION_TRANSLATORS.get(capability)
+        legacy = translator(self, servers) if translator is not None else ()
+        from_rules = tuple(exc for exc in (self.rules.exceptions if self.rules is not None else ())
+                           if exc.capability == capability)
+        return legacy + from_rules
+
     def effective_capability_exceptions(self, capability, *, namespace=None, host=None, role=None,
                                         server=None, path_prefix=None, servers=None, today=None):
         """Unified, narrowed view of every exception for one capability.
@@ -321,11 +334,7 @@ class SitePolicy:
         per server entry, not in this policy).
         """
         from isc_ai import rules as _rules
-        translator = _LEGACY_EXCEPTION_TRANSLATORS.get(capability)
-        legacy = translator(self, servers) if translator is not None else ()
-        from_rules = tuple(exc for exc in (self.rules.exceptions if self.rules is not None else ())
-                           if exc.capability == capability)
-        combined = _rules.RuleSet(packages={}, exceptions=legacy + from_rules)
+        combined = _rules.RuleSet(packages={}, exceptions=self.capability_candidates(capability, servers))
         return _rules.matching_exceptions(combined, capability, namespace=namespace, host=host,
                                           role=role, server=server, path_prefix=path_prefix, today=today)
 
