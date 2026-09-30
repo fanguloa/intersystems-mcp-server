@@ -171,6 +171,71 @@ class ExceptionRuleParsingTests(HermeticTestCase):
             self._exception(bogus="x")
 
 
+class MatchingExceptionsTests(HermeticTestCase):
+    """R2/R3 query helpers: matching_exceptions, expiring_within, validate."""
+
+    def _ruleset(self):
+        return isc_rules.parse_rules({"version": 1, "exceptions": [
+            {"id": "cw-1", "label": "BASE direct-node", "ticket": "T1", "expires": "2099-01-01",
+             "capability": "code_write", "roles": ["BASE"], "hosts": ["10.1.1.1"]},
+            {"id": "en-1", "label": "LIVE window", "ticket": "T2", "expires": "2020-01-01",
+             "capability": "ensemble_control"},
+            {"id": "rd-1", "label": "server read", "ticket": "T3", "expires": "2099-06-15",
+             "capability": "read", "servers": ["achslive"]},
+        ]})
+
+    def test_filters_by_capability_and_excludes_expired(self):
+        ruleset = self._ruleset()
+        code_write = isc_rules.matching_exceptions(ruleset, "code_write", today=datetime.date(2026, 1, 1))
+        self.assertEqual([exc.id for exc in code_write], ["cw-1"])
+        ensemble = isc_rules.matching_exceptions(ruleset, "ensemble_control", today=datetime.date(2026, 1, 1))
+        self.assertEqual(ensemble, ())
+
+    def test_filters_by_scope_when_dimension_is_supplied(self):
+        ruleset = self._ruleset()
+        matched = isc_rules.matching_exceptions(ruleset, "code_write", role="BASE", host="10.1.1.1",
+                                                today=datetime.date(2026, 1, 1))
+        self.assertEqual([exc.id for exc in matched], ["cw-1"])
+        unmatched = isc_rules.matching_exceptions(ruleset, "code_write", role="UAT",
+                                                   today=datetime.date(2026, 1, 1))
+        self.assertEqual(unmatched, ())
+        by_server = isc_rules.matching_exceptions(ruleset, "read", server="achslive",
+                                                   today=datetime.date(2026, 1, 1))
+        self.assertEqual([exc.id for exc in by_server], ["rd-1"])
+        self.assertEqual(isc_rules.matching_exceptions(ruleset, "read", server="other",
+                                                        today=datetime.date(2026, 1, 1)), ())
+
+    def test_expiring_within_finds_entries_in_the_window(self):
+        ruleset = self._ruleset()
+        soon = isc_rules.expiring_within(ruleset, 7, today=datetime.date(2099, 6, 10))
+        self.assertEqual([exc.id for exc in soon], ["rd-1"])
+        none_yet = isc_rules.expiring_within(ruleset, 7, today=datetime.date(2026, 1, 1))
+        self.assertEqual(none_yet, ())
+
+    def test_validate_reports_expired_exceptions_and_grants(self):
+        ruleset = isc_rules.parse_rules({
+            "version": 1,
+            "packages": {"USER": [{"prefix": "Custom.Foo", "expires": "2020-01-01"}]},
+            "exceptions": [{"id": "e1", "label": "Stale", "ticket": "T", "expires": "2020-06-01",
+                            "capability": "code_write"}],
+        })
+        issues = isc_rules.validate(ruleset, today=datetime.date(2026, 1, 1))
+        self.assertEqual(len(issues), 2)
+        self.assertTrue(any("e1" in issue for issue in issues))
+        self.assertTrue(any("Custom.Foo" in issue for issue in issues))
+
+    def test_validate_reports_nothing_when_healthy(self):
+        ruleset = isc_rules.parse_rules({"version": 1, "exceptions": [
+            {"id": "e1", "label": "Fresh", "ticket": "T", "expires": "2099-01-01", "capability": "code_write"},
+        ]})
+        self.assertEqual(isc_rules.validate(ruleset, today=datetime.date(2026, 1, 1)), [])
+
+
+class RenderTemplateTests(HermeticTestCase):
+    def test_produces_the_baseline_prefix_grant(self):
+        self.assertEqual(isc_rules.render_template("ACHS"), {"prefix": "Custom.ACHS.*"})
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

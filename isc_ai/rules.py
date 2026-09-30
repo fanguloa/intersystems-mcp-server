@@ -278,3 +278,73 @@ def load_rules(project_dir, site_prefix=None):
     if data is None:
         return None
     return parse_rules(data, site_prefix=site_prefix)
+
+
+# ---------------------------------------------------------------------------
+# Query helpers
+# ---------------------------------------------------------------------------
+
+def _scope_matches(scope_set, value, normalize=None):
+    """A criterion narrows the result only when the caller supplies a value
+    for that dimension; an unscoped rule (scope_set is None) always matches."""
+    if scope_set is None or value is None:
+        return True
+    if normalize is not None:
+        value = normalize(value)
+    return value in scope_set
+
+
+def matching_exceptions(ruleset, capability, *, namespace=None, host=None, role=None,
+                        server=None, path_prefix=None, today=None):
+    """Effective, non-expired exceptions for one capability, optionally
+    narrowed by namespace/host/role/server/path_prefix."""
+    matches = []
+    for exc in ruleset.exceptions:
+        if exc.capability != capability or exc.is_expired(today):
+            continue
+        if not _scope_matches(exc.roles, role, str.upper):
+            continue
+        if not _scope_matches(exc.servers, server):
+            continue
+        if not _scope_matches(exc.hosts, host, str.lower):
+            continue
+        if not _scope_matches(exc.namespaces, namespace, str.upper):
+            continue
+        if not _scope_matches(exc.path_prefixes, path_prefix):
+            continue
+        matches.append(exc)
+    return tuple(matches)
+
+
+def expiring_within(ruleset, days, today=None):
+    """Exceptions whose expiry falls within [today, today + days], inclusive."""
+    today = today or datetime.date.today()
+    horizon = today + datetime.timedelta(days=days)
+    result = []
+    for exc in ruleset.exceptions:
+        date = _parse_expiry_date(exc.expires)
+        if date is not None and today <= date <= horizon:
+            result.append(exc)
+    return tuple(result)
+
+
+def validate(ruleset, today=None):
+    """Human-readable issue list: expired exceptions and expired package
+    grants. Empty list means the rule set has no known problems."""
+    today = today or datetime.date.today()
+    issues = []
+    for exc in ruleset.exceptions:
+        if exc.is_expired(today):
+            issues.append(f"Exception '{exc.id}' ({exc.label}) expired on {exc.expires}.")
+    for namespace, grants in ruleset.packages.items():
+        for grant in grants:
+            if grant.expires is not None and _is_expired(grant.expires, today):
+                label = grant.prefix or grant.class_name or grant.document
+                issues.append(f"Package grant '{label}' in namespace '{namespace}' expired on {grant.expires}.")
+    return issues
+
+
+def render_template(site_prefix):
+    """The baseline package grant written by 'isc-ai init'/'rules migrate'
+    into a fresh isc-ai.rules.json: Custom.{SITE}.* with SITE resolved."""
+    return {"prefix": f"Custom.{site_prefix}.*"}
