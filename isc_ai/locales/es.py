@@ -156,6 +156,74 @@ MESSAGES = {
     ),
     "flag.migrate.force": "sobrescribe el archivo de destino",
 
+    # -- rules ---------------------------------------------------------
+    "cmd.rules.help": "concesiones de paquetes y excepciones de capacidad explícitas (isc-ai.rules.json)",
+    "cmd.rules.examples": (
+        "isc-ai rules list\n"
+        "isc-ai rules show base-direct-node\n"
+        "isc-ai rules check code_write --namespace UAT-SITE --host 10.0.0.1 --role UAT\n"
+        "isc-ai rules add --id ticket-123 --label \"parche UAT\" --ticket TCK-1 --expires 2026-12-31 "
+        "--capability code_write\n"
+        "isc-ai rules migrate --apply"
+    ),
+    "cmd.rules.list.help": "lista cada excepción con sus días para expirar",
+    "cmd.rules.list.examples": "isc-ai rules list",
+    "cmd.rules.show.help": "muestra una excepción completa",
+    "cmd.rules.show.examples": "isc-ai rules show base-direct-node",
+    "cmd.rules.check.help": "evalúa una capacidad contra un namespace/host/role/server/path-prefix",
+    "cmd.rules.check.examples": "isc-ai rules check code_write --namespace UAT-SITE --host 10.0.0.1 --role UAT",
+    "cmd.rules.validate.help": "reporta excepciones y concesiones de paquetes vencidas",
+    "cmd.rules.validate.examples": "isc-ai rules validate",
+    "cmd.rules.add.help": "agrega una excepción nueva (planifica por defecto, --apply para escribir)",
+    "cmd.rules.add.examples": (
+        "isc-ai rules add --id ticket-123 --label \"parche UAT\" --ticket TCK-1 --expires 2026-12-31 "
+        "--capability code_write --roles UAT --namespaces INT --path-prefixes /uat01\n"
+        "isc-ai rules add --id ticket-123 ... --apply"
+    ),
+    "cmd.rules.renew.help": "extiende o acorta el vencimiento de una excepción (planifica por defecto, --apply para escribir)",
+    "cmd.rules.renew.examples": (
+        "isc-ai rules renew base-direct-node --expires 2027-01-01 --apply\n"
+        "isc-ai rules renew --expiring-within 7 --expires 2027-01-01 --apply"
+    ),
+    "cmd.rules.remove.help": "elimina una excepción (planifica por defecto, --apply para escribir)",
+    "cmd.rules.remove.examples": "isc-ai rules remove base-direct-node --apply",
+    "cmd.rules.apply.help": "aplica un plan pendiente por su huella (de una corrida solo-plan o de la herramienta MCP iris_rules)",
+    "cmd.rules.apply.examples": "isc-ai rules apply 3f9a1c2b7e4d5601",
+    "cmd.rules.migrate.help": "mueve claves heredadas de config.json/servers.json a isc-ai.rules.json",
+    "cmd.rules.migrate.examples": (
+        "isc-ai rules migrate\n"
+        "isc-ai rules migrate --apply"
+    ),
+    "flag.rules.id": "id de la excepción",
+    "flag.rules.label": "etiqueta legible",
+    "flag.rules.ticket": "referencia del ticket",
+    "flag.rules.expires": "fecha de vencimiento, YYYY-MM-DD",
+    "flag.rules.capability": "code_write, ensemble_control, runner o read",
+    "flag.rules.roles": "roles separados por coma",
+    "flag.rules.hosts": "hosts separados por coma",
+    "flag.rules.namespaces": "namespaces separados por coma",
+    "flag.rules.servers": "ids de servidor separados por coma",
+    "flag.rules.path_prefixes": "prefijos de ruta separados por coma",
+    "flag.rules.active_node_evidence_namespace": "namespace usado para probar que el nodo está activo",
+    "flag.rules.runner_namespace": "solo capacidad runner: namespace de destino del runner",
+    "flag.rules.apply": "escribe el cambio (por defecto: solo lo planifica)",
+    "flag.rules.expiring_within": "renueva cada excepción que vence dentro de estos días, en vez de una por id",
+    "flag.rules.check_namespace": "namespace a evaluar",
+    "flag.rules.check_host": "host a evaluar",
+    "flag.rules.check_role": "role a evaluar",
+    "flag.rules.check_server": "id de servidor a evaluar",
+    "flag.rules.check_path_prefix": "prefijo de ruta a evaluar",
+    "msg.rules.list.none": "no hay excepciones configuradas en isc-ai.rules.json",
+    "msg.rules.list.entry": "{name}: {detail} -- expira {value} ({count} día(s) restante(s))",
+    "msg.rules.list.entry_expired": "{name}: {detail} -- VENCIDA el {value}",
+    "msg.rules.list.expiring_soon": "  ADVERTENCIA: expira dentro de 7 días",
+    "msg.rules.check.allowed": "permitido por: {names}",
+    "msg.rules.check.denied": "denegado: ninguna excepción coincide con la capacidad '{value}'",
+    "msg.rules.validate.ok": "no se encontraron problemas",
+    "msg.rules.plan": "plan: {detail} (huella {value}; ejecute 'isc-ai rules apply {value}' o repita con --apply)",
+    "msg.rules.applied": "aplicado: {detail}",
+    "msg.rules.apply.ok": "plan pendiente {value} aplicado",
+
     # -- facility --------------------------------------------------------
     "cmd.facility.help": "facilidad MCP.CCRMutation del sitio configurado",
     "cmd.facility.examples": (
@@ -362,12 +430,18 @@ MESSAGES = {
     "error.subcommand.servers": "se requiere un subcomando de servers",
     "error.subcommand.secrets": "se requiere un subcomando de secrets: list, set o unset",
     "error.subcommand.facility": "se requiere un subcomando de facility",
+    "error.rules.id_or_expiring_within_required": "se requiere un id o --expiring-within",
+    "error.rules.unknown_id": "no existe una excepción con id '{value}'",
+    "error.rules.plan_not_found": "no hay un plan pendiente para la huella '{value}'",
+    "error.rules.plan_drift": "isc-ai.rules.json cambió desde que se hizo este plan; replanifique antes de aplicar",
+    "error.subcommand.rules": "se requiere un subcomando de rules",
     "error.upgrade_requires_sha": "--upgrade requiere --expected-current-sha256",
     "error.sha_requires_upgrade": "--expected-current-sha256 requiere --upgrade",
     "error.with_opencode_requires_apply": "--with-opencode requiere --apply",
     "error.unsupported.config": "Comando de config no soportado.",
     "error.unsupported.servers": "Comando de servers no soportado.",
     "error.unsupported.facility": "Comando de facility no soportado.",
+    "error.unsupported.rules": "Comando de rules no soportado.",
     "error.unsupported.command": "Comando no soportado.",
 
     # -- prefijos --------------------------------------------------------
