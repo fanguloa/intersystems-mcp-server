@@ -214,12 +214,12 @@
       }
     },
     "atlassian-cloud": {
-      "summary": "Jira and Confluence over the Atlassian Cloud API.",
+      "summary": "Jira Cloud plus optional Confluence (Cloud or Server/Data Center).",
       "transport": "stdio",
       "launch": {
         "command": "uvx",
         "args": [
-          "mcp-atlassian"
+          "mcp-atlassian==0.23.1"
         ]
       },
       "requires": {
@@ -240,8 +240,7 @@
           "required": true,
           "aliases": [
             "ATLASSIAN_BASE_URL",
-            "ATLASSIAN_URL",
-            "CONFLUENCE_URL"
+            "ATLASSIAN_URL"
           ]
         },
         "JIRA_USERNAME": {
@@ -250,8 +249,7 @@
           "required": true,
           "aliases": [
             "ATLASSIAN_EMAIL",
-            "ATLASSIAN_USERNAME",
-            "CONFLUENCE_USERNAME"
+            "ATLASSIAN_USERNAME"
           ]
         },
         "JIRA_API_TOKEN": {
@@ -259,12 +257,30 @@
           "secret": true,
           "required": true,
           "aliases": [
-            "ATLASSIAN_API_TOKEN",
-            "CONFLUENCE_API_TOKEN"
+            "ATLASSIAN_API_TOKEN"
           ]
+        },
+        "CONFLUENCE_URL": {
+          "scope": "global",
+          "secret": false,
+          "required": false
+        },
+        "CONFLUENCE_PERSONAL_TOKEN": {
+          "scope": "global",
+          "secret": true,
+          "required": false
         }
       },
-      "notes": "The Claude entry named 'jira' uses ATLASSIAN_* variable names for the same three values; the audit reports that as a naming drift, not as a second server.",
+      "notes": "Jira is required; Confluence is optional and has its own settings because it may live on another instance with other credentials. A CONFLUENCE_URL outside *.atlassian.net is Server/Data Center and needs a personal access token in CONFLUENCE_PERSONAL_TOKEN: the Jira Cloud API token is not accepted there. The ISC Confluence (usconfluence.iscinternal.com) is reachable only over the Cisco Secure Client VPN; without it DNS fails and only the Confluence tools are missing, Jira keeps working. Confluence Cloud with its own basic-auth credentials (CONFLUENCE_USERNAME/CONFLUENCE_API_TOKEN) is intentionally not declared; add those settings if a site needs it. The Claude entry named 'jira' uses ATLASSIAN_* names for the Jira values; the audit reports that as a naming drift, not as a second server. The version is pinned on purpose so a new release never runs with your token unreviewed: bump it explicitly.",
+      "install": {
+        "manager": "uvx",
+        "argv": [
+          "uvx",
+          "mcp-atlassian==0.23.1"
+        ],
+        "pin": "0.23.1",
+        "pinned": true
+      },
       "verify": {
         "min_tools": 5
       }

@@ -269,9 +269,15 @@ def _version_from_arg(arg):
     Handles bare package refs (`markitdown-mcp@0.0.1a4`) and npm-scoped ones
     (`@playwright/mcp@latest`), where a leading `@` names the scope, not a
     version boundary: only an `@` found after the first character counts.
+    A PEP 508 exact pin (`mcp-atlassian==0.23.1`, the form uvx also accepts, or the
+    arbitrary-equality `===`) counts too; a wildcard (`==1.*`) or a range such as `>=`
+    is not a pin and stays unpinned.
     """
     if not isinstance(arg, str):
         return None
+    if "==" in arg:
+        version = arg.rsplit("==", 1)[1]
+        return version if version and "*" not in version else None
     tail = arg[1:] if arg.startswith("@") else arg
     if "@" not in tail:
         return None

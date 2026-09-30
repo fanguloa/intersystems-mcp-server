@@ -58,13 +58,38 @@ def _known_values(entries, spec):
     return values
 
 
-def _environment(spec, client_config, values, findings, server_name, client):
-    """Build the env block for one client, plus any VS Code input declarations."""
+def _configured_keys(entries, spec):
+    """Declared settings some client entry already sets, as a literal or a reference.
+
+    Same sources and alias resolution as `_known_values`, but a reference counts here:
+    for a secret the reference is the configuration, there is no value to carry.
+    """
+    declared = spec.get("settings") or {}
+    alias_of = {alias.upper(): key for key, rule in declared.items()
+                for alias in rule.get("aliases", [])}
+    configured = set()
+    for entry in entries:
+        for raw_key, value in entry.env.items():
+            key = alias_of.get(raw_key.upper(), raw_key)
+            if key in declared and isinstance(value, str) and value.strip():
+                configured.add(key)
+    return configured
+
+
+def _environment(spec, client_config, values, findings, server_name, client, configured=()):
+    """Build the env block for one client, plus any VS Code input declarations.
+
+    An optional secret is rendered only when some client already configures it:
+    otherwise every user would get a reference to a variable they never set, and
+    VS Code would prompt for it. Required secrets are always rendered.
+    """
     style = client_config.get("reference_style") or "${NAME}"
     declared = spec.get("settings") or {}
     environment, inputs = {}, []
     for key, rule in declared.items():
         if rule.get("secret"):
+            if not rule.get("required") and key not in configured:
+                continue
             if style.startswith("${input:"):
                 environment[key] = _reference(style, _input_id(key))
                 inputs.append({
@@ -155,7 +180,8 @@ def _plan_client(name, spec_client, path, data, suite, entries, all_entries, fin
         others = [entry for entry in all_entries
                   if entry.client != name and audit._normalize_name(entry.name) in wanted]
         values = _known_values(mine + others, spec)
-        environment, declarations = _environment(spec, config, values, findings, server_name, name)
+        environment, declarations = _environment(spec, config, values, findings, server_name, name,
+                                                 configured=_configured_keys(mine + others, spec))
 
         previous = servers.get(server_name)
         for other in matching:
