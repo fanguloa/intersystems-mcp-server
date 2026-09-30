@@ -229,6 +229,12 @@ class SitePolicy:
     # routes.live_config_window. None (the default) means no window: production
     # targets keep every write, runner and RUNTIME operation blocked.
     live_config_window: LiveConfigWindow = None
+    # Backup/audit root for the LIVE CONFIG WINDOW gate (ensemble_control). Set
+    # whenever the project is configured, regardless of whether the window comes
+    # from routes.live_config_window or an isc-ai.rules.json exception: the
+    # backup location is a per-project constant, not a per-window one, so a
+    # rules-file-only exception gets identical audit/backup behavior.
+    live_config_window_backup_root: Path = None
     # Parsed isc-ai.rules.json (isc_ai.rules.RuleSet), or None when the project
     # has no rules file at all. Distinct from "an empty rules file" (a RuleSet
     # with no packages/exceptions): callers that gate IRIS_EXTRA_PACKAGES and
@@ -791,6 +797,7 @@ def parse_policy(data, project_dir, rules_data=None):
     _parse_packages(data, kwargs)
     _parse_agents(data, kwargs)
     _parse_mutation(data, kwargs, project_dir)
+    kwargs["live_config_window_backup_root"] = (Path(project_dir) / LIVE_CONFIG_WINDOW_BACKUP_RELATIVE).resolve()
     if rules_data is not None:
         from isc_ai import rules as _rules
         kwargs["rules"] = _rules.parse_rules(rules_data, site_prefix=kwargs.get("ccr_prefix"))

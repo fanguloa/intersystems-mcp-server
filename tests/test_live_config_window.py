@@ -605,14 +605,14 @@ class LiveWindowItemSettingTests(LiveWindowTestCase):
     def test_backup_is_never_overwritten(self):
         window = self.policy().live_config_window
         stamp = "20260928T101010123456Z"
-        path, _ = server_module._live_window_write_backup(window, ROUTER_NS, PRODUCTION, ["first"], stamp=stamp)
+        path, _ = server_module._live_window_write_backup(window.backup_root, ROUTER_NS, PRODUCTION, ["first"], stamp=stamp)
         with self.assertRaisesRegex(LocalPolicyError, "overwrite"):
-            server_module._live_window_write_backup(window, ROUTER_NS, PRODUCTION, ["second"], stamp=stamp)
+            server_module._live_window_write_backup(window.backup_root, ROUTER_NS, PRODUCTION, ["second"], stamp=stamp)
         data = os.read(os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0)), 100)
         self.assertEqual(data, b"first\n")
         for production in ("..\\..\\evil", "%Evil", "a/b"):
             with self.subTest(production=production), self.assertRaises(LocalPolicyError):
-                server_module._live_window_write_backup(window, ROUTER_NS, production, ["x"])
+                server_module._live_window_write_backup(window.backup_root, ROUTER_NS, production, ["x"])
 
     def test_set_rejections_happen_before_any_write_and_are_audited(self):
         cases = (
@@ -831,3 +831,70 @@ class LiveWindowRuntimeActionTests(LiveWindowTestCase):
         self.assertFalse(result.get("isError", False), result)
         uat.execute_runtime_code.assert_called_once()
         self.assertEqual(self.audit, [])
+
+
+class LiveWindowRulesFileParityTests(LiveWindowTestCase):
+    """Gap fix: an ensemble_control exception defined purely in isc-ai.rules.json
+    (no legacy routes.live_config_window at all) must audit and back up exactly
+    like the legacy window. Required before 'rules migrate' can move ACHS's
+    live_config_window into isc-ai.rules.json without losing this behavior."""
+
+    def rules_only_policy(self):
+        import dataclasses
+        from isc_ai import rules as isc_rules
+        base = self.policy(absent=True)
+        ruleset = isc_rules.parse_rules({"version": 1, "exceptions": [{
+            "id": "rules-live-window", "label": LABEL, "ticket": TICKET, "expires": "2026-10-15",
+            "capability": "ensemble_control", "namespaces": [EVIDENCE_NS, ROUTER_NS, GATEWAY_NS],
+            "hosts": [PRIMARY, BACKUP], "active_node_evidence_namespace": EVIDENCE_NS,
+        }]})
+        return dataclasses.replace(base, rules=ruleset)
+
+    def _audit_and_backup(self, policy, name, arguments):
+        fake = FakeIris()
+        client = live_client(policy, fake)
+        result = self.call(client, name, arguments)
+        self.assertFalse(result.get("isError", False), result)
+        return list(self.audit)
+
+    def test_item_setting_set_audits_and_backs_up_identically_to_the_legacy_window(self):
+        legacy_audit = self._audit_and_backup(self.policy(), "iris_ensemble_item_setting", self.set_args())
+        self.assertTrue(self.backup_dir().exists())
+        for entry in list(self.backup_dir().glob("*.cls")):
+            entry.unlink()
+        self.audit.clear()
+
+        rules_audit = self._audit_and_backup(self.rules_only_policy(), "iris_ensemble_item_setting", self.set_args())
+        self.assertTrue(self.backup_dir().exists())
+
+        self.assertEqual(len(legacy_audit), 1)
+        self.assertEqual(len(rules_audit), 1)
+        ignored = {"ts", "backup"}
+        legacy_record = {key: value for key, value in legacy_audit[0].items() if key not in ignored}
+        rules_record = {key: value for key, value in rules_audit[0].items() if key not in ignored}
+        self.assertEqual(legacy_record, rules_record)
+
+    def test_ensemble_control_actions_audit_identically(self):
+        legacy_audit = self._audit_and_backup(self.policy(), "iris_ensemble_production_control",
+                                              {"action": "status"})
+        self.audit.clear()
+        rules_audit = self._audit_and_backup(self.rules_only_policy(), "iris_ensemble_production_control",
+                                             {"action": "status"})
+
+        self.assertEqual(len(legacy_audit), 1)
+        self.assertEqual(len(rules_audit), 1)
+        ignored = {"ts"}
+        legacy_record = {key: value for key, value in legacy_audit[0].items() if key not in ignored}
+        rules_record = {key: value for key, value in rules_audit[0].items() if key not in ignored}
+        self.assertEqual(legacy_record, rules_record)
+
+    def test_dispatch_routes_runtime_actions_for_a_rules_file_only_exception(self):
+        # Regression for the dispatch precheck: without this fix the tool call would
+        # fall through to the RUNTIME gate instead of the LIVE CONFIG WINDOW gate.
+        fake = FakeIris(jobs={EVIDENCE_NS: 0})
+        client = live_client(self.rules_only_policy(), fake, host=BACKUP)
+        result = self.call(client, "iris_ensemble_component_control",
+                           {"action": "restart", "component_name": ITEM})
+        self.assertTrue(result.get("isError"))
+        self.assertIn("active node", result["content"][0]["text"])
+        self.assertEqual(self.audit[-1]["result"], "DENIED")

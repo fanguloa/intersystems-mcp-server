@@ -246,21 +246,21 @@ def _live_window_today():
     return datetime.date.today()
 
 
-def _live_window_audit_path(window):
-    path = Path(window.backup_root) / LIVE_WINDOW_AUDIT_FILE
+def _live_window_audit_path(backup_root):
+    path = Path(backup_root) / LIVE_WINDOW_AUDIT_FILE
     if not path.is_absolute():
         raise LocalPolicyError("LIVE config window audit path must be absolute.")
     return path
 
 
-def _append_live_window_audit(window, record):
+def _append_live_window_audit(backup_root, record):
     """One JSON line per window operation, same locked appender as the runtime audit."""
-    _append_jsonl_locked(_live_window_audit_path(window), record)
+    _append_jsonl_locked(_live_window_audit_path(backup_root), record)
 
 
-def _live_window_audit_preflight(window):
+def _live_window_audit_preflight(backup_root):
     """Prove the audit file can be created, locked and appended BEFORE any write."""
-    path = _live_window_audit_path(window)
+    path = _live_window_audit_path(backup_root)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
     fd = os.open(str(path), flags, 0o600)
@@ -491,14 +491,14 @@ def _production_canonical_without(root, item_name, target, setting):
     return canonical(root)
 
 
-def _live_window_write_backup(window, namespace, production, lines, stamp=None):
+def _live_window_write_backup(backup_root, namespace, production, lines, stamp=None):
     """Immutable, timestamped local copy of the production class; never overwrites."""
     from datetime import datetime, timezone
     namespace = validate_namespace(namespace)
     AtelierClient._validate_identifier(production)
     if production.startswith("%"):
         raise LocalPolicyError("Production names under % are not configurable through the window.")
-    root = Path(window.backup_root)
+    root = Path(backup_root)
     directory = root / namespace
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if stamp is None:
@@ -4575,15 +4575,18 @@ class IRISMCPServer:
 
     def _live_window_audit(self, client, server_id, tool, action, result, reason, production=None,
                            item=None, target=None, setting=None, before=None, after=None,
-                           ticket=None, extra=None):
+                           ticket=None, extra=None, window_label=None):
         """Append one audit line; returns a warning string when it could not be written.
 
         Never stores connection credentials; values of sensitive-looking settings are
-        recorded as SHA-256 digests only.
+        recorded as SHA-256 digests only. Works identically whether the ensemble_control
+        exception in force comes from routes.live_config_window or isc-ai.rules.json:
+        the backup/audit root is a per-project constant (self.policy.live_config_window_backup_root),
+        not a per-window one.
         """
-        window = self.policy.live_config_window
-        if window is None:
+        if not self.policy.capability_candidates("ensemble_control"):
             return None
+        backup_root = self.policy.live_config_window_backup_root
         sensitive = isinstance(setting, str) and _LIVE_WINDOW_SENSITIVE_SETTING_RE.search(setting)
 
         def shown(value):
@@ -4600,7 +4603,7 @@ class IRISMCPServer:
             "namespace": client.namespace, "tool": tool, "action": action,
             "production": production, "item": item, "target": target, "setting": setting,
             "before": shown(before), "after": shown(after), "ticket": ticket,
-            "window": window.label, "result": result, "reason": reason,
+            "window": window_label, "result": result, "reason": reason,
         }
         if extra:
             record.update(extra)
@@ -4608,7 +4611,7 @@ class IRISMCPServer:
             record = {key: (AtelierClient._redact_secret(value, password) if isinstance(value, str) else value)
                       for key, value in record.items()}
         try:
-            _append_live_window_audit(window, record)
+            _append_live_window_audit(backup_root, record)
         except Exception:
             log_debug("LIVE config window audit line could not be written.")
             return "WARNING: the LIVE config window audit line could not be written; record this operation manually."
@@ -4672,10 +4675,12 @@ class IRISMCPServer:
         ticket = arguments.get("ticket")
         fields = {"production": production, "item": item, "target": target, "setting": setting,
                   "ticket": ticket}
+        state = {"window_label": None}
 
         def finish(result, reason, is_error=True, before=None, after=None, extra=None, text=None):
             warning = self._live_window_audit(client, server_id, tool, "set", result, reason,
-                                              before=before, after=after, extra=extra, **fields)
+                                              window_label=state["window_label"], before=before,
+                                              after=after, extra=extra, **fields)
             body = text or f"LIVE CONFIG WINDOW set {result}: {reason}"
             if warning:
                 body += f"\n\n{warning}"
@@ -4684,9 +4689,10 @@ class IRISMCPServer:
             return {"isError": is_error or bool(warning), "structuredContent": structured,
                     "content": [{"type": "text", "text": body}]}
 
-        window = self.policy.live_config_window
-        if window is None:
-            return finish("DENIED", "routes.live_config_window is not configured; 'set' is never "
+        candidates = self.policy.capability_candidates("ensemble_control")
+        if not candidates:
+            return finish("DENIED", "No ensemble_control exception is configured (routes.live_config_window "
+                                    "is not configured and isc-ai.rules.json has none either); 'set' is never "
                                     "available outside the LIVE CONFIG WINDOW.")
         value = arguments.get("value")
         expected = arguments.get("expected_current_value")
@@ -4697,7 +4703,8 @@ class IRISMCPServer:
                 raise LocalPolicyError("'expected_current_value' is required for set (compare-and-set).")
             self._live_window_text_value(value, "value")
             self._live_window_text_value(expected, "expected_current_value")
-            if not isinstance(ticket, str) or ticket != window.ticket:
+            valid_tickets = {candidate.ticket for candidate in candidates}
+            if not isinstance(ticket, str) or ticket not in valid_tickets:
                 raise LocalPolicyError("'ticket' is required and must equal the window ticket.")
         except LocalPolicyError as exc:
             return finish("DENIED", str(exc))
@@ -4705,6 +4712,8 @@ class IRISMCPServer:
             grant, gate_reason = client._issue_live_window_grant()
         except LocalPolicyError as exc:
             return finish("DENIED", str(exc))
+        state["window_label"] = grant.label
+        backup_root = self.policy.live_config_window_backup_root
 
         try:
             before_lines = client.get_document(document, strict=True)
@@ -4724,12 +4733,12 @@ class IRISMCPServer:
         except LocalPolicyError as exc:
             return finish("FAILED", f"{exc} Nothing was written.", before=current)
         try:
-            _live_window_audit_preflight(window)
+            _live_window_audit_preflight(backup_root)
         except Exception:
             return finish("DENIED", "The LIVE config window audit file is not writable; nothing was written.",
                           before=current)
         try:
-            backup_path, backup_sha = _live_window_write_backup(window, client.namespace, production, before_lines)
+            backup_path, backup_sha = _live_window_write_backup(backup_root, client.namespace, production, before_lines)
         except Exception as exc:
             detail = str(exc) if isinstance(exc, LocalPolicyError) else "local I/O error"
             return finish("FAILED", f"Backup could not be written ({detail}); nothing was written.", before=current)
@@ -4803,13 +4812,14 @@ class IRISMCPServer:
     def _live_window_ensemble_control(self, name, client, server_id, arguments):
         """Production/component runtime actions on a production target, window-gated."""
         action = arguments.get("action")
-        window = self.policy.live_config_window
         prod_name = arguments.get("production_name")
         comp_name = arguments.get("component_name")
-        fields = {"production": prod_name, "item": comp_name, "ticket": window.ticket}
+        fields = {"production": prod_name, "item": comp_name, "ticket": None}
+        state = {"window_label": None}
 
         def finish(result, reason, text=None):
-            warning = self._live_window_audit(client, server_id, name, action, result, reason, **fields)
+            warning = self._live_window_audit(client, server_id, name, action, result, reason,
+                                              window_label=state["window_label"], **fields)
             body = text or f"LIVE CONFIG WINDOW {name} '{action}' {result}: {reason}"
             if warning:
                 body += f"\n\n{warning}"
@@ -4829,8 +4839,11 @@ class IRISMCPServer:
             grant, gate_reason = client._issue_live_window_grant()
         except LocalPolicyError as exc:
             return finish("DENIED", str(exc))
+        fields["ticket"] = grant.ticket
+        state["window_label"] = grant.label
+        backup_root = self.policy.live_config_window_backup_root
         try:
-            _live_window_audit_preflight(window)
+            _live_window_audit_preflight(backup_root)
         except Exception:
             return finish("DENIED", "The LIVE config window audit file is not writable; nothing was executed.")
 
@@ -6518,7 +6531,7 @@ class IRISMCPServer:
 
             if name in self.LIVE_CONFIG_WINDOW_TOOLS:
                 return self._live_window_item_setting(client, server_id, arguments)
-            if (self.policy.live_config_window is not None
+            if (self.policy.capability_candidates("ensemble_control")
                     and arguments.get("action") in self._LIVE_WINDOW_RUNTIME_ACTIONS.get(name, ())
                     and client._production_gate_reason() is not None):
                 return self._live_window_ensemble_control(name, client, server_id, arguments)
