@@ -36,6 +36,8 @@ from isc_ai import secrets as isc_secrets
 from isc_ai import toggle as isc_toggle
 from isc_ai import docs as isc_docs
 from isc_ai import suite as isc_suite
+from isc_ai import wizard as isc_wizard
+from isc_ai import migrate as isc_migrate
 from isc_ai.audit import run_audit
 from isc_ai.ccr_discovery import LocalPolicyError
 from isc_ai.config import ConfigError
@@ -120,16 +122,25 @@ def _add_language_option(parser):
     parser.add_argument("--lang", choices=i18n.LANGUAGES, default=argparse.SUPPRESS, help=t("chrome.lang"))
 
 
-def _add_parser(sub, name, help_key, examples_key=None, **kwargs):
-    """Sub-parser whose own help repeats the summary and shows verbatim examples."""
+def _add_parser(sub, name, help_key, examples_key=None, hidden=False, **kwargs):
+    """Sub-parser whose own help repeats the summary and shows verbatim examples.
+
+    hidden=True keeps the command working but takes it out of the command list: the entry
+    points an AI client invokes are not part of the surface a person configures.
+
+    It omits `help` entirely instead of passing argparse.SUPPRESS. argparse only creates the
+    pseudo-action that lists a sub-command when `help` is present, and its formatter does not
+    filter SUPPRESS out of sub-actions -- passing SUPPRESS prints the literal "==SUPPRESS==".
+    """
     help_text = t(help_key)
     epilog = None
     if examples_key:
         block = i18n.lines(examples_key)
         epilog = t("chrome.examples_label") + "\n" + "".join(f"  {line}\n" if line else "\n" for line in block)
+    if not hidden:
+        kwargs["help"] = help_text
     parser = sub.add_parser(
         name,
-        help=help_text,
         description=help_text,
         epilog=epilog,
         formatter_class=_Formatter,
@@ -211,8 +222,22 @@ def _parse_cli_args(argv):
     _add_language_option(parser)
     sub = parser.add_subparsers(dest="command", title=t("chrome.group.commands"), metavar="<command>")
 
-    p_mcp = _add_parser(sub, "mcp", "cmd.mcp.help", "cmd.mcp.examples")
+    # The AI clients launch this; a person never types it. Hidden, not removed.
+    p_mcp = _add_parser(sub, "mcp", "cmd.mcp.help", "cmd.mcp.examples", hidden=True)
     _add_project_dir(p_mcp)
+
+    # First in the list on purpose: it is the answer to "how do I configure this".
+    p_wizard = _add_parser(sub, "wizard", "cmd.wizard.help", "cmd.wizard.examples")
+    p_wizard.add_argument("--dry-run", action="store_true", help=t("flag.wizard.dry_run"))
+    p_wizard.add_argument("--only", action="append", default=[], metavar="<step>",
+                          help=t("flag.wizard.only"))
+    p_wizard.add_argument("--yes", action="store_true", help=t("flag.wizard.yes"))
+    _add_project_dir(p_wizard)
+
+    p_migrate = _add_parser(sub, "migrate", "cmd.migrate.help", "cmd.migrate.examples")
+    p_migrate.add_argument("--apply", action="store_true", help=t("flag.migrate.apply"))
+    p_migrate.add_argument("--no-user", action="store_true", help=t("flag.migrate.no_user"))
+    _add_project_dir(p_migrate)
 
     p_init = _add_parser(sub, "init", "cmd.init.help", "cmd.init.examples")
     p_init.add_argument("directory", nargs="?", help=t("flag.init.directory"))
@@ -469,6 +494,60 @@ def _reject_literal_project_secrets(data):
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
+
+def _run_migrate(args):
+    """Move the state directory to its current name. Plan by default; --apply performs it."""
+    project_dir, _ = _project_paths(args)
+    runner = isc_migrate.apply if args.apply else isc_migrate.plan
+    report = runner(project_dir=project_dir, home=None if args.no_user else Path.home())
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if report["conflicts"] else 0
+
+
+def _run_wizard(args):
+    """Ask, show the whole plan, confirm, then write. Interactive by design."""
+    # Validate the arguments before touching stdin: a bad --only must fail the same way
+    # whether or not there is a terminal attached.
+    steps = None
+    if args.only:
+        unknown = [name for name in args.only if name not in isc_wizard.STEP_ORDER]
+        if unknown:
+            raise ConfigError(t("error.wizard.unknown_step", name=", ".join(unknown),
+                                valid=", ".join(isc_wizard.STEP_ORDER)))
+        steps = args.only
+    console = isc_wizard.Console()
+    try:
+        session = isc_wizard.interview(
+            console, project_dir=getattr(args, "project_dir", None), steps=steps)
+        console.say()
+        for line in isc_wizard.render_plan(session):
+            console.say(line)
+        if not session.planned_actions:
+            return 0
+        if args.dry_run:
+            console.say()
+            console.say(t("msg.wizard.dry_run"))
+            return 0
+        console.say()
+        if not args.yes and not console.ask_yes_no(t("msg.wizard.confirm"), default=True):
+            console.say(t("msg.wizard.cancelled"))
+            return 0
+        results = isc_wizard.apply(session)
+    except isc_wizard.WizardAborted as error:
+        _warn(str(error))
+        return 1
+    except KeyboardInterrupt:
+        # Ctrl+C during a prompt is a cancel, not a crash: nothing has been written yet.
+        _warn(t("msg.wizard.cancelled"))
+        return 1
+    console.say()
+    console.say(t("msg.wizard.results_title"))
+    for line in results:
+        console.say(f"  {line}")
+    console.say()
+    console.say(t("msg.wizard.verify_hint"))
+    return 0
+
 
 def _run_init(args):
     directory = Path(args.directory).resolve() if args.directory else Path.cwd().resolve()
@@ -793,6 +872,10 @@ def main(argv=None):
     if args.command == "facility" and args.facility_command == "install":
         return _run_facility(args)
     try:
+        if args.command == "migrate":
+            return _run_migrate(args)
+        if args.command == "wizard":
+            return _run_wizard(args)
         if args.command == "init":
             return _run_init(args)
         if args.command == "config":
@@ -835,3 +918,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

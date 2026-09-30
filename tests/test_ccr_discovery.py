@@ -400,7 +400,7 @@ class MutationTests(HermeticTestCase):
                 self.assertFalse(client.is_read_allowed()[0])
                 self.assertFalse(client.is_runtime_operation_allowed()[0])
                 self.assertFalse(client.is_code_write_allowed(CATALOGED, "ACHS0875")[0])
-                self.assertFalse(client.is_code_write_allowed(CATALOGED, "ACHS0875", promotion=True)[0])
+                self.assertTrue(client.is_code_write_route_allowed(promotion=True)[0])
                 self.assertFalse(client.is_code_write_route_allowed()[0])
                 client._send_request.assert_not_called()
 
@@ -1314,7 +1314,7 @@ class MutationTests(HermeticTestCase):
         script_guard(int_uat, "CONTROLLED_ACTIVE")
         allowed, reason = int_uat.is_code_write_allowed("SAP.Api.cls", "ACHS0875")
         self.assertFalse(allowed)
-        self.assertIn("BASE tracked changes or UAT promotion", reason)
+        self.assertIn("BASE tracked changes or CCR promotion", reason)
         promotion = synthetic_client(namespace="UAT-ACHS", role="UAT", host="10.244.20.6")
         script_guard(promotion, "CONTROLLED_ACTIVE")
         self.assertTrue(promotion.is_code_write_allowed(
@@ -1338,7 +1338,9 @@ class MutationTests(HermeticTestCase):
             "CALL Some_Proc('x')",
             "UPDATE Ens_Config.Item SET Enabled = 0",
             "SELECT 1; DROP TABLE t",
-            "SELECT Name FROM T WHERE Text = 'a DELETE inside'",
+            # Tokens inside string literals are data (see SqlReadPolicyLiteralTests);
+            # the same token outside a literal is still denied.
+            "SELECT Name FROM T WHERE Text = 'a' OR DELETE = 1",
             "WITH x AS (SELECT 1) SELECT * FROM x",
             "  select 1 union all select 2 from Foo where BUILD = 1",
             "",
@@ -1374,22 +1376,23 @@ class MutationTests(HermeticTestCase):
         self.assertIn("CONTROLLED_ACTIVE", description)
         self.assertIn("LIVE", description)
 
-        base = synthetic_client()
-        base.execute_runtime_code = Mock(side_effect=AssertionError("runner must not start"))
-        result = synthetic_server(base).handle_tool_call("iris_ccr_download_load", {
-            "server_id": "fake", "itemset_id": 1, "load": False,
-        })
-        self.assertTrue(result.get("isError"))
-        self.assertIn("UAT role", result["content"][0]["text"])
-        self.assert_only_metadata(base)
-
-        node = synthetic_client(namespace="UAT-ACHS", role="UAT", host="10.244.20.4", path_prefix="/trakuat01")
-        node.execute_runtime_code = Mock(side_effect=AssertionError("runner must not start"))
-        result = synthetic_server(node).handle_tool_call("iris_ccr_download_load", {
-            "server_id": "fake", "namespace": "UAT-ACHS", "itemset_id": 1, "load": False,
-        })
-        self.assertTrue(result.get("isError"))
-        self.assertIn("Direct HA node", result["content"][0]["text"])
+        # Promotion is admitted in every configured environment and on direct HA nodes;
+        # the embedded CONTROLLED_ACTIVE guard in the runner stays mandatory.
+        success = ("DOWNLOADED|isid=1|file=item.xml\n"
+                   "IMPORTED|local_id=9|ccr=ACHS0875|source=BASE|target=UAT\nSUCCESS")
+        for client in (synthetic_client(),
+                       synthetic_client(namespace="UAT-ACHS", role="UAT", host="10.244.20.4", path_prefix="/trakuat01"),
+                       synthetic_client(namespace="LIVE-ACHS", role="LIVE", host="10.246.63.196", production=True)):
+            with self.subTest(role=client.env_role, host=client.host):
+                client.execute_runtime_code = Mock(return_value=success)
+                result = synthetic_server(client).handle_tool_call("iris_ccr_download_load", {
+                    "server_id": "fake", "namespace": client.namespace, "itemset_id": 1, "load": False,
+                })
+                self.assertFalse(result.get("isError", False), result)
+                client.execute_runtime_code.assert_called_once()
+                self.assertTrue(client.execute_runtime_code.call_args.kwargs.get("promotion"))
+                code = client.execute_runtime_code.call_args.args[0]
+                self.assertLess(code.index('If mcpGuardState \'= "CONTROLLED_ACTIVE" {'), code.index("WSDownload("))
 
         for state, expected_error in (("ABSENT", True), ("SUSPENDED", True), ("CONTROLLED_ACTIVE", False)):
             with self.subTest(state=state):
@@ -2407,7 +2410,8 @@ class GateMatrixTests(HermeticTestCase):
     def test_tool_categories_partition_every_tool(self):
         server = object.__new__(IRISMCPServer)
         names = {tool["name"] for tool in server.handle_tools_list()["tools"]}
-        categories = (IRISMCPServer.READ_TOOLS, IRISMCPServer.RUNTIME_TOOLS, IRISMCPServer.CODE_WRITE_TOOLS)
+        categories = (IRISMCPServer.READ_TOOLS, IRISMCPServer.RUNTIME_TOOLS, IRISMCPServer.CODE_WRITE_TOOLS,
+                      IRISMCPServer.LIVE_CONFIG_WINDOW_TOOLS)
         self.assertEqual(set().union(*categories) | {"iris_list_servers"}, names)
         for first in categories:
             for second in categories:

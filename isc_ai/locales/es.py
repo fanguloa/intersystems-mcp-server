@@ -24,26 +24,27 @@ MESSAGES = {
 
     # -- nivel superior --------------------------------------------------
     "app.description": (
-        "Servidor MCP para InterSystems IRIS/TrakCare, la configuración por proyecto que lee\n"
-        "y la instalación local de los clientes de IA que lo consumen.\n"
+        "Configura y audita el entorno de desarrollo agéntico: los clientes de IA, los\n"
+        "servidores MCP con los que hablan, el harness de instrucciones, las fases SDD con sus\n"
+        "modelos, y las credenciales que todo eso necesita.\n"
         "\n"
-        "Tres trabajos. `mcp` sirve las herramientas de IRIS sobre stdio. `init`, `config`,\n"
-        "`servers`, `doctor` y `facility` administran la política de sitio de un despliegue.\n"
-        "`setup` registra el MCP en OpenCode e instala el harness SDD de Claude empaquetado,\n"
-        "con sus agentes, comandos y skills, más el logo de OpenCode.\n"
+        "Empieza por `wizard`: pregunta qué necesitas y lo configura. `audit` reporta lo que ya\n"
+        "hay sin escribir nada. El resto son los verbos individuales que el asistente maneja,\n"
+        "para cuando sabes exactamente qué quieres cambiar.\n"
         "\n"
-        "Solo `mcp` y `facility install` hablan con IRIS. Los comandos que resuelven un\n"
-        "proyecto aceptan --project-dir; si no, gana el directorio ancestro más cercano que\n"
-        "tenga .iris-mcp/config.json, igual que git encuentra .git."
+        "Los servidores MCP los levantan los clientes, nunca este CLI, y este CLI nunca está en\n"
+        "medio de esa conversación. Los comandos que resuelven un proyecto aceptan\n"
+        "--project-dir; si no, gana el ancestro más cercano que tenga .iris-mcp/config.json,\n"
+        "igual que git encuentra .git."
     ),
     "app.examples": (
-        "isc-ai setup --check                   previsualiza la configuración del cliente de IA\n"
-        "isc-ai setup --apply                   registra el servidor MCP, el logo y el harness de Claude\n"
-        "isc-ai init                            crea .iris-mcp/config.json en este directorio\n"
-        "isc-ai doctor                          qué proyecto, archivos y servidores se resuelven aquí\n"
-        "isc-ai config show --servers           lista combinada de servidores, secretos redactados\n"
-        "isc-ai config validate                 termina en 1 si la configuración efectiva está rota\n"
-        "isc-ai facility render                 renderiza MCP.CCRMutation e imprime su SHA-256"
+        "isc-ai wizard                          configuración guiada: pregunta y configura\n"
+        "isc-ai audit                           qué hay configurado ahora, sin escribir nada\n"
+        "isc-ai suite --apply                   escribe los MCPs recomendados en cada cliente\n"
+        "isc-ai secrets set JIRA_API_TOKEN      guarda una credencial sin mostrarla\n"
+        "isc-ai setup --apply                   instala el harness de instrucciones y las fases SDD\n"
+        "isc-ai agents                          qué modelo corre cada sub-agente SDD\n"
+        "isc-ai doctor                          qué proyecto, archivos y servidores se resuelven aquí"
     ),
     "app.footer": "Ejecuta 'isc-ai <command> -h' para ver los flags y ejemplos de un solo comando.",
 
@@ -425,4 +426,130 @@ MESSAGES = {
     # -- idioma ----------------------------------------------------------
     "msg.language.rejected": "se ignoró el idioma no soportado {values}; se usa {language}. "
                              "Idiomas soportados: {supported}.",
+
+    # -- asistente -------------------------------------------------------
+    "cmd.wizard.help": "configuración guiada: pregunta qué necesitas y lo configura",
+    "cmd.wizard.examples": (
+        "isc-ai wizard\n"
+        "isc-ai wizard --dry-run                   pregunta todo y para antes de escribir\n"
+        "isc-ai wizard --only secrets              un solo paso\n"
+        "isc-ai wizard --only harness --only docs  un par de pasos, en orden de dependencia\n"
+        "\n"
+        "Pregunta por todo el entorno agéntico: qué clientes hay instalados, el harness de\n"
+        "instrucciones, las credenciales que declaran los servidores MCP, los servidores\n"
+        "mismos, el modelo de cada fase SDD y los bloques de documentación gestionados.\n"
+        "IRIS/TrakCare es un paso opcional, que solo se pregunta si este despliegue lo usa.\n"
+        "\n"
+        "No escribe nada hasta mostrar el plan completo y confirmarlo, y cada paso se puede\n"
+        "rechazar. Necesita una terminal: no acepta valores por defecto desde un pipe."
+    ),
+    "flag.wizard.dry_run": "pregunta todo e imprime el plan, luego termina sin escribir",
+    "flag.wizard.only": "ejecuta solo este paso (repetible): "
+                        "clients, iris, harness, secrets, servers, phases, docs",
+    "flag.wizard.yes": "omite la confirmación final (las preguntas de cada paso se siguen haciendo)",
+
+    "error.wizard.no_tty": "el asistente necesita una terminal: stdin no es un tty. "
+                           "Ejecútalo de forma interactiva, o usa los comandos individuales "
+                           "(setup, secrets, suite, agents, docs) en un script.",
+    "error.wizard.input_closed": "la entrada se cerró antes de terminar; no se escribió nada.",
+    "error.wizard.unknown_step": "paso desconocido {name}; pasos válidos: {valid}",
+
+    "msg.wizard.intro": "Configurando el entorno agéntico para {path}",
+    "msg.wizard.discovered": "Estado actual: {errors} errores, {warnings} advertencias.",
+    "msg.wizard.answer_yes_no": "    responde sí o no.",
+    "msg.wizard.answer_required": "    hace falta una respuesta.",
+    # El sufijo muestra qué respuesta elige Enter. Se traduce porque [Y/n] no es universal.
+    "msg.wizard.yes_no_yes": "[S/n]",
+    "msg.wizard.yes_no_no": "[s/N]",
+    # Una palabra aceptada por línea. Se aceptan las de los dos idiomas en cualquiera,
+    # porque alguien que escribe 'y' en un prompt en español quiere decir sí.
+    "msg.wizard.words_yes": "s\nsi\nsí\ny\nyes",
+    "msg.wizard.words_no": "n\nno",
+    "msg.wizard.cancel_hint": "Presiona ESC o Ctrl+C en cualquier momento para cancelar sin escribir.",
+
+    # -- migrate ---------------------------------------------------------
+    "cmd.migrate.help": "mueve el directorio de estado de .iris-mcp a .isc-ai",
+    "cmd.migrate.examples": (
+        "isc-ai migrate                        muestra qué se movería\n"
+        "isc-ai migrate --apply                lo mueve\n"
+        "isc-ai migrate --apply --no-user      solo este proyecto, deja los archivos de usuario\n"
+        "\n"
+        "El directorio llevaba el nombre del servidor de IRIS; ahora lleva el de esta\n"
+        "herramienta, porque lo que configura es todo el entorno agéntico. Los dos nombres se\n"
+        "siguen leyendo, así que un despliegue sin migrar sigue funcionando: esto solo ordena.\n"
+        "\n"
+        "Nunca sobreescribe. Un destino que ya existe con contenido distinto se reporta como\n"
+        "conflicto y no se mueve nada hasta que lo resuelvas. Los archivos se copian y se\n"
+        "verifican antes de borrar el original."
+    ),
+    "flag.migrate.apply": "realiza la migración (por defecto: solo la reporta)",
+    "flag.migrate.no_user": "migra solo el directorio del proyecto, no el de usuario",
+    "msg.wizard.secret_prompt": "valor de {name} (no se muestra): ",
+    "msg.wizard.and_more": "... y {count} más",
+
+    "msg.wizard.step_clients": "1. Clientes de IA",
+    "msg.wizard.clients_found": "instalados: {names}",
+    "msg.wizard.clients_missing": "no instalados: {names}",
+    "msg.wizard.clients_none": "no hay ningún cliente soportado; instala uno con 'isc-ai clients'.",
+
+    "msg.wizard.step_iris": "2. Política de IRIS/TrakCare (opcional)",
+    "msg.wizard.iris_present": "ya está configurada: {path}",
+    "msg.wizard.iris_question": "¿Este despliegue trabaja con IRIS/TrakCare?",
+    "msg.wizard.iris_skipped": "omitido; los demás servidores no la necesitan.",
+    "msg.wizard.iris_site": "código del sitio (corto, por ejemplo la sigla del cliente)",
+    "msg.wizard.iris_ccr_prefix": "prefijo de CCR",
+    "msg.wizard.iris_base_host": "host de la BASE canónica",
+    "msg.wizard.iris_base_namespace": "namespace de BASE",
+    "msg.wizard.iris_package_prefix": "prefijo de package que tienes permitido escribir",
+
+    "msg.wizard.step_harness": "3. Harness de instrucciones",
+    "msg.wizard.harness_state": "{files} archivos, bundle versión {version}",
+    "msg.wizard.harness_current": "al día; no hay nada que instalar.",
+    "msg.wizard.harness_pending": "pendiente: {summary}",
+    "msg.wizard.harness_question": "¿Instalar el harness y las fases SDD?",
+
+    "msg.wizard.step_secrets": "4. Credenciales",
+    "msg.wizard.secrets_all_resolved": "todas las credenciales declaradas ya resuelven.",
+    "msg.wizard.secrets_needed": "{name} la declara {server} y no resuelve.",
+    "msg.wizard.secrets_question": "¿Guardar {name} ahora?",
+    "msg.wizard.secrets_empty": "{name} quedó vacía; no se guardó.",
+
+    "msg.wizard.step_servers": "5. Servidores MCP",
+    "msg.wizard.servers_current": "todos los clientes ya coinciden con la suite recomendada.",
+    "msg.wizard.servers_pending": "{count} cambios pendientes:",
+    "msg.wizard.servers_question": "¿Escribir los servidores recomendados en cada cliente?",
+
+    "msg.wizard.step_phases": "6. Fases SDD y sus modelos",
+    "msg.wizard.phases_state": "{count} roles declarados",
+    "msg.wizard.phases_current": "la asignación de modelos ya coincide.",
+    "msg.wizard.phases_unavailable": "no se puede planificar las fases: {reason}",
+    "msg.wizard.phases_question": "¿Escribir la asignación de modelos?",
+
+    "msg.wizard.step_docs": "7. Bloques de documentación gestionados",
+    "msg.wizard.docs_current": "todos los bloques gestionados están al día.",
+    "msg.wizard.docs_pending": "{count} bloques por refrescar:",
+    "msg.wizard.docs_question": "¿Refrescarlos desde la política?",
+
+    "msg.wizard.plan_title": "Plan (todavía no se escribió nada):",
+    "msg.wizard.plan_empty": "nada que hacer; el entorno ya coincide.",
+    "msg.wizard.plan_declined": "rechazado o no aplicable: {names}",
+    "msg.wizard.confirm": "¿Aplicar este plan?",
+    "msg.wizard.cancelled": "cancelado; no se escribió nada.",
+    "msg.wizard.dry_run": "simulación: se detiene antes de escribir.",
+    "msg.wizard.results_title": "Listo:",
+    "msg.wizard.verify_hint": "Ejecuta 'isc-ai audit' para confirmar el resultado.",
+
+    "msg.wizard.action_iris": "crear la política de IRIS en {path}",
+    "msg.wizard.action_harness": "instalar el harness ({summary})",
+    "msg.wizard.action_secrets": "guardar credenciales: {names}",
+    "msg.wizard.action_servers": "escribir {count} cambios de servidores en los clientes",
+    "msg.wizard.action_phases": "escribir la asignación de modelos ({count} archivos)",
+    "msg.wizard.action_docs": "refrescar {count} bloques de documentación",
+
+    "msg.wizard.done_iris": "política de IRIS escrita: {path}",
+    "msg.wizard.done_harness": "harness instalado: {summary}",
+    "msg.wizard.done_secret": "{name} guardada",
+    "msg.wizard.done_servers": "{count} cambios de servidores escritos",
+    "msg.wizard.done_phases": "asignación de modelos escrita ({count} archivos)",
+    "msg.wizard.done_docs": "{count} bloques de documentación refrescados",
 }

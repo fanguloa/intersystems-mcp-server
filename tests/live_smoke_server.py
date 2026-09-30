@@ -90,7 +90,7 @@ def run_tests():
     # If no connections exist, stop
     if not server.servers:
         print("WARNING: no configured servers were detected. Stopping the live tests.")
-        print("Run 'isc-ai init' in the deployment directory, or add entries to ~/.iris-mcp/servers.json.")
+        print("Run 'isc-ai init' in the deployment directory, or add entries to ~/.isc-ai/servers.json.")
         return
 
     # Choose a server to test (prefer achsuat if available, otherwise achsbase, otherwise first)

@@ -109,6 +109,10 @@ def catalog(language=None):
 def t(key, **params):
     """Translate `key`, falling back to English and finally to the key itself.
 
+    A catalog entry must never use `{key}` as a placeholder: this function's first
+    positional parameter is named `key`, so `t("some.entry", key=...)` raises
+    TypeError before any formatting happens. Name that placeholder `{name}`.
+
     Every entry always goes through `str.format`, so a literal brace in a catalog
     is always doubled ({{env:VAR}}) whether or not that entry takes parameters.
     One rule for whoever writes a translation beats a rule that depends on the

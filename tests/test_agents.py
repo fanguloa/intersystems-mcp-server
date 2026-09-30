@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from isc_ai import agents as isc_agents
 from isc_ai import config as isc_config
+from isc_ai.config import STATE_DIR
 
 POLICY = {
     "version": 1,
@@ -34,8 +35,8 @@ class AgentsTestCase(unittest.TestCase):
         self.home = self.root / "home"
         self.project = self.root / "project"
         (self.home / ".config" / "opencode").mkdir(parents=True)
-        (self.project / ".iris-mcp").mkdir(parents=True)
-        self.config = self.project / ".iris-mcp" / "config.json"
+        (self.project / STATE_DIR).mkdir(parents=True)
+        self.config = self.project / STATE_DIR / "config.json"
         self.write_policy({})
         self.opencode = self.home / ".config" / "opencode" / "opencode.json"
         self.environ = {}

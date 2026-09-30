@@ -10,7 +10,7 @@ from tests.hermetic_test_support import (
     AtelierClient, IRISMCPServer, HermeticTestCase, synthetic_client, script_guard,
     script_guarded_runner, GUARD_STATES, REFERENCE_POLICY,
 )
-from isc_ai.server import LocalPolicyError
+from isc_ai.server import LocalPolicyError, _classify_ccr_terminal_result
 
 
 def encode_record_value(value):
@@ -39,7 +39,7 @@ def download_result(load=True):
         "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT",
     ]
     if load:
-        lines.extend(["LOADED_OS", "LOADED_NS|itemset=7"])
+        lines.extend(["LOADED_OS", "LOADED_NS|itemset=7", "CONFIRMED|isid=42"])
     lines.append("SUCCESS")
     return "\n".join(lines)
 
@@ -76,8 +76,10 @@ class FakeToolClient(AtelierClient):
         self.calls.append(("list", ccr_id, env, token))
         return self._result()
 
-    def ccr_download_load(self, itemset_id, load=True, token=""):
+    def ccr_download_load(self, itemset_id, load=True, token="", ccr_id=""):
         self.calls.append(("download_load", itemset_id, load, token))
+        if getattr(self, "use_real_download_load", False):
+            return AtelierClient.ccr_download_load(self, itemset_id, load=load, token=token, ccr_id=ccr_id)
         return self._result()
 
     def get_document(self, document_name, strict=False):
@@ -185,6 +187,16 @@ class WriteGuardTests(HermeticTestCase):
         self.assertIn("RUNTIME gate", description)
         self.assertIn("LIVE/PROD", description)
         self.assertNotIn("UNKNOWN", description)
+        # Documented behavior matches the code: CCR is not consulted, direct HA nodes
+        # are not blocked by the runtime gate, runner hosts and the audit file exist.
+        self.assertIn("CCR state is not consulted", description)
+        self.assertIn("Direct HA nodes are not blocked", description)
+        self.assertNotIn("namespace/role, direct HA node)", description)
+        self.assertIn("runtime.runner_hosts", description)
+        self.assertIn("runtime.jsonl", description)
+        self.assertIn("never stores connection credentials or output", description)
+        self.assertIn("secrets embedded in the code are recorded", description)
+        self.assertNotIn("never credentials", description)
         for name in ("iris_ccr_list_itemsets", "iris_ccr_can_upload", "iris_ccr_download_load"):
             self.assertNotIn("UNKNOWN", tools[name]["description"])
         self.assertIn("INFORMATIONAL", tools["iris_ccr_namespace_status"]["description"])
@@ -308,6 +320,20 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         self.assertTrue(code.isascii())
         self.assertEqual(code.count("{"), code.count("}"))
         self.assertNotRegex(code, r"(?im)^[ \t]*Quit[ \t]+\S")
+
+    def test_checkout_terminates_notice_lines_before_records(self):
+        client, captured = recording_client(
+            "NOTICE: x.cls is currently checked out by user 'other'\n"
+            "VERIFIED_CHECKOUT|action=idempotent|ccr_enc=CLRS3425"
+        )
+        success, _ = client.ccr_checkout("Custom.ACHS.Test", "CLRS3425")
+        code = captured[0]
+        self.assertTrue(success)
+        status_idx = code.index("scInst.GetStatus(")
+        self.assertLess(status_idx, code.index("Write:$X>0 !", status_idx))
+        checkout_idx = code.index("scInst.CheckOut(")
+        self.assertLess(checkout_idx, code.index("Write:$X>0 !", checkout_idx))
+        self.assert_safe_objectscript(code)
 
     def test_checkout_sets_escaped_ccr_session_before_source_control_calls(self):
         requested_ccr = 'ACHS"0875'
@@ -518,6 +544,77 @@ class GeneratedObjectScriptTests(HermeticTestCase):
         self.assertNotIn(".Upload(", code)
         self.assert_safe_objectscript(code)
         self.assert_token_is_not_written(code, "test-token")
+
+    def test_commit_discovers_the_change_control_engine_in_process(self):
+        client, captured = recording_client(
+            "VERIFIED|action=commit|local_id=1080|local_name=item.xml|"
+            "server_id=42|server_name=item.xml"
+        )
+
+        client.ccr_commit("CLRS3425", [72203, 72204], "test-token")
+
+        code = captured[0]
+        # Both engines are resolved at run time; neither class is referenced statically,
+        # so a runner compiles on a system that has only one of them.
+        self.assertNotIn("##class(%pkg.isc.changecontrol.CCR)", code)
+        self.assertNotIn("##class(TC.ChangeControl.CCR)", code)
+        self.assertIn('%ExistsId("%pkg.isc.changecontrol.CCR||Commit")', code)
+        self.assertIn('%ExistsId("TC.ChangeControl.CCR||Commit")', code)
+        self.assertLess(
+            code.index('%ExistsId("%pkg.isc.changecontrol.CCR||Commit")'),
+            code.index('%ExistsId("TC.ChangeControl.CCR||Commit")'),
+        )
+        self.assertIn("ERROR_ENGINE", code)
+        self.assertIn('$ClassMethod(engine, "Commit", ccr, list, .success, .absent, .errors)', code)
+        self.assertIn('$ClassMethod(engine, "Commit", ccr, list, ccr)', code)
+        # TC Commit bundles whatever it is given: every row is proven first.
+        self.assertIn("ERROR_CHANGE_PRECHECK", code)
+        self.assertIn("change.CCR '= ccr", code)
+        self.assertLess(code.index("ERROR_CHANGE_PRECHECK"), code.index('$ClassMethod(engine, "Commit", ccr, list, ccr)'))
+        # The session user is restored and the original request is put back.
+        self.assertIn('Kill %session.Data("LOGON.USERCODE")', code)
+        self.assertIn("Set %request = priorRequest", code)
+        # The TC log never reaches the output with the token in it.
+        self.assertIn('Set tcLog = $Replace(tcLog, token, "<redacted>")', code)
+        self.assertIn("Set changeList = $ListBuild(72203,72204)", code)
+        self.assert_safe_objectscript(code)
+        self.assert_token_is_not_written(code, "test-token")
+
+    def test_commit_tc_path_never_runs_uncaptured_and_reports_failed_upload(self):
+        client, captured = recording_client("ERROR_X|message=synthetic")
+        client.ccr_commit("CLRS3425", [72203], "test-token")
+        code = captured[0]
+        # Commit runs only inside the branch where the log file was opened and selected.
+        open_idx = code.index("Open tcLogFile")
+        test_idx = code.index("If $Test {", open_idx)
+        call_idx = code.index('$ClassMethod(engine, "Commit", ccr, list, ccr)')
+        else_idx = code.index("} Else {", test_idx)
+        self.assertLess(test_idx, call_idx)
+        self.assertLess(call_idx, else_idx)
+        self.assertIn("commit not attempted", code)
+        self.assertIn("ERROR_COMMIT_UPLOAD|local_id=", code)
+        self.assertIn("iris_ccr_reupload_itemset", code)
+        self.assertIn("Kill %request", code)
+        self.assert_safe_objectscript(code)
+        self.assert_token_is_not_written(code, "test-token")
+
+    def test_commit_rejects_duplicate_change_ids(self):
+        client, captured = recording_client("")
+        with self.assertRaises(ValueError):
+            client.ccr_commit("CLRS3425", [72203, 72203], "test-token")
+        self.assertEqual(captured, [])
+
+    def test_commit_engine_record_does_not_hide_the_terminal_result(self):
+        client, _ = recording_client(
+            "COMMIT_ENGINE|name_enc=TC.ChangeControl.CCR\n"
+            "COMMIT_UPLOAD_STATUS|message_enc=Success!\n"
+            "VERIFIED|action=commit|local_id=1080|local_name=item.xml|"
+            "server_id=42|server_name=item.xml"
+        )
+        result = client.ccr_commit("CLRS3425", [72203], "test-token")
+        status, fields, _ = _classify_ccr_terminal_result(result, {"commit"})
+        self.assertEqual(status, "verified")
+        self.assertEqual(fields["server_id"], "42")
 
     def test_reupload_sanitization_preserves_and_rolls_back_originals(self):
         client, captured = recording_client(
@@ -981,6 +1078,38 @@ class ToolContractTests(HermeticTestCase):
         self.assertFalse(failure["load_attempted"])
         self.assertFalse(failure["possible_partial_load"])
         self.assertNotIn("Posible carga parcial", result["content"][0]["text"])
+
+    def test_download_load_confirm_error_after_load_marks_failure_without_retry(self):
+        client = FakeToolClient(
+            "DOWNLOADED|isid=42|file=item.xml\n"
+            "IMPORTED|local_id=7|ccr=ACHS0875|source=BASE|target=UAT\n"
+            "LOADED_OS\nLOADED_NS|itemset=7\nERROR_CONFIRM: Invalid Token",
+            promotion=True,
+        )
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS",
+        )
+        failure = result["structuredContent"]
+        self.assertTrue(result.get("isError"))
+        self.assertEqual(failure["phase_reached"], "LOADED_NS")
+        self.assertEqual(failure["failed_phase"], "confirm")
+        self.assertTrue(failure["load_attempted"])
+        self.assertFalse(failure["automatic_retry"])
+
+    def test_download_load_runner_confirms_load_with_ccr_job(self):
+        client = FakeToolClient(download_result(), promotion=True)
+        client.use_real_download_load = True
+        captured = []
+        client._run_guarded_ccr_runner = lambda code, tracking, promotion=False: (captured.append(code), download_result())[1]
+        result = self.call(
+            fake_server(client), "iris_ccr_download_load", itemset_id=42,
+            namespace="UAT-ACHS", ccr_id="ACHS0875",
+        )
+        self.assertFalse(result.get("isError", False), result)
+        code = captured[0]
+        self.assertIn('Set job = "ACHS0875"', code)
+        self.assertLess(code.index("LoadToNS("), code.index("WSConfirmLoad("))
 
     def test_download_load_loadtoos_error_marks_partial_and_no_retry(self):
         client = FakeToolClient(

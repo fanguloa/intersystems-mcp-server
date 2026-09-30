@@ -65,11 +65,12 @@ El servidor MCP registra las siguientes **herramientas nativas** para tu asisten
 | `iris_get_event_logs` | Extrae las últimas trazas de error y warnings del log del bus de integración (`Ens_Util.Log`). | `server_id`, `limit` (max 100), `namespace` (opcional) |
 | `iris_get_recent_messages` | Revisa el tráfico de mensajes recientes en el bus de Ensemble (`Ens.MessageHeader`). | `server_id`, `limit`, `only_errors` (bool), `namespace` (opcional) |
 | `iris_get_ensemble_trace` | Obtiene la traza completa (Visual Trace) de una ejecución de Ensemble/IRIS Interoperability por su `SessionId`, incluyendo mensajes, logs y payloads de cuerpos de mensaje. | `server_id`, `session_id` (int/string), `include_logs` (bool, opcional, por defecto true), `include_bodies` (bool, opcional, por defecto false), `namespace` (opcional) |
-| `iris_ensemble_production_control` | Consulta el estado o controla la Producción de Ensemble (`status`, `start`, `stop`, `restart`). | `server_id`, `action` (status/start/stop/restart), `production_name` (opcional), `timeout` (int, opcional), `force` (bool, opcional), `namespace` (opcional) |
-| `iris_ensemble_component_control` | Gestiona componentes individuales de la producción (Business Services/Processes/Operations) en caliente (`list`, `enable`, `disable`, `restart`). | `server_id`, `action` (list/enable/disable/restart), `component_name` (string), `production_name` (opcional), `namespace` (opcional) |
+| `iris_ensemble_production_control` | Consulta el estado o controla la Producción de Ensemble (`status`, `start`, `stop`, `restart`). Gate RUNTIME en no productivo; en producción bloqueado salvo **gate LIVE CONFIG WINDOW** (ver `routes.live_config_window`). | `server_id`, `action` (status/start/stop/restart), `production_name` (opcional), `timeout` (int, opcional), `force` (bool, opcional), `namespace` (opcional) |
+| `iris_ensemble_component_control` | Gestiona componentes individuales de la producción (Business Services/Processes/Operations) en caliente (`list`, `enable`, `disable`, `restart`). `list` usa el gate READ; `enable`/`disable`/`restart` usan RUNTIME en no productivo y, en producción, solo el **gate LIVE CONFIG WINDOW**. | `server_id`, `action` (list/enable/disable/restart), `component_name` (string), `production_name` (opcional), `namespace` (opcional) |
+| `iris_ensemble_item_setting` | Lee (`get`, gate READ, sin runner) o hace compare-and-set (`set`, solo **gate LIVE CONFIG WINDOW**) de UN setting de un Item guardado en el XData de la clase de producción (ej. `WebServiceURL`, `StorageNamespace`, `AllowedIPAddresses`). `set` exige `expected_current_value` y el `ticket` de la ventana, respalda la clase antes de escribir, verifica después y audita. | `server_id`, `namespace`, `action` (get/set), `production_name`, `item_name`, `target` (Host/Adapter), `setting_name`, `value`, `expected_current_value`, `ticket` |
 | `iris_ensemble_default_settings` | Consulta, crea, actualiza o elimina ajustes por defecto del sistema de Ensemble (`Ens.Config.DefaultSettings`). | `server_id`, `action` (list/set/delete), `id` (int/string), `production_name`, `item_name`, `host_class_name`, `setting_name`, `setting_value`, `deployable` (bool), `namespace` (opcional) |
 | `iris_ensemble_queue_control` | Monitorea colas de mensajes de Ensemble (`list_queues`, `list_messages`), re-envía mensajes (`resend_message`, via `Ens.MessageHeader.ResendDuplicatedMessage`: clona el header, misma SessionId, destino original o `new_target`; devuelve el nuevo header id) o desencola/aborta mensajes atascados (`abort_message`). | `server_id`, `action` (list_queues/list_messages/resend_message/abort_message), `queue_name` (string), `message_id` (int/string), `new_target` (string, ej. `HL7 Rule`), `limit` (int), `namespace` (opcional) |
-| `iris_execute_objectscript` | Ejecuta código mediante una clase temporal fija `User.McpTmpRun*`; el payload puede persistir datos y usa el gate fail-closed normal. Solo una ausencia CCR suficientemente verificada y una ruta de ambiente permitida autorizan; UNKNOWN, control activo/suspendido y producción bloquean. | `server_id`, `code`, `namespace` (opcional) |
+| `iris_execute_objectscript` | Ejecuta código mediante una clase temporal fija `User.McpTmpRun*`; el payload puede persistir datos. Gate RUNTIME: solo el gate de producción (`is_production`, namespace/rol PROD/LIVE/PRD) y un rol no productivo configurado; el estado CCR no se consulta. Los nodos HA directos no se bloquean en este gate (en un backup del mirror la subida falla porque la base es read-only). Con `runtime.runner_hosts` el runner se aloja en otro namespace de la misma instancia y el payload cambia al namespace destino. Cada llamada queda auditada en `~/.iris-mcp/audit/runtime.jsonl`. | `server_id`, `code`, `namespace` (opcional) |
 | `iris_ccr_status` | Consulta el estado de control de cambios (CCR/Perforce) de una clase o documento (bloqueado, editable, checkout). | `server_id`, `class_name` **o** `document_name`, `namespace` (opcional) |
 | `iris_ccr_checkout` | Realiza un Checkout (bloqueo/edición) de una clase o documento bajo un identificador de CCR. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
 | `iris_ccr_undocheckout` | Revierte un Checkout en el servidor, removiendo bloqueos y deshaciendo cambios no confirmados. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
@@ -94,7 +95,7 @@ Ningún nombre puede ser una ruta o contener separadores codificados.
 **Contrato de aliases:** cualquier entrada con `canonical_server_id` es una
 referencia, incluso si conserva campos de conexión antiguos. Sus demás campos se
 ignoran por completo: host, puerto, prefijo, namespace predeterminado, credenciales,
-defaults CCR y controles `is_production`/`env_role` proceden solo de la entrada
+defaults CCR y controles `is_production`/`production_read`/`env_role` proceden solo de la entrada
 concreta final. No se mezclan ni heredan overrides del alias. Catálogo, cliente y
 selección de namespace usan el mismo resolver, limitado a 16 entradas por cadena.
 Targets ausentes, ciclos o configuraciones inválidas producen UNRESOLVED en el
@@ -117,6 +118,77 @@ usa la marca `is_production`, el rol configurado y los indicadores de producció
 del namespace. La variable `IRIS_ALLOW_PROD` no concede autorización: su antiguo
 override fue eliminado.
 
+La lectura en producción también se bloquea por defecto. Una entrada de servidor
+concreta puede declarar `"production_read": true` (booleano estricto; por defecto
+`false`) para abrir **solo** el gate READ sobre ese target: consultas REST de
+documentos y metadatos y `iris_query_sql` bajo la misma política SQL. Es un opt-in
+explícito por entrada: no existe default global, ninguna variable de entorno lo
+habilita y en un alias se ignora como cualquier otro campo hermano. Nunca habilita
+escrituras, compilación, checkout/commit/promoción CCR, runners efímeros ni el gate
+RUNTIME: las herramientas READ que usan un runner (`iris_dump_global`,
+`iris_ccr_status`, `iris_ccr_list_itemsets`, `iris_ccr_can_upload`, `status` de
+producción y `list_queues`) siguen bloqueadas en producción.
+
+### Ventana excepcional de configuración LIVE (`routes.live_config_window`)
+
+Ruta **excepcional, con vencimiento y atada a un ticket** para corregir configuración
+de Ensemble en un target marcado como producción (`is_production`, rol o namespace
+LIVE/PROD) mientras todavía no está en uso clínico (pre-go-live). No es un permiso
+general de escritura en LIVE: sin la clave no existe, y ninguna variable de entorno
+puede abrirla, extenderla ni modificarla.
+
+```json
+"routes": {
+  "direct_ha_nodes": ["10.0.0.1", "10.0.0.2"],
+  "live_config_window": {
+    "label": "LIVE pre-go-live HMF loopback",
+    "ticket": "SITE-1234",
+    "expires": "2026-10-15",
+    "namespaces": ["LIVE-SITE", "HMFROUTER"],
+    "hosts": ["10.0.0.1", "10.0.0.2"],
+    "active_node_evidence_namespace": "LIVE-SITE"
+  }
+}
+```
+
+- Validación estricta: todas las claves son obligatorias, no se aceptan claves
+  desconocidas ni tipos incorrectos, `namespaces` y `hosts` no pueden estar vacíos y
+  cada host debe figurar también en `routes.direct_ha_nodes`.
+- `expires` (`YYYY-MM-DD`) usa la **fecha local del host donde corre el MCP** y es
+  inclusiva: la ventana está abierta mientras `hoy <= expires`. Una fecha inválida
+  deja la ventana cerrada (fail-closed).
+- El gate LIVE CONFIG WINDOW exige, en la misma llamada: ventana configurada y
+  vigente, target productivo (en BASE/UAT no concede nada), namespace y host listados
+  (sin distinguir mayúsculas), host HA directo, `production_read: true` en la entrada
+  (el respaldo y la verificación leen por REST) y evidencia fresca de jobs de
+  Interoperability en `active_node_evidence_namespace` en ese nodo. Se usa ese
+  namespace, no el del target, porque las producciones del target pueden estar
+  detenidas. Un nodo backup (0 jobs) se rechaza. Cada runner de la ventana además
+  verifica en su propio proceso `$SYSTEM.Mirror.IsMember()`/`IsPrimary()` y no ejecuta
+  nada fuera del primario.
+- **Permite solo:** `iris_ensemble_item_setting` `set` (compare-and-set de un setting
+  de Item con `expected_current_value` y `ticket` igual al de la ventana; plantilla
+  fija sin ObjectScript del llamador, valores en base64; `Ens.Config.Production`
+  `%Save()` + `SaveToClass()`; no aplica ni reinicia la producción);
+  `iris_ensemble_component_control` `enable`/`disable`/`restart` e
+  `iris_ensemble_production_control` `status`/`start`/`stop`/`restart`.
+- **Sigue bloqueado aunque la ventana esté abierta:** `iris_execute_objectscript`,
+  guardar/parchar/compilar/borrar clases o documentos, todas las herramientas
+  `iris_ccr_*` de escritura/transporte, `iris_unlock_questionnaire`, `iris_dump_global`,
+  `resend`/`abort` de colas y `set`/`delete` de `iris_ensemble_default_settings`.
+- Antes de escribir, `set` guarda un respaldo inmutable de la clase de producción en
+  `<proyecto>/.backup/live-config-window/<namespace>/<produccion>-<UTC>.cls` (nunca
+  sobrescribe) y se bloquea si la clase tiene un cambio de source control pendiente.
+  Después relee el XData, verifica el valor nuevo y que el resto de la producción no
+  cambió (si no, informa **FAILED**), e informa cualquier fila de
+  `%Studio.SourceControl.Change` de la clase sin deshacerla.
+- Cada operación de la ventana (permitida o denegada; `get` excluido) agrega una línea
+  JSON a `<proyecto>/.backup/live-config-window/audit.jsonl` con timestamp UTC,
+  servidor, host, namespace, herramienta, acción, producción, item, target, setting,
+  antes/después, ticket, resultado y motivo. Nunca registra credenciales; los valores
+  de settings con nombres sensibles (`pass`, `secret`, `token`, `credential`, `key`)
+  se guardan como SHA-256. Agregar `.backup/` al `.gitignore` del despliegue.
+
 La ausencia CCR requiere evidencia suficiente; un motor instalado o source control
 genérico configurado no prueba el binding TC. UNKNOWN bloquea guardado, compilación,
 borrado, checkout, promoción y las herramientas que ejecutan ObjectScript mediante
@@ -127,11 +199,56 @@ invocar procedimientos con efectos secundarios.
 
 Las dos rutas MCP explícitas son `iris_execute_objectscript` y
 `iris_ccr_mutate_class_from_file`. La primera ejecuta un payload que puede persistir
-datos únicamente cuando el gate normal prueba ausencia CCR suficiente, permite la
-ruta de ambiente configurada y el rol es explícitamente no productivo. El transporte solo crea
-clases `User.McpTmpRun*`, rechaza `LIVE`/`PROD`, namespaces con apariencia productiva
-y roles desconocidos, y exige borrado verificado y ausencia de residuos de control
-de cambios. Esta excepción no habilita mutaciones permanentes ni herramientas que
+datos bajo el gate RUNTIME: solo exige que el target no sea productivo
+(`is_production`, namespace o rol con marcador productivo) y que el rol configurado
+sea explícitamente no productivo. **No consulta el estado CCR** (no es un cambio de
+código rastreado) y **no bloquea nodos HA directos**: en un nodo backup del mirror la
+subida del runner falla en la base de datos (`ERROR #5883`/`#302`, read-only) y el
+error lo indica. El transporte solo crea clases `User.McpTmpRun*`, rechaza
+`LIVE`/`PROD`, namespaces con apariencia productiva y roles desconocidos, y exige
+borrado verificado y ausencia de residuos de control de cambios. Si el PUT devuelve
+HTTP 200 con `result.status` de error (p. ej. `ERROR #5845`, namespace bloqueado por
+source control) la ejecución falla con el código IRIS y una pista acotada, nunca con
+el código del payload.
+
+Para namespaces bloqueados por source control (TrakCare CCR activo en UAT), la
+política de proyecto puede declarar explícitamente un namespace anfitrión del runner:
+
+```json
+"runtime": { "runner_hosts": [
+  { "namespace": "UAT-SITE", "runner_namespace": "USER", "roles": ["UAT"],
+    "hosts": ["uatnode01", "uatnode02"] } ] }
+```
+
+Si el namespace del target y su rol configurado coinciden con una entrada (y, si la
+entrada declara `hosts`, el host del target está en esa lista, sin distinguir
+mayúsculas; sin `hosts` aplica a cualquier host), el ciclo
+completo del runner (residuos, ausencia, PUT, compilación, ejecución, borrado y
+re-chequeo de residuos) ocurre en `runner_namespace` de la misma instancia (host,
+puerto, prefijo y credenciales), y el payload comienza con `New $NAMESPACE` y
+`Set $NAMESPACE = "<namespace>"`. Ambos namespaces deben pasar el gate RUNTIME. Sin
+entrada no hay fallback: el runner se crea en el namespace destino. La validación
+rechaza namespaces con marcador productivo, `runner_namespace` igual a `namespace`,
+roles productivos o no listados en `non_production_roles`, `hosts` vacío o inválido
+y entradas duplicadas (un solo `namespace` por entrada). Los roles se aceptan en
+minúsculas y se normalizan a mayúsculas.
+
+Si un pre-chequeo del runner (residuos o ausencia) falla por timeout o transporte, el
+error es "could not reach the server ... payload was not executed"; después del PUT
+se mantiene la semántica de resultado desconocido y limpieza estricta.
+
+Cada llamada deja un registro append-only en `~/.iris-mcp/audit/runtime.jsonl`
+(`ISC_AI_AUDIT_DIR` sustituye el directorio): un `start` antes de cualquier request
+al servidor —si no puede escribirse, el código no se ejecuta— y un `end` con el
+resultado y la duración. Varios procesos MCP pueden escribir a la vez: cada línea se
+escribe con un solo `write` en modo append bajo un lock exclusivo entre procesos
+(`msvcrt.locking` en Windows, `fcntl.flock` en POSIX; reintento acotado a ~2 s; si no
+se obtiene para el `start`, la ejecución se bloquea). En POSIX el directorio queda
+`0700` y el archivo `0600`. Incluye host, prefijo, namespaces, rol, SHA-256 y el
+código **tal como lo envió el llamador**: nunca guarda credenciales de conexión ni la
+salida, pero un secreto escrito dentro del código queda registrado.
+
+Esta excepción no habilita mutaciones permanentes ni herramientas que
 usen internamente el `execute_code` regular. La segunda llama exclusivamente al
 SQL fijo `MCP.Mutate(?,?,?,?,?)` sobre el `canonical_base` configurado; no usa
 runner, PUT, endpoint de compilación, discovery previo ni evidencia cacheada.
@@ -404,7 +521,8 @@ Secciones del archivo:
 | :--- | :--- |
 | `site` | `name`; `ccr_id {prefix, digits}` define el formato del identificador CCR (prefijo `SITE` y 4 dígitos → `SITE0001`); `protocol_prefix` nombra los protocolos `<prefix>_CCR_MUTATION_V1` / `<prefix>_CCR_INITIALIZER_V1`; `production_markers`, `production_roles`, `non_production_roles`, `system_namespaces`. |
 | `canonical_base` | `{server_id, host, port, path_prefix, namespace}`. Única ruta donde se admiten bundle/upload/create de CCR, el SQLProc de mutación controlada y el inicializador de la facilidad. El rol debe ser `BASE` e `is_production` falso. |
-| `routes` | `direct_ha_nodes`: hosts donde las escrituras de código se bloquean salvo excepción. `alias_constraints {alias_id: {host, path_prefix}}`: un alias debe resolver a ese VIP. `uat_write_exceptions`: lista de `{label, namespace, hosts?, path_prefixes, requires_active_node}`; sin `hosts` aplica a cualquier nodo HA directo; `requires_active_node: true` exige evidencia fresca de que el nodo ejecuta la producción. |
+| `routes` | `direct_ha_nodes`: hosts donde las escrituras de código se bloquean salvo excepción. `alias_constraints {alias_id: {host, path_prefix}}`: un alias debe resolver a ese VIP. `uat_write_exceptions`: lista de `{label, namespace, hosts?, path_prefixes, requires_active_node}`; sin `hosts` aplica a cualquier nodo HA directo; `requires_active_node: true` exige evidencia fresca de que el nodo ejecuta la producción. `live_config_window` (opcional): ventana excepcional de configuración Ensemble en targets productivos; ver la sección de seguridad. |
+| `runtime` (opcional) | `runner_hosts`: lista de `{namespace, runner_namespace, roles, hosts?}`. Aloja el runner de `iris_execute_objectscript` en `runner_namespace` (misma instancia) cuando el target es `namespace` con uno de esos `roles` y, si se declara `hosts`, uno de esos hosts (sin distinguir mayúsculas); ver la sección de seguridad. |
 | `packages` | `{namespace: [grants]}`. Cada grant fija exactamente uno de `prefix` (coincide con `<prefix>.<clase>`, nunca el prefijo solo), `class` (stem exacto) o `document` (nombre con extensión), más `roles` opcional. Nunca se otorgan las raíces `%`, `Ens`, `Region`, `MCP`, `TC`, `web`, `websys`, `EPR`, `User`, `Model`, `SQLUser` ni la facilidad `MCP.CCRMutation`. |
 | `mutation` | `{class_prefix, local_source_root}`: clases admitidas por `iris_ccr_mutate_class_from_file` y el directorio local (relativo al proyecto) que debe contener el `.cls` aprobado; la ruta es la raíz más los componentes de la clase posteriores al prefijo. |
 | `servers` (opcional) | Entradas de servidor con el mismo formato que la capa 2. Las del proyecto prevalecen sobre las del usuario. |
@@ -420,7 +538,8 @@ Este archivo es **commitable** cuando sus secretos son referencias `{env:VAR}`.
 ```
 
 Claves admitidas por entrada: `host`, `port`, `path_prefix`, `username`, `password`,
-`namespace`, `env_role`, `is_production`, `proxy`, `ccr_id`, `upload_token`,
+`namespace`, `env_role`, `is_production`, `production_read` (opt-in de solo lectura
+en producción; ver Seguridad), `proxy`, `ccr_id`, `upload_token`,
 `canonical_server_id` (alias), `description`. El archivo heredado
 `~/.iris_mcp_servers.json` sigue leyéndose como fallback (se registra una nota);
 `isc-ai servers migrate` lo copia al nuevo destino. Este archivo es **privado**:

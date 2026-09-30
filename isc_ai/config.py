@@ -23,12 +23,32 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from isc_ai.ccr_discovery import LocalPolicyError, validate_namespace
+
 CONFIG_VERSION = 1
-PROJECT_DIR_ENV = "IRIS_MCP_PROJECT_DIR"
-PROJECT_CONFIG_ENV = "IRIS_MCP_CONFIG"
+
+# Directory names, newest first. The tool configures the agentic environment, of which
+# IRIS/TrakCare is one server, so the state directory carries the tool's name rather than
+# that server's. `.iris-mcp` stays readable forever: an installed deployment must keep
+# working after an upgrade, and a rename is not a reason to break one.
+STATE_DIR = ".isc-ai"
+LEGACY_STATE_DIR = ".iris-mcp"
+STATE_DIRS = (STATE_DIR, LEGACY_STATE_DIR)
+
+# Environment overrides, newest first. Both are honoured; the new name wins when both are
+# set, and the CLI reports which one was used instead of choosing in silence.
+PROJECT_DIR_ENV = "ISC_AI_PROJECT_DIR"
+PROJECT_CONFIG_ENV = "ISC_AI_CONFIG"
+LEGACY_PROJECT_DIR_ENV = "IRIS_MCP_PROJECT_DIR"
+LEGACY_PROJECT_CONFIG_ENV = "IRIS_MCP_CONFIG"
+PROJECT_DIR_ENVS = (PROJECT_DIR_ENV, LEGACY_PROJECT_DIR_ENV)
+PROJECT_CONFIG_ENVS = (PROJECT_CONFIG_ENV, LEGACY_PROJECT_CONFIG_ENV)
+
 EXTRA_PACKAGES_ENV = "IRIS_EXTRA_PACKAGES"
-PROJECT_CONFIG_RELATIVE = Path(".iris-mcp") / "config.json"
-USER_SERVERS_RELATIVE = Path(".iris-mcp") / "servers.json"
+PROJECT_CONFIG_RELATIVE = Path(STATE_DIR) / "config.json"
+LEGACY_PROJECT_CONFIG_RELATIVE = Path(LEGACY_STATE_DIR) / "config.json"
+USER_SERVERS_RELATIVE = Path(STATE_DIR) / "servers.json"
+LEGACY_USER_SERVERS_RELATIVE = Path(LEGACY_STATE_DIR) / "servers.json"
 LEGACY_USER_SERVERS_NAME = ".iris_mcp_servers.json"
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "resources" / "config.template.json"
@@ -120,6 +140,62 @@ class PackageGrant:
 
 
 @dataclass(frozen=True)
+class RunnerHost:
+    """Explicit host namespace for the ephemeral runner of a locked namespace.
+
+    The runner class is created in runner_namespace (same instance) and the payload
+    switches to namespace itself. Applies only to the configured roles and, when
+    hosts is set (lower-cased), only to targets whose host is listed.
+    """
+    namespace: str
+    runner_namespace: str
+    roles: frozenset
+    hosts: frozenset = None
+
+
+LIVE_CONFIG_WINDOW_KEYS = frozenset({"label", "ticket", "expires", "namespaces", "hosts",
+                                     "active_node_evidence_namespace"})
+LIVE_CONFIG_WINDOW_BACKUP_RELATIVE = Path(".backup") / "live-config-window"
+_EXPIRES_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+@dataclass(frozen=True)
+class LiveConfigWindow:
+    """Exceptional, expiring, ticket-bound route for Ensemble configuration on
+    production-flagged targets (routes.live_config_window).
+
+    It never opens CODE WRITE, CCR, arbitrary runtime execution or anything on a
+    non-production target. The window is open while the LOCAL date of the MCP host
+    is on or before `expires` (inclusive); an unparsable date keeps it closed.
+    Namespaces are stored upper-case and hosts lower-case (case-insensitive match).
+    """
+    label: str
+    ticket: str
+    expires: str
+    namespaces: frozenset
+    hosts: frozenset
+    active_node_evidence_namespace: str
+    backup_root: Path
+
+    def expiry_date(self):
+        import datetime
+        if not isinstance(self.expires, str) or not _EXPIRES_RE.fullmatch(self.expires):
+            return None
+        try:
+            return datetime.date.fromisoformat(self.expires)
+        except ValueError:
+            return None
+
+    def is_open(self, today):
+        expiry = self.expiry_date()
+        return expiry is not None and today <= expiry
+
+    def covers(self, namespace, host):
+        return (isinstance(namespace, str) and namespace.upper() in self.namespaces
+                and isinstance(host, str) and host.lower() in self.hosts)
+
+
+@dataclass(frozen=True)
 class SitePolicy:
     # False for the built-in default policy (no project configuration loaded).
     # CODE WRITE routes require a configured policy; READ keeps working because
@@ -138,6 +214,9 @@ class SitePolicy:
     direct_ha_nodes: frozenset = frozenset()
     alias_constraints: dict = field(default_factory=dict)
     uat_write_exceptions: tuple = ()
+    # Explicit runner host namespaces (runtime.runner_hosts). Empty: the runner is
+    # always created in the target namespace; there is never an implicit fallback.
+    runner_hosts: tuple = ()
     packages: dict = field(default_factory=dict)
     mutation_class_prefix: str = None
     mutation_source_root: Path = None
@@ -147,6 +226,9 @@ class SitePolicy:
     # role -> provider-qualified model id. Empty means "let the client decide": a
     # concrete id is a decision about which model runs the work, never a default.
     agent_models: dict = field(default_factory=dict)
+    # routes.live_config_window. None (the default) means no window: production
+    # targets keep every write, runner and RUNTIME operation blocked.
+    live_config_window: LiveConfigWindow = None
 
     # -- CCR identifier -------------------------------------------------
 
@@ -200,6 +282,24 @@ class SitePolicy:
             hosts = exception.hosts if exception.hosts is not None else self.direct_ha_nodes
             if host in hosts:
                 yield exception
+
+    def runner_host_for(self, namespace, role, host=None):
+        """The RunnerHost configured for namespace, role and host, or None.
+
+        An entry with hosts matches only a listed host (case-insensitive); an entry
+        without hosts matches any host.
+        """
+        if not isinstance(namespace, str) or not isinstance(role, str):
+            return None
+        target, normalized_role = namespace.upper(), role.strip().upper()
+        normalized_host = host.lower() if isinstance(host, str) else None
+        for entry in self.runner_hosts:
+            if entry.namespace != target or normalized_role not in entry.roles:
+                continue
+            if entry.hosts is not None and normalized_host not in entry.hosts:
+                continue
+            return entry
+        return None
 
     # -- Packages -------------------------------------------------------
 
@@ -413,7 +513,7 @@ def _parse_canonical_base(data, policy_kwargs):
     )
 
 
-def _parse_routes(data, policy_kwargs):
+def _parse_routes(data, policy_kwargs, project_dir=None):
     routes = data.get("routes", {})
     _expect(isinstance(routes, dict), "routes must be an object.")
     if "direct_ha_nodes" in routes:
@@ -458,6 +558,106 @@ def _parse_routes(data, policy_kwargs):
             path_prefixes=prefixes, hosts=hosts, requires_active_node=requires,
         ))
     policy_kwargs["uat_write_exceptions"] = tuple(parsed)
+    if "live_config_window" in routes:
+        policy_kwargs["live_config_window"] = _parse_live_config_window(
+            routes["live_config_window"], policy_kwargs.get("direct_ha_nodes", frozenset()), project_dir)
+
+
+def _parse_live_config_window(item, direct_ha_nodes, project_dir):
+    """routes.live_config_window: strict, explicit, never widened by the environment."""
+    path = "routes.live_config_window"
+    _expect(isinstance(item, dict), f"{path} must be an object.")
+    _expect(project_dir is not None, f"{path} requires a project directory for its backups and audit.")
+    unknown = set(item) - LIVE_CONFIG_WINDOW_KEYS
+    _expect(not unknown, f"Unknown keys in {path}: {sorted(unknown)}.")
+    missing = LIVE_CONFIG_WINDOW_KEYS - set(item)
+    _expect(not missing, f"{path} is missing required keys: {sorted(missing)}.")
+    label = _string(item["label"], f"{path}.label")
+    ticket = _string(item["ticket"], f"{path}.ticket")
+    _expect(ticket.strip() == ticket and ticket, f"{path}.ticket must be a non-empty trimmed string.")
+    # Only the type is a configuration error: an unparsable date keeps the window
+    # closed (fail closed) without taking every other route down with it.
+    expires = _string(item["expires"], f"{path}.expires")
+
+    def namespace_value(value, where):
+        try:
+            return validate_namespace(value)
+        except LocalPolicyError:
+            raise ConfigError(f"{where} must be a plain namespace identifier.") from None
+
+    raw_namespaces = item["namespaces"]
+    _expect(isinstance(raw_namespaces, list) and raw_namespaces, f"{path}.namespaces must be a non-empty list of strings.")
+    namespaces = frozenset(namespace_value(_string(value, f"{path}.namespaces[{index}]"), f"{path}.namespaces[{index}]")
+                           for index, value in enumerate(raw_namespaces))
+    raw_hosts = item["hosts"]
+    _expect(isinstance(raw_hosts, list) and raw_hosts, f"{path}.hosts must be a non-empty list of strings.")
+    hosts = frozenset(host.lower() for host in _string_list(raw_hosts, f"{path}.hosts", _HOST_RE))
+    direct = {host.lower() for host in direct_ha_nodes}
+    outside = sorted(hosts - direct)
+    _expect(not outside, f"{path}.hosts {outside} must also be listed in routes.direct_ha_nodes.")
+    evidence = namespace_value(_string(item["active_node_evidence_namespace"],
+                                       f"{path}.active_node_evidence_namespace"),
+                               f"{path}.active_node_evidence_namespace")
+    return LiveConfigWindow(
+        label=label, ticket=ticket, expires=expires, namespaces=namespaces, hosts=hosts,
+        active_node_evidence_namespace=evidence,
+        backup_root=(Path(project_dir) / LIVE_CONFIG_WINDOW_BACKUP_RELATIVE).resolve(),
+    )
+
+
+def _runtime_namespace(value, path, markers):
+    try:
+        namespace = validate_namespace(value)
+    except LocalPolicyError:
+        raise ConfigError(f"{path} must be a plain namespace identifier.") from None
+    tainted = [marker for marker in markers if marker in namespace]
+    _expect(not tainted, f"{path} '{namespace}' contains a production marker {tainted}.")
+    return namespace
+
+
+def _parse_runtime(data, policy_kwargs):
+    """runtime.runner_hosts: explicit runner host namespaces, never inferred."""
+    runtime = data.get("runtime")
+    if runtime is None:
+        return
+    _expect(isinstance(runtime, dict), "runtime must be an object.")
+    unknown = set(runtime) - {"runner_hosts"}
+    _expect(not unknown, f"Unknown keys in runtime: {sorted(unknown)}.")
+    hosts = runtime.get("runner_hosts", [])
+    _expect(isinstance(hosts, list), "runtime.runner_hosts must be a list.")
+    markers = policy_kwargs.get("production_markers", SitePolicy.production_markers)
+    production = policy_kwargs.get("production_roles", SitePolicy.production_roles)
+    non_production = policy_kwargs.get("non_production_roles", SitePolicy.non_production_roles)
+    parsed, seen = [], set()
+    for index, item in enumerate(hosts):
+        path = f"runtime.runner_hosts[{index}]"
+        _expect(isinstance(item, dict), f"{path} must be an object.")
+        extra = set(item) - {"namespace", "runner_namespace", "roles", "hosts"}
+        _expect(not extra, f"Unknown keys in {path}: {sorted(extra)}.")
+        namespace = _runtime_namespace(item.get("namespace"), f"{path}.namespace", markers)
+        runner_namespace = _runtime_namespace(item.get("runner_namespace"), f"{path}.runner_namespace", markers)
+        _expect(runner_namespace != namespace, f"{path}.runner_namespace must differ from namespace.")
+        _expect(namespace not in seen, f"{path}.namespace '{namespace}' is duplicated.")
+        seen.add(namespace)
+        # Roles are upper-cased BEFORE the pattern check here only (runner_hosts accepts
+        # "uat"); packages[].roles keeps its stricter upper-case-only contract.
+        raw_roles = item.get("roles")
+        _expect(isinstance(raw_roles, list), f"{path}.roles must be a list of strings.")
+        roles = frozenset(
+            _string(role.upper() if isinstance(role, str) else role, f"{path}.roles[{position}]", _ROLE_RE)
+            for position, role in enumerate(raw_roles))
+        _expect(roles, f"{path}.roles must not be empty.")
+        entry_hosts = None
+        if "hosts" in item:
+            entry_hosts = frozenset(host.lower() for host in _string_list(item["hosts"], f"{path}.hosts", _HOST_RE))
+            _expect(entry_hosts, f"{path}.hosts must not be empty.")
+        forbidden = sorted(roles & production)
+        _expect(not forbidden, f"{path}.roles {forbidden} are production roles.")
+        unlisted = sorted(roles - non_production)
+        _expect(not unlisted, f"{path}.roles {unlisted} are not configured non-production roles.")
+        parsed.append(RunnerHost(namespace=namespace, runner_namespace=runner_namespace,
+                                 roles=roles, hosts=entry_hosts))
+    policy_kwargs["runner_hosts"] = tuple(parsed)
 
 
 def _parse_packages(data, policy_kwargs):
@@ -539,12 +739,13 @@ def parse_policy(data, project_dir):
     _expect(isinstance(data, dict), "Project configuration must be a JSON object.")
     version = data.get("version", CONFIG_VERSION)
     _expect(version == CONFIG_VERSION, f"Unsupported configuration version {version!r}; expected {CONFIG_VERSION}.")
-    unknown = set(data) - {"version", "site", "canonical_base", "routes", "packages", "mutation", "agents", "servers", "$schema", "_comment"}
+    unknown = set(data) - {"version", "site", "canonical_base", "routes", "runtime", "packages", "mutation", "agents", "servers", "$schema", "_comment"}
     _expect(not unknown, f"Unknown top-level keys: {sorted(unknown)}.")
     kwargs = {"configured": True}
     _parse_site(data, kwargs)
     _parse_canonical_base(data, kwargs)
-    _parse_routes(data, kwargs)
+    _parse_routes(data, kwargs, project_dir)
+    _parse_runtime(data, kwargs)
     _parse_packages(data, kwargs)
     _parse_agents(data, kwargs)
     _parse_mutation(data, kwargs, project_dir)
@@ -557,7 +758,7 @@ def parse_policy(data, project_dir):
 
 SERVER_KEYS = {"host", "port", "path_prefix", "username", "password", "namespace", "env_role",
                "is_production", "proxy", "ccr_id", "upload_token", "canonical_server_id", "description",
-               "scheme", "verify_ssl"}
+               "scheme", "verify_ssl", "production_read"}
 
 
 def resolve_secret_references(value, environ):
@@ -613,28 +814,52 @@ class RuntimeConfig:
     notes: tuple = ()
 
 
-def find_project_root(start):
-    """Nearest ancestor of `start` (inclusive) that holds .iris-mcp/config.json, else None.
+class AmbiguousStateError(ConfigError):
+    """One directory holds both the new and the legacy state: refuse to guess which wins."""
 
-    Mirrors how git finds .git: the MCP may be launched from any subdirectory of a
-    deployment and still pick up that deployment's policy.
+
+def state_flavours(directory):
+    """Which state directories exist in `directory`, newest first.
+
+    Two of them means a half-finished migration, and picking one silently would make the
+    other invisible: a stale policy that looks live is worse than an error.
+    """
+    base = Path(directory)
+    return tuple(name for name in STATE_DIRS if (base / name / "config.json").is_file())
+
+
+def find_project_root(start):
+    """Nearest ancestor of `start` (inclusive) that holds a project configuration, else None.
+
+    Mirrors how git finds .git: the server may be launched from any subdirectory of a
+    deployment and still pick up that deployment's policy. Proximity decides, not flavour,
+    so a nearby legacy deployment is never overruled by a distant migrated one.
     """
     current = Path(start).resolve()
     for candidate in (current, *current.parents):
-        if (candidate / PROJECT_CONFIG_RELATIVE).is_file():
+        if state_flavours(candidate):
             return candidate
     return None
 
 
-def project_directory(environ=None, start=None):
-    """Directory whose .iris-mcp/config.json governs this process.
+def _first_env(environ, names):
+    """Value of the first name that is set, and the name it came from."""
+    for name in names:
+        value = environ.get(name)
+        if value:
+            return value, name
+    return None, None
 
-    Precedence: IRIS_MCP_PROJECT_DIR (explicit, no search) → nearest ancestor of
-    `start` (default cwd) with a project configuration → `start` itself (which
-    then yields an unconfigured policy).
+
+def project_directory(environ=None, start=None):
+    """Directory whose project configuration governs this process.
+
+    Precedence: an explicit override (no search) -> nearest ancestor of `start` (default
+    cwd) with a project configuration -> `start` itself, which then yields an unconfigured
+    policy.
     """
     environ = os.environ if environ is None else environ
-    override = environ.get(PROJECT_DIR_ENV)
+    override, _ = _first_env(environ, PROJECT_DIR_ENVS)
     if override:
         return Path(override).resolve()
     start = Path.cwd() if start is None else Path(start)
@@ -643,14 +868,38 @@ def project_directory(environ=None, start=None):
 
 
 def project_config_path(project_dir, environ=None):
+    """Path of the policy that governs `project_dir`.
+
+    Reads whichever flavour exists; writes the current one when neither does. Both present
+    is an error, because the answer to "which policy is live" must not depend on which
+    constant happens to be checked first.
+    """
     environ = os.environ if environ is None else environ
-    override = environ.get(PROJECT_CONFIG_ENV)
-    return Path(override).resolve() if override else (Path(project_dir) / PROJECT_CONFIG_RELATIVE)
+    override, _ = _first_env(environ, PROJECT_CONFIG_ENVS)
+    if override:
+        return Path(override).resolve()
+    base = Path(project_dir)
+    flavours = state_flavours(base)
+    if len(flavours) > 1:
+        raise AmbiguousStateError(
+            f"{base} holds both {STATE_DIR}/config.json and {LEGACY_STATE_DIR}/config.json; "
+            f"keep one and remove the other (see 'isc-ai migrate')"
+        )
+    if flavours:
+        return base / flavours[0] / "config.json"
+    return base / PROJECT_CONFIG_RELATIVE
 
 
 def user_servers_path(home=None):
+    """User-level connections, preferring the current directory but reading the legacy one."""
     home = Path.home() if home is None else Path(home)
-    return home / USER_SERVERS_RELATIVE
+    current = home / USER_SERVERS_RELATIVE
+    if current.is_file():
+        return current
+    legacy = home / LEGACY_USER_SERVERS_RELATIVE
+    if legacy.is_file():
+        return legacy
+    return current
 
 
 def legacy_user_servers_path(home=None):

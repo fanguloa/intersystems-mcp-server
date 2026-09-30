@@ -99,6 +99,453 @@ def log_debug(message):
     sys.stderr.write(f"[DEBUG] {message}\n")
     sys.stderr.flush()
 
+
+# Local append-only audit of arbitrary runtime execution (iris_execute_objectscript
+# transport). Tool arguments are redacted from logs, so this file is the only trail
+# of what code ran where. Records never store connection credentials or execution
+# output, but they DO store the caller's payload code verbatim: a secret embedded in
+# the code is recorded. Several MCP processes append concurrently, so every line is
+# one write under a cross-process exclusive lock.
+RUNTIME_AUDIT_DIR_ENV = "ISC_AI_AUDIT_DIR"
+RUNTIME_AUDIT_FILE = "runtime.jsonl"
+_AUDIT_LOCK_TIMEOUT_S = 2.0
+_AUDIT_LOCK_RETRY_S = 0.05
+_IS_WINDOWS = os.name == "nt"
+
+
+def _runtime_audit_path():
+    override = os.environ.get(RUNTIME_AUDIT_DIR_ENV)
+    directory = Path(override) if override else Path.home() / ".iris-mcp" / "audit"
+    if not directory.is_absolute():
+        raise LocalPolicyError("Runtime audit directory must be an absolute path.")
+    return directory / RUNTIME_AUDIT_FILE
+
+
+def _audit_try_lock(fd):
+    """One non-blocking attempt at an exclusive lock; raises OSError when held elsewhere."""
+    if _IS_WINDOWS:
+        import msvcrt
+        # Lock byte 0 (a fixed region shared by every process); O_APPEND still
+        # writes at end of file regardless of the current position.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _audit_unlock(fd):
+    if _IS_WINDOWS:
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _audit_lock(fd):
+    """Exclusive lock with a bounded retry; raises LocalPolicyError on timeout."""
+    import time
+    deadline = time.monotonic() + _AUDIT_LOCK_TIMEOUT_S
+    while True:
+        try:
+            _audit_try_lock(fd)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise LocalPolicyError("Runtime audit file lock could not be obtained.") from None
+            time.sleep(_AUDIT_LOCK_RETRY_S)
+
+
+def _chmod_best_effort(path, mode):
+    if _IS_WINDOWS:
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _append_runtime_audit(record):
+    """Append one JSON line to the runtime audit file (creates the directory).
+
+    The line is written with a single os.write on an O_APPEND descriptor while an
+    exclusive cross-process lock is held. On POSIX the directory is 0700 and the
+    file 0600 (best effort). Any failure raises; callers decide fail-closed or not.
+    """
+    _append_jsonl_locked(_runtime_audit_path(), record)
+
+
+def _append_jsonl_locked(path, record):
+    """Shared locked JSON-line appender (runtime audit and LIVE config window audit)."""
+    directory = path.parent
+    existed = directory.is_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not existed:
+        _chmod_best_effort(directory, 0o700)
+    data = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        _chmod_best_effort(path, 0o600)
+        _audit_lock(fd)
+        try:
+            written = os.write(fd, data)
+            if written != len(data):
+                raise OSError("Short write to the runtime audit file.")
+        finally:
+            try:
+                _audit_unlock(fd)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+
+
+def _audit_timestamp():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# LIVE CONFIG WINDOW (routes.live_config_window)
+#
+# Exceptional, expiring, ticket-bound route for Ensemble configuration on
+# production-flagged targets. It never opens CODE WRITE, CCR, arbitrary runtime
+# execution or anything on a non-production target. Backups and the audit trail
+# live under <project>/.backup/live-config-window/.
+# ---------------------------------------------------------------------------
+
+LIVE_WINDOW_AUDIT_FILE = "audit.jsonl"
+# A grant is issued per tool call after the gate passed; it only needs to cover
+# the runners of that single call.
+_LIVE_WINDOW_GRANT_TTL_S = 600
+_LIVE_WINDOW_VALUE_MAX = 8192
+_LIVE_WINDOW_SENSITIVE_SETTING_RE = re.compile(r"pass|secret|token|credential|key", re.IGNORECASE)
+_LIVE_WINDOW_SETTING_NAME_RE = re.compile(r"%?[A-Za-z][A-Za-z0-9_]{0,127}")
+# Characters that XML 1.0 cannot carry (the value ends up inside the class XData).
+_XML_INVALID_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_COS_BASE64_RE = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_LIVE_WINDOW_NOT_PRIMARY = "MCPLCW_NOT_PRIMARY"
+# Prepended to EVERY window runner: the payload never runs on a mirror member that
+# is not the primary, evaluated in the same IRIS process that would execute it.
+_LIVE_WINDOW_PRIMARY_GUARD = (
+    "If $SYSTEM.Mirror.IsMember() && '$SYSTEM.Mirror.IsPrimary() { Write \""
+    + _LIVE_WINDOW_NOT_PRIMARY + "\", ! Quit }"
+)
+_LIVE_WINDOW_RESULT_FIELDS = frozenset({
+    "status", "member", "primary", "before_present", "before", "after_present", "after",
+    "running", "message",
+})
+
+
+def _live_window_today():
+    """Local calendar date of the MCP host: the documented clock of the window."""
+    import datetime
+    return datetime.date.today()
+
+
+def _live_window_audit_path(window):
+    path = Path(window.backup_root) / LIVE_WINDOW_AUDIT_FILE
+    if not path.is_absolute():
+        raise LocalPolicyError("LIVE config window audit path must be absolute.")
+    return path
+
+
+def _append_live_window_audit(window, record):
+    """One JSON line per window operation, same locked appender as the runtime audit."""
+    _append_jsonl_locked(_live_window_audit_path(window), record)
+
+
+def _live_window_audit_preflight(window):
+    """Prove the audit file can be created, locked and appended BEFORE any write."""
+    path = _live_window_audit_path(window)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        _audit_lock(fd)
+        _audit_unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _cos_string_expr(value):
+    """Strict ObjectScript expression that evaluates to `value`.
+
+    The caller string never reaches the ObjectScript parser: it travels as the
+    base64 of its UTF-8 bytes inside a quoted literal whose alphabet cannot close
+    the literal, concatenate, call $C() or start a new command.
+    """
+    if not isinstance(value, str):
+        raise LocalPolicyError("LIVE config window values must be strings.")
+    try:
+        raw = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise LocalPolicyError("LIVE config window values must be valid Unicode text.") from None
+    encoded = base64.b64encode(raw).decode("ascii")
+    if not _COS_BASE64_RE.fullmatch(encoded):
+        raise LocalPolicyError("LIVE config window value encoding failed.")
+    return f'$ZConvert($System.Encryption.Base64Decode("{encoded}"),"I","UTF8")'
+
+
+def _live_window_item_setting_code(production, item, target, setting, value, expected):
+    """FIXED runner template for one compare-and-set of a production item setting.
+
+    Every caller value is embedded through _cos_string_expr; nothing else varies.
+    In ONE process it: aborts unless the node is not a mirror member or is the
+    primary; opens Ens.Config.Production; requires exactly one item with that
+    name and FindItemByConfigName to return it; locates the setting by
+    Target+Name (adds it when absent); aborts on drift; sets, %Save(), then
+    SaveToClass() so the class XData is updated. It writes one MCPLCW record.
+    """
+    lines = [
+        f"Set mcpProd = {_cos_string_expr(production)}",
+        f"Set mcpItemName = {_cos_string_expr(item)}",
+        f"Set mcpTarget = {_cos_string_expr(target)}",
+        f"Set mcpSetting = {_cos_string_expr(setting)}",
+        f"Set mcpValue = {_cos_string_expr(value)}",
+        f"Set mcpExpected = {_cos_string_expr(expected)}",
+        'Set mcpStatus = "EXCEPTION", mcpMsg = "", mcpMember = "", mcpPrimary = "", mcpRunning = 0',
+        'Set mcpBeforePresent = 0, mcpBefore = "", mcpAfterPresent = 0, mcpAfter = ""',
+        "Try {",
+        "    Set mcpMember = +$SYSTEM.Mirror.IsMember(), mcpPrimary = +$SYSTEM.Mirror.IsPrimary()",
+        "    If '(('mcpMember) || mcpPrimary) {",
+        '        Set mcpStatus = "NOT_PRIMARY", mcpMsg = "Mirror member is not the primary; nothing was written"',
+        "    } Else {",
+        "        Set mcpSC = $$$OK",
+        "        Set mcpProduction = ##class(Ens.Config.Production).%OpenId(mcpProd, , .mcpSC)",
+        "        If '$IsObject(mcpProduction) {",
+        '            Set mcpStatus = "NO_PRODUCTION", mcpMsg = "Production configuration not found; nothing was written"',
+        "        } Else {",
+        "            Set mcpCount = 0",
+        "            For mcpI = 1:1:mcpProduction.Items.Count() {",
+        "                If mcpProduction.Items.GetAt(mcpI).Name = mcpItemName { Set mcpCount = mcpCount + 1 }",
+        "            }",
+        "            If mcpCount '= 1 {",
+        '                Set mcpStatus = "ITEM_NOT_UNIQUE", mcpMsg = "Item name must match exactly one item; found "_mcpCount_"; nothing was written"',
+        "            } Else {",
+        "                Set mcpItem = mcpProduction.FindItemByConfigName(mcpItemName, .mcpSC)",
+        "                If ('$IsObject(mcpItem)) || (mcpItem.Name '= mcpItemName) {",
+        '                    Set mcpStatus = "NO_ITEM", mcpMsg = "FindItemByConfigName did not return the item; nothing was written"',
+        "                } Else {",
+        "                    Set mcpIndex = 0, mcpDup = 0",
+        "                    For mcpI = 1:1:mcpItem.Settings.Count() {",
+        "                        Set mcpS = mcpItem.Settings.GetAt(mcpI)",
+        "                        If (mcpS.Target = mcpTarget) && (mcpS.Name = mcpSetting) {",
+        "                            If mcpIndex { Set mcpDup = 1 } Else { Set mcpIndex = mcpI }",
+        "                        }",
+        "                    }",
+        "                    If mcpDup {",
+        '                        Set mcpStatus = "DUPLICATE_SETTING", mcpMsg = "Setting appears more than once for this target; nothing was written"',
+        "                    } Else {",
+        "                        If mcpIndex { Set mcpBeforePresent = 1, mcpBefore = mcpItem.Settings.GetAt(mcpIndex).Value }",
+        "                        If mcpBefore '= mcpExpected {",
+        '                            Set mcpStatus = "DRIFT", mcpMsg = "Current value differs from expected_current_value; nothing was written"',
+        "                        } Else {",
+        "                            Set mcpNew = ##class(Ens.Config.Setting).%New()",
+        "                            Set mcpNew.Target = mcpTarget, mcpNew.Name = mcpSetting, mcpNew.Value = mcpValue",
+        "                            If mcpIndex { Set mcpSC = mcpItem.Settings.SetAt(mcpNew, mcpIndex) } Else { Set mcpSC = mcpItem.Settings.Insert(mcpNew) }",
+        "                            If $$$ISOK(mcpSC) { Set mcpSC = mcpProduction.%Save() }",
+        "                            If $$$ISERR(mcpSC) {",
+        '                                Set mcpStatus = "SAVE_FAILED", mcpMsg = $System.Status.GetOneErrorText(mcpSC)',
+        "                            } Else {",
+        "                                Set mcpSC = mcpProduction.SaveToClass(mcpItem)",
+        "                                If $$$ISERR(mcpSC) {",
+        '                                    Set mcpStatus = "SAVETOCLASS_FAILED", mcpMsg = $System.Status.GetOneErrorText(mcpSC)',
+        "                                    If mcpIndex {",
+        "                                        Set mcpOld = ##class(Ens.Config.Setting).%New()",
+        "                                        Set mcpOld.Target = mcpTarget, mcpOld.Name = mcpSetting, mcpOld.Value = mcpBefore",
+        "                                        Set mcpRevert = mcpItem.Settings.SetAt(mcpOld, mcpIndex)",
+        "                                    } Else {",
+        "                                        Do mcpItem.Settings.RemoveAt(mcpItem.Settings.Count())",
+        "                                        Set mcpRevert = $$$OK",
+        "                                    }",
+        "                                    If $$$ISOK(mcpRevert) { Set mcpRevert = mcpProduction.%Save() }",
+        '                                    Set mcpMsg = mcpMsg_"; configuration table revert "_$Select($$$ISOK(mcpRevert):"OK",1:"FAILED")',
+        "                                } Else {",
+        '                                    Set mcpStatus = "OK"',
+        "                                }",
+        "                            }",
+        "                            For mcpI = 1:1:mcpItem.Settings.Count() {",
+        "                                Set mcpS = mcpItem.Settings.GetAt(mcpI)",
+        "                                If (mcpS.Target = mcpTarget) && (mcpS.Name = mcpSetting) { Set mcpAfterPresent = 1, mcpAfter = mcpS.Value }",
+        "                            }",
+        "                        }",
+        "                    }",
+        "                }",
+        "            }",
+        '            Set mcpActive = "", mcpState = 0',
+        "            Set mcpDirSC = ##class(Ens.Director).GetProductionStatus(.mcpActive, .mcpState)",
+        "            If $$$ISOK(mcpDirSC) && (mcpActive = mcpProd) && (mcpState = 1) { Set mcpRunning = 1 }",
+        "        }",
+        "    }",
+        "} Catch mcpEx {",
+        '    Set mcpStatus = "EXCEPTION", mcpMsg = mcpEx.DisplayString()',
+        "}",
+        'Write "MCPLCW|status=", mcpStatus, "|member=", +mcpMember, "|primary=", +mcpPrimary, '
+        '"|before_present=", mcpBeforePresent, '
+        '"|before=", $System.Encryption.Base64Encode($ZConvert(mcpBefore,"O","UTF8"),1), '
+        '"|after_present=", mcpAfterPresent, '
+        '"|after=", $System.Encryption.Base64Encode($ZConvert(mcpAfter,"O","UTF8"),1), '
+        '"|running=", mcpRunning, '
+        '"|message=", $System.Encryption.Base64Encode($ZConvert(mcpMsg,"O","UTF8"),1), !',
+    ]
+    return "\n".join(lines)
+
+
+def _decode_live_window_b64(value):
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8", errors="strict")
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("Invalid base64 field") from None
+
+
+def _parse_live_window_result(output):
+    """Exactly one MCPLCW record with the expected fields; anything else raises."""
+    lines = [line.strip() for line in str(output).splitlines() if line.strip()]
+    if any(line == _LIVE_WINDOW_NOT_PRIMARY for line in lines):
+        raise _LiveWindowNotPrimary("LIVE config window: the runner process is not on the mirror primary; nothing was executed.")
+    if len(lines) != 1:
+        raise LocalPolicyError("LIVE config window runner returned no single result record; outcome UNKNOWN, inspect manually.")
+    try:
+        fields = _parse_pipe_record(lines[0], "MCPLCW")
+        if set(fields) != _LIVE_WINDOW_RESULT_FIELDS:
+            raise ValueError("fields")
+        for flag in ("member", "primary", "before_present", "after_present", "running"):
+            if not fields[flag].isdigit():
+                raise ValueError("flag")
+        return {
+            "status": fields["status"],
+            "mirror_member": int(fields["member"]),
+            "mirror_primary": int(fields["primary"]),
+            "before_present": fields["before_present"] == "1",
+            "before": _decode_live_window_b64(fields["before"]),
+            "after_present": fields["after_present"] == "1",
+            "after": _decode_live_window_b64(fields["after"]),
+            "production_running": fields["running"] == "1",
+            "message": _decode_live_window_b64(fields["message"]),
+        }
+    except ValueError:
+        raise LocalPolicyError("LIVE config window runner returned a malformed result record; outcome UNKNOWN, inspect manually.") from None
+
+
+def _production_definition_root(lines, production):
+    """Parse the XData ProductionDefinition of a production class source (UDL lines)."""
+    import xml.etree.ElementTree as ET
+    if not isinstance(lines, list) or any(not isinstance(line, str) for line in lines):
+        raise LocalPolicyError("Production class source is not an array of lines.")
+    text = "\n".join(lines)
+    headers = re.findall(r"(?m)^\s*XData\s+ProductionDefinition\b", text)
+    if len(headers) != 1:
+        raise LocalPolicyError("Production class must contain exactly one XData ProductionDefinition.")
+    body = text[re.search(r"(?m)^\s*XData\s+ProductionDefinition\b", text).end():]
+    start = body.find("<Production")
+    end = body.find("</Production>")
+    if start < 0 or end < start or body.count("<Production") != 1 or body.count("</Production>") != 1:
+        raise LocalPolicyError("Production XData does not hold exactly one <Production> element.")
+    xml = body[start:end + len("</Production>")]
+    if "<!DOCTYPE" in xml.upper() or "<!ENTITY" in xml.upper():
+        raise LocalPolicyError("Production XData must not declare a DOCTYPE or entities.")
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        raise LocalPolicyError("Production XData is not well-formed XML.") from None
+    if root.tag != "Production" or root.get("Name") != production:
+        raise LocalPolicyError("Production XData Name does not match production_name.")
+    return root
+
+
+def _production_item_setting(root, item_name, target, setting):
+    """(present, value) of one Item setting; the item must be unique, the setting too."""
+    items = [element for element in root.findall("Item") if element.get("Name") == item_name]
+    if len(items) != 1:
+        raise LocalPolicyError(f"Production XData must contain exactly one Item named '{item_name}'; found {len(items)}.")
+    matches = [element for element in items[0].findall("Setting")
+               if element.get("Target") == target and element.get("Name") == setting]
+    if len(matches) > 1:
+        raise LocalPolicyError("Production XData lists this setting more than once for the target.")
+    if not matches:
+        return False, ""
+    return True, matches[0].text or ""
+
+
+def _production_canonical_without(root, item_name, target, setting):
+    """Order-insensitive canonical form of the production minus one target setting.
+
+    Used to prove SaveToClass changed nothing but the requested setting.
+    """
+    def is_target(parent, child):
+        return (parent.tag == "Item" and parent.get("Name") == item_name and child.tag == "Setting"
+                and child.get("Target") == target and child.get("Name") == setting)
+
+    def canonical(element):
+        children = tuple(sorted((canonical(child) for child in element if not is_target(element, child)),
+                                key=repr))
+        text = element.text or ""
+        if element.tag != "Setting":
+            text = text.strip()
+        return (element.tag, tuple(sorted(element.attrib.items())), text, children)
+
+    return canonical(root)
+
+
+def _live_window_write_backup(window, namespace, production, lines, stamp=None):
+    """Immutable, timestamped local copy of the production class; never overwrites."""
+    from datetime import datetime, timezone
+    namespace = validate_namespace(namespace)
+    AtelierClient._validate_identifier(production)
+    if production.startswith("%"):
+        raise LocalPolicyError("Production names under % are not configurable through the window.")
+    root = Path(window.backup_root)
+    directory = root / namespace
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if stamp is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    if not re.fullmatch(r"\d{8}T\d{12}Z", stamp):
+        raise LocalPolicyError("Invalid backup timestamp.")
+    path = directory / f"{production}-{stamp}.cls"
+    if path.resolve().parent != directory.resolve():
+        raise LocalPolicyError("Backup path escaped the window backup directory.")
+    data = ("\n".join(lines) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError:
+        raise LocalPolicyError("Backup file already exists; refusing to overwrite it.") from None
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return path, hashlib.sha256(data).hexdigest()
+
+
+class _LiveWindowNotPrimary(LocalPolicyError):
+    """The in-process mirror guard stopped the runner before its payload ran."""
+
+
+class _LiveWindowGrant:
+    """Per-call capability that lets ONE window-gated tool call run fixed runners on
+    a production target. Issued only by AtelierClient._issue_live_window_grant after
+    is_live_config_allowed() passed; never built from tool arguments."""
+    __slots__ = ("label", "ticket", "base_url", "issued")
+
+    def __init__(self, label, ticket, base_url):
+        import time
+        self.label = label
+        self.ticket = ticket
+        self.base_url = base_url
+        self.issued = time.monotonic()
+
+    def fresh(self):
+        import time
+        return time.monotonic() - self.issued <= _LIVE_WINDOW_GRANT_TTL_S
+
 def clean_to_ascii(content_str):
     replacements = {
         'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
@@ -206,13 +653,70 @@ _READ_SQL_FORBIDDEN_TOKENS = (
 _READ_SQL_FORBIDDEN_PREFIXES = ("%SYSTEM.", "$SYSTEM.")
 
 
+def _mask_sql_string_literals(sql_query):
+    """Replace single-quoted literals ('' escapes a quote) with ''; None if unterminated.
+
+    Double-quoted delimited identifiers and comments are copied verbatim so they stay
+    subject to the token scan, and a quote inside them never opens a literal.
+    """
+    out = []
+    index, length = 0, len(sql_query)
+    while index < length:
+        char = sql_query[index]
+        if char == "'":
+            cursor = index + 1
+            while True:
+                close = sql_query.find("'", cursor)
+                if close < 0:
+                    return None
+                if sql_query.startswith("''", close):
+                    cursor = close + 2
+                    continue
+                break
+            out.append("''")
+            index = close + 1
+            continue
+        if char == '"':
+            cursor = index + 1
+            while True:
+                close = sql_query.find('"', cursor)
+                if close < 0:
+                    return None
+                if sql_query.startswith('""', close):
+                    cursor = close + 2
+                    continue
+                break
+            out.append(sql_query[index:close + 1])
+            index = close + 1
+            continue
+        if sql_query.startswith("--", index) or sql_query.startswith("//", index):
+            close = sql_query.find("\n", index)
+            close = length if close < 0 else close
+            out.append(sql_query[index:close])
+            index = close
+            continue
+        if sql_query.startswith("/*", index):
+            close = sql_query.find("*/", index + 2)
+            close = length if close < 0 else close + 2
+            out.append(sql_query[index:close])
+            index = close
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _read_sql_policy_violation(sql_query):
     """Return a bounded denial reason, or None when the statement passes the policy."""
     if not isinstance(sql_query, str) or not sql_query.strip():
         return "SQL policy: a non-empty SQL statement is required."
     if not re.match(r"SELECT\b", sql_query.lstrip(), flags=re.IGNORECASE):
         return "SQL policy: only statements that start with SELECT are accepted on the read transport."
-    upper = sql_query.upper()
+    # Keywords inside string literals (Name LIKE '%Create%') are data, not statements.
+    masked = _mask_sql_string_literals(sql_query)
+    if masked is None:
+        return "SQL policy: unterminated string literal or delimited identifier."
+    upper = masked.upper()
     for token in _READ_SQL_FORBIDDEN_TOKENS:
         if re.search(r"\b" + token + r"\b", upper):
             return f"SQL policy: the token {token} is not accepted on the read transport."
@@ -304,7 +808,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
     lines = [line.strip() for line in str(result).splitlines() if line.strip()]
     stages = ["DOWNLOADED", "IMPORTED"]
     if load:
-        stages.extend(["LOADED_OS", "LOADED_NS"])
+        stages.extend(["LOADED_OS", "LOADED_NS", "CONFIRMED"])
 
     def validate_stage(line, stage, imported_id):
         if stage == "DOWNLOADED":
@@ -320,6 +824,10 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
         elif stage == "LOADED_OS":
             if line != "LOADED_OS":
                 raise ValueError("Malformed LOADED_OS record")
+        elif stage == "CONFIRMED":
+            fields = _parse_pipe_record(line, stage)
+            if set(fields) != {"isid"} or fields["isid"] != str(expected_itemset_id):
+                raise ValueError("Malformed CONFIRMED record")
         else:
             fields = _parse_pipe_record(line, stage)
             if set(fields) != {"itemset"} or fields["itemset"] != imported_id:
@@ -345,6 +853,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
             "ERROR_IMPORT": ("import", 1),
             "ERROR_LOADTOOS": ("load_to_os", 2),
             "ERROR_LOADTONS": ("load_to_ns", 3),
+            "ERROR_CONFIRM": ("confirm", 4),
             "ERROR_CONTROL": ("control", 0),
         }
         error_code = error_line.split(":", 1)[0].split("|", 1)[0]
@@ -352,7 +861,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
         prior_is_exact = len(valid_stages) == error_index
         if expected_prior is not None and (not prior_is_exact or len(valid_stages) != expected_prior):
             failed_phase = "unknown"
-        load_attempted = "LOADED_OS" in valid_stages or error_code in {"ERROR_LOADTOOS", "ERROR_LOADTONS"}
+        load_attempted = "LOADED_OS" in valid_stages or error_code in {"ERROR_LOADTOOS", "ERROR_LOADTONS", "ERROR_CONFIRM"}
         load_may_have_started = load_attempted or (load and "IMPORTED" in valid_stages)
         failure_state = {
             "status": "DOWNLOAD_LOAD_FAILED",
@@ -370,6 +879,7 @@ def _classify_ccr_download_load_result(result, load, expected_itemset_id):
         "IMPORTED": "import",
         "LOADED_OS": "load_to_os",
         "LOADED_NS": "load_to_ns",
+        "CONFIRMED": "confirm",
     }
     valid_stages = []
     imported_id = None
@@ -502,7 +1012,7 @@ class AtelierClient:
         '}',
     )
 
-    def __init__(self, host, port, path_prefix, namespace, username, password, is_production=False, env_role="", ccr_affected=None, proxy=None, policy=None, scheme="http", verify_ssl=True):
+    def __init__(self, host, port, path_prefix, namespace, username, password, is_production=False, env_role="", ccr_affected=None, proxy=None, policy=None, scheme="http", verify_ssl=True, production_read=False):
         namespace = validate_namespace(namespace)
         if policy is None:
             policy = SitePolicy()
@@ -526,6 +1036,10 @@ class AtelierClient:
             raise LocalPolicyError("Unsupported transport scheme; use http or https.")
         self.scheme = scheme
         self.verify_ssl = bool(verify_ssl)
+        # "production_read": true is an explicit per-entry opt-in that opens ONLY the READ
+        # gate on a production target. Runtime, runners, CCR and code writes stay blocked.
+        # Identity check (not truthiness) so a stray string such as "false" never enables it.
+        self.production_read = production_read is True
         self.base_url = f"{scheme}://{host}:{port}{path_prefix}/api/atelier/v1/{namespace}"
         self.root_url = f"{scheme}://{host}:{port}{path_prefix}/api/atelier/"
         
@@ -693,8 +1207,15 @@ class AtelierClient:
         return True, ""
 
     def is_read_allowed(self):
-        """READ gate: production block only. No CCR consultation, no runner."""
+        """READ gate: production block only. No CCR consultation, no runner.
+
+        An entry with production_read=true may read a production target. This opens
+        the READ gate only: every runner, RUNTIME, CCR and CODE WRITE gate evaluates
+        _production_gate_reason independently and keeps blocking production.
+        """
         reason = self._production_gate_reason()
+        if reason and getattr(self, "production_read", False) is True:
+            return True, "Read allowed on production target by explicit production_read opt-in."
         if reason:
             return False, reason
         return True, "Read allowed on non-production target."
@@ -735,11 +1256,13 @@ class AtelierClient:
                           "HA-node and route policy are unknown. Run 'isc-ai init' in the deployment directory.")
         role = self._configured_role()
         if promotion:
-            if role == "UAT" and not self._is_direct_ha_node():
-                return "UAT_PROMOTION", "Promotion route: configured UAT target."
-            if role == "UAT":
-                return None, "Direct HA node promotion blocked; use the configured canonical VIP."
-            return None, "CCR promotion requires the configured UAT role."
+            # Sanctioned ItemSet promotion is admitted in every configured environment
+            # (BASE, UAT, TEST, LIVE...) and on direct HA nodes: the ItemSet comes only
+            # from the central CCR server by ISID, the runner embeds the same-process
+            # CONTROLLED_ACTIVE guard, and a mirror backup fails at its read-only database.
+            if role in ("BASE", "UAT", "TEST", "QA", "LIVE"):
+                return "PROMOTION", f"Promotion route: configured {role} target."
+            return None, "CCR promotion requires a configured BASE, UAT, TEST, QA or LIVE role."
         if role == "BASE":
             if self._is_direct_ha_node():
                 return None, "Direct HA node mutation blocked; use the configured canonical VIP."
@@ -761,12 +1284,14 @@ class AtelierClient:
 
     def is_code_write_route_allowed(self, promotion=False):
         """Static CODE WRITE preflight: production, configured role and route. No network
-        except fresh active-node evidence for configured UAT exceptions; never a runner."""
-        reason = self._production_gate_reason()
-        if reason:
-            return False, reason
-        if self._configured_role() not in self.policy.non_production_roles:
-            return False, "Code write requires an explicit configured non-production role."
+        except fresh active-node evidence for configured UAT exceptions; never a runner.
+        CCR promotion is admitted in every configured environment, production included."""
+        if not promotion:
+            reason = self._production_gate_reason()
+            if reason:
+                return False, reason
+            if self._configured_role() not in self.policy.non_production_roles:
+                return False, "Code write requires an explicit configured non-production role."
         route, detail = self._code_write_route(promotion=promotion)
         if route is None:
             return False, detail
@@ -834,10 +1359,10 @@ class AtelierClient:
           route is BASE or a configured UAT exception, and the document is cataloged.
         - anything else, or guard failure: blocked. UNKNOWN is never an outcome.
         """
-        reason = self._production_gate_reason()
+        reason = None if promotion else self._production_gate_reason()
         if reason:
             return False, reason
-        if self._configured_role() not in self.policy.non_production_roles:
+        if not promotion and self._configured_role() not in self.policy.non_production_roles:
             return False, "Code write requires an explicit configured non-production role."
         if document_name is not None:
             self._validate_document_name(document_name)
@@ -855,8 +1380,8 @@ class AtelierClient:
         if state == "SUSPENDED":
             return False, "CCR SUSPENDED in the guard process; code write blocked."
         if state == "CONTROLLED_ACTIVE":
-            if route not in ("BASE", "UAT_PROMOTION"):
-                return False, "CCR CONTROLLED_ACTIVE: only BASE tracked changes or UAT promotion are admitted."
+            if route not in ("BASE", "PROMOTION"):
+                return False, "CCR CONTROLLED_ACTIVE: only BASE tracked changes or CCR promotion are admitted."
             if not (isinstance(ccr_tracking, str) and ccr_tracking.strip()):
                 return False, ("CCR CONTROLLED_ACTIVE: this operation does not track the change under "
                                "an explicit CCR; blocked. Use the CCR-tracked tool variant.")
@@ -864,7 +1389,7 @@ class AtelierClient:
         if state == "ABSENT":
             if require_controlled:
                 return False, "Operation requires CCR CONTROLLED_ACTIVE; ABSENT namespace blocked."
-            if route == "UAT_PROMOTION":
+            if route == "PROMOTION":
                 return False, "CCR promotion requires CONTROLLED_ACTIVE; ABSENT namespace blocked."
             if document_name is None:
                 return False, ("CCR ABSENT: only cataloged package documents may be written on this "
@@ -891,6 +1416,8 @@ class AtelierClient:
             raise LocalPolicyError("CCR-tracked operations require an explicit CCR reference.")
         self._require_code_write_route(promotion=promotion)
         code = "\n".join(self._GUARD_STATE_LINES + self._GUARD_REQUIRE_CONTROLLED_LINES) + "\n" + code_str
+        if promotion:
+            return self.execute_runtime_code(code, promotion=True)
         return self.execute_runtime_code(code)
 
     def is_runtime_operation_allowed(self):
@@ -898,9 +1425,11 @@ class AtelierClient:
         the same-process guard probe and iris_execute_objectscript.
 
         These operations do not go through Perforce or TC change control tracking,
-        so CCR state is irrelevant to them. Only the production gate applies: never
-        on is_production targets, PROD/LIVE namespaces or roles, nor on direct HA
-        nodes (use the configured VIP) except configured UAT exception routes.
+        so CCR state is never consulted. Only the production gate (is_production,
+        PROD/LIVE-looking namespace, production role) and an explicit configured
+        non-production role apply. Direct HA nodes are NOT blocked here (see
+        _runtime_node_route_allowed): a runner on a mirror backup fails at the
+        read-only database, not at this gate.
         """
         reason = self._production_gate_reason()
         if reason:
@@ -917,17 +1446,144 @@ class AtelierClient:
         if not allowed:
             raise LocalPolicyError(reason)
 
-    def execute_runtime_code(self, code_str):
+    # ------------------------------------------------------------------
+    # LIVE CONFIG WINDOW gate (routes.live_config_window). Separate from every
+    # other gate: it never changes READ, RUNTIME, CODE WRITE or CCR decisions.
+    # ------------------------------------------------------------------
+
+    def _live_window_prefix(self):
+        window = self.policy.live_config_window
+        return f"LIVE CONFIG WINDOW '{window.label}' (ticket {window.ticket})"
+
+    def is_live_config_allowed(self):
+        """LIVE CONFIG WINDOW gate for Ensemble configuration on production targets.
+
+        Allowed only if ALL hold: a project policy is loaded; routes.live_config_window
+        is configured and its expiry date (local MCP host date, inclusive) has not
+        passed; the target is production-flagged; namespace and host are listed in
+        the window; the host is a configured direct HA node; the READ gate is open
+        (production_read), because backups and verification read over REST; and
+        fresh evidence obtained NOW shows Interoperability jobs in the window's
+        active_node_evidence_namespace on this node (mirror primary). No environment
+        variable is consulted. Never a runner.
+        """
+        if not self.policy.configured:
+            return False, "LIVE CONFIG WINDOW blocked: no project configuration loaded."
+        window = self.policy.live_config_window
+        if window is None:
+            return False, "LIVE CONFIG WINDOW blocked: routes.live_config_window is not configured."
+        prefix = self._live_window_prefix()
+        if window.expiry_date() is None:
+            return False, f"{prefix} blocked: expires '{window.expires}' is not a valid YYYY-MM-DD date; window closed."
+        if not window.is_open(_live_window_today()):
+            return False, f"{prefix} blocked: window expired on {window.expires} (local MCP host date)."
+        if self._production_gate_reason() is None:
+            return False, f"{prefix} blocked: the window applies to production targets only; it grants nothing here."
+        if self.namespace.upper() not in window.namespaces:
+            return False, f"{prefix} blocked: namespace '{self.namespace}' is not listed in the window."
+        if self.host.lower() not in window.hosts:
+            return False, f"{prefix} blocked: host '{self.host}' is not listed in the window."
+        if self.host.lower() not in {host.lower() for host in self.policy.direct_ha_nodes}:
+            return False, f"{prefix} blocked: host '{self.host}' is not a configured direct HA node."
+        read_allowed, _ = self.is_read_allowed()
+        if not read_allowed:
+            return False, (f"{prefix} blocked: the server entry needs production_read=true (backups and "
+                           "verification read the production over REST).")
+        evidence = window.active_node_evidence_namespace
+        if not active_node(evidence, lambda sql: self._read_metadata_query(sql, namespace=evidence)):
+            return False, (f"{prefix} blocked: no Interoperability jobs observed in '{evidence}' on "
+                           f"'{self.host}' (mirror backup, stopped or evidence unavailable); use the active node.")
+        return True, (f"{prefix}: allowed on the ACTIVE node '{self.host}' (jobs observed in '{evidence}') "
+                      f"for namespace '{self.namespace}', expires {window.expires}.")
+
+    def _issue_live_window_grant(self):
+        """Evaluate the gate NOW and return (per-call grant, reason), or raise the denial."""
+        allowed, reason = self.is_live_config_allowed()
+        if not allowed:
+            raise LocalPolicyError(reason)
+        window = self.policy.live_config_window
+        grant = _LiveWindowGrant(window.label, window.ticket, self.base_url)
+        self.__dict__.setdefault("_live_window_grants", []).append(grant)
+        return grant, reason
+
+    def _run_live_window_runner(self, grant, code_str):
+        """Run a FIXED window runner on the production target under a fresh grant.
+
+        The mirror-primary guard is prepended and evaluated in the runner process.
+        Residue, absence, cleanup and residue re-check follow the direct runner
+        lifecycle. Not reachable from iris_execute_objectscript or any tool argument.
+        """
+        import uuid
+        issued = self.__dict__.get("_live_window_grants", ())
+        if (not isinstance(grant, _LiveWindowGrant) or not any(item is grant for item in issued)
+                or grant.base_url != self.base_url or not grant.fresh()):
+            raise LocalPolicyError("LIVE CONFIG WINDOW runner requires a fresh grant from the window gate.")
+        if self.__dict__.get("_live_window_runner") is not None:
+            raise LocalPolicyError("LIVE CONFIG WINDOW runners do not nest.")
+        class_name = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
+        content = self._runner_class_content(class_name, _LIVE_WINDOW_PRIMARY_GUARD + "\n" + code_str)
+        self._live_window_runner = (class_name, grant)
+        try:
+            output = self._run_direct_runner_lifecycle(class_name, content)
+        finally:
+            self._live_window_runner = None
+        if any(line.strip() == _LIVE_WINDOW_NOT_PRIMARY for line in str(output).splitlines()):
+            raise _LiveWindowNotPrimary("LIVE CONFIG WINDOW: the runner process is not on the mirror primary; "
+                                        "nothing was executed.")
+        return output
+
+    def _live_window_pending_change(self, document_name):
+        """True when %Studio.SourceControl holds an uncommitted change row for the document."""
+        self._validate_document_name(document_name)
+        failure = "Source-control change check failed; server details withheld."
+        status, data = self._send_request(
+            "/action/query", method="POST",
+            payload={"query": self._EPHEMERAL_CHANGE_SQL, "parameters": [document_name]},
+            timeout=DEFAULT_HTTP_TIMEOUT,
+        )
+        if status != 200 or not isinstance(data, dict):
+            raise LocalPolicyError(failure)
+        status_info = data.get("status")
+        result = data.get("result")
+        if (not isinstance(status_info, dict) or status_info.get("errors") != []
+                or status_info.get("summary") not in (None, "")
+                or not isinstance(result, dict) or not isinstance(result.get("content"), list)):
+            raise LocalPolicyError(failure)
+        rows = result["content"]
+        if not rows:
+            return False
+        row = rows[0]
+        if (len(rows) != 1 or not isinstance(row, dict) or set(row) != {"InternalName"}
+                or not isinstance(row["InternalName"], str)
+                or row["InternalName"].casefold() != document_name.casefold()):
+            raise LocalPolicyError(failure)
+        return True
+
+    def execute_runtime_code(self, code_str, promotion=False):
         """Run an Ensemble runtime operation through the ephemeral runner.
 
         Gated by is_runtime_operation_allowed only (production gate), never by
         CCR discovery. Cleanup and residue verification are mandatory.
+        promotion=True is set only internally by _run_guarded_ccr_runner for CCR
+        ItemSet promotion, already admitted by the promotion route and carrying the
+        embedded CONTROLLED_ACTIVE guard; it skips the production/role gates.
         """
         import uuid
 
-        self._require_runtime_operation()
+        if not promotion:
+            self._require_runtime_operation()
         runner_class = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
-        self._require_ephemeral_runner(runner_class)
+        self._require_ephemeral_runner(runner_class, promotion=promotion)
+        if promotion:
+            # Only this exact runner, for this call, passes the promotion runner check.
+            self.__dict__["_promotion_runner"] = runner_class
+        try:
+            return self._execute_runtime_runner(runner_class, code_str)
+        finally:
+            if promotion:
+                self.__dict__.pop("_promotion_runner", None)
+
+    def _execute_runtime_runner(self, runner_class, code_str):
         content = self._runner_class_content(runner_class, code_str)
         if self._ephemeral_runner_has_pending_change(runner_class):
             raise LocalPolicyError("Runner blocked by pre-existing source-control residue.")
@@ -953,12 +1609,27 @@ class AtelierClient:
             raise failure
         return output
 
-    def _require_ephemeral_runner(self, class_name):
-        """Authorize only the fixed direct-tool runner in configured non-production."""
+    def _require_ephemeral_runner(self, class_name, promotion=False):
+        """Authorize only the fixed direct-tool runner in configured non-production
+        (or, for CCR ItemSet promotion, any configured environment)."""
         self._validate_target()
         if (not isinstance(class_name, str)
                 or not self._EPHEMERAL_RUNNER_RE.fullmatch(class_name)):
             raise LocalPolicyError("Invalid ephemeral runner identity.")
+        if promotion or (class_name == self.__dict__.get("_promotion_runner")):
+            if not self._configured_role():
+                raise LocalPolicyError("CCR promotion runner requires an explicit configured environment role.")
+            return
+        # Separate, explicit path: ONLY the runner that _run_live_window_runner is
+        # executing right now, for a grant issued by the LIVE CONFIG WINDOW gate on
+        # this exact target. No tool argument can set it; every other runner
+        # (iris_execute_objectscript included) falls through to the checks below.
+        active = self.__dict__.get("_live_window_runner")
+        if active is not None:
+            runner_class, grant = active
+            if (class_name == runner_class and isinstance(grant, _LiveWindowGrant)
+                    and grant.base_url == self.base_url):
+                return
         if getattr(self, "is_production", False):
             raise LocalPolicyError("Ephemeral runner blocked on production targets.")
         namespace = self.namespace.upper()
@@ -995,9 +1666,21 @@ class AtelierClient:
             raise LocalPolicyError("Target changed; create a new canonical client before continuing.")
 
 
-    def _send_request(self, endpoint, method='GET', payload=None, query_params="", timeout=None):
+    def _send_request(self, endpoint, method='GET', payload=None, query_params="", timeout=None,
+                      capture_error_body=False, namespace=None):
+        """capture_error_body=True returns the parsed JSON body of an HTTP error so a
+        private caller can extract bounded IRIS error codes; others get a generic dict.
+
+        namespace (private callers only) addresses a sibling namespace on the SAME
+        host/port/prefix/credentials, e.g. active-node evidence for the LIVE config
+        window; None keeps the canonical target namespace."""
         self._validate_target()
-        url = f"{self.base_url}{endpoint}"
+        base_url = self.base_url
+        if namespace is not None:
+            sibling = validate_namespace(namespace)
+            base_url = (f"{getattr(self, 'scheme', 'http')}://{self.host}:{self.port}"
+                        f"{self.path_prefix}/api/atelier/v1/{sibling}")
+        url = f"{base_url}{endpoint}"
         if query_params:
             url += f"?{query_params}"
             
@@ -1016,7 +1699,16 @@ class AtelierClient:
                 return response.status, json.loads(raw_data) if raw_data else {}
         except urllib.error.HTTPError as e:
             log_debug(f"Atelier request failed: HTTP {e.code}")
+            body = None
+            if capture_error_body:
+                try:
+                    raw_error = e.read(65536).decode('utf-8', errors='replace')
+                    body = json.loads(raw_error) if raw_error else None
+                except Exception:
+                    body = None
             e.close()
+            if isinstance(body, dict):
+                return e.code, body
             return e.code, {"error": "Atelier HTTP request failed"}
         except (socket.timeout, TimeoutError):
             log_debug("Atelier request failed: client-side timeout")
@@ -1031,11 +1723,15 @@ class AtelierClient:
             log_debug("Atelier request failed: transport or response error")
             return 500, {"error": "Atelier transport or response error"}
 
-    def _read_metadata_query(self, sql):
-        """Separate discovery transport: no run_query policy recursion or runner."""
+    def _read_metadata_query(self, sql, namespace=None):
+        """Separate discovery transport: no run_query policy recursion or runner.
+
+        namespace=None queries the target namespace (unchanged behaviour); a value
+        queries that sibling namespace on the same instance route."""
+        extra = {} if namespace is None else {"namespace": namespace}
         status, data = self._send_request(
             "/action/query", method="POST", payload={"query": sql, "parameters": []},
-            timeout=DEFAULT_HTTP_TIMEOUT,
+            timeout=DEFAULT_HTTP_TIMEOUT, **extra,
         )
         if status != 200 or not isinstance(data, dict):
             raise ValueError("Metadata unavailable")
@@ -1254,32 +1950,117 @@ class AtelierClient:
             return True, "Deleted successfully"
         return False, f"Delete failed with status {status}; server details withheld"
 
+    # Bounded runner diagnostics: IRIS error codes plus an operator hint. The payload
+    # code, console output and raw server bodies are never echoed.
+    _RUNNER_ERROR_CODE_RE = re.compile(r"#\s?(\d{2,5})\b")
+    _RUNNER_LOCKED_HINT = ("namespace is locked by source control; configure "
+                           "runtime.runner_hosts for this namespace")
+    _RUNNER_READONLY_HINT = "database is read-only (likely a mirror backup node); target the primary"
+
+    @classmethod
+    def _runner_hint(cls, codes, locked=False):
+        if locked or "5845" in codes:
+            return cls._RUNNER_LOCKED_HINT
+        if "5883" in codes or "302" in codes:
+            return cls._RUNNER_READONLY_HINT
+        return ""
+
+    @classmethod
+    def _bounded_runner_text(cls, text):
+        text = " ".join(str(text).replace("\r", " ").replace("\n", " ").split())
+        if len(text) > cls._SQL_DIAG_MAX_CHARS:
+            text = text[:cls._SQL_DIAG_MAX_CHARS] + "..."
+        return text
+
+    @classmethod
+    def _runner_upload_diagnostic(cls, status, data):
+        """Return None when the PUT succeeded, else a bounded failure message."""
+        texts = []
+        locked = False
+        reported = False
+        if isinstance(data, dict):
+            result = data.get("result")
+            result_status = result.get("status") if isinstance(result, dict) else None
+            if isinstance(result_status, str) and result_status.strip():
+                texts.append(result_status)
+                reported = True
+            status_info = data.get("status")
+            errors = status_info.get("errors") if isinstance(status_info, dict) else None
+            if isinstance(errors, list) and errors:
+                reported = True
+                for item in errors:
+                    text = item.get("error", "") if isinstance(item, dict) else item
+                    if isinstance(text, str) and text.strip():
+                        texts.append(text)
+            console = data.get("console")
+            if isinstance(console, list):
+                locked = any(isinstance(line, str) and "namespace is locked" in line.lower()
+                             for line in console)
+        if status in (200, 201) and not reported and not locked:
+            return None
+        codes = []
+        for text in texts:
+            for code in cls._RUNNER_ERROR_CODE_RE.findall(text):
+                if code not in codes:
+                    codes.append(code)
+        if not codes and not locked and status not in (200, 201):
+            return "Temporary executor upload failed; server details withheld."
+        detail = f"HTTP {status}"
+        if codes:
+            detail += "; IRIS " + ", ".join(f"ERROR #{code}" for code in codes)
+        hint = cls._runner_hint(codes, locked)
+        if hint:
+            detail += f". Hint: {hint}"
+        return (f"Temporary executor upload failed ({cls._bounded_runner_text(detail)}); "
+                "server details withheld.")
+
     def _ephemeral_runner_save(self, class_name, content_lines):
         self._require_ephemeral_runner(class_name)
         quoted_doc = urllib.parse.quote(class_name + ".cls", safe="")
-        status, _ = self._send_request(
+        status, data = self._send_request(
             f"/doc/{quoted_doc}", method="PUT",
             payload={"content": content_lines, "enc": False},
-            query_params="ignoreConflict=1",
+            query_params="ignoreConflict=1", capture_error_body=True,
         )
-        if status not in (200, 201):
-            raise LocalPolicyError("Temporary executor upload failed; server details withheld.")
+        failure = self._runner_upload_diagnostic(status, data)
+        if failure:
+            raise LocalPolicyError(failure)
+
+    @classmethod
+    def _runner_compile_failure(cls, data):
+        generic = "Temporary executor compilation failed; code/details withheld."
+        status_info = data.get("status") if isinstance(data, dict) else None
+        errors = status_info.get("errors") if isinstance(status_info, dict) else None
+        parts = []
+        for item in errors if isinstance(errors, list) else []:
+            text = item.get("error") if isinstance(item, dict) else None
+            if isinstance(text, str) and text.strip():
+                parts.append(" ".join(text.split()))
+        if not parts:
+            return generic
+        joined = " | ".join(parts)
+        codes = cls._RUNNER_ERROR_CODE_RE.findall(joined)
+        hint = cls._runner_hint(codes)
+        message = f"Temporary executor compilation failed; IRIS: {cls._bounded_runner_text(joined)}."
+        if hint:
+            message += f" Hint: {hint}."
+        return message + " Console withheld."
 
     def _ephemeral_runner_compile(self, class_name):
         self._require_ephemeral_runner(class_name)
         status, data = self._send_request(
             "/action/compile", method="POST", payload=[class_name + ".cls"],
-            timeout=get_exec_timeout(),
+            timeout=get_exec_timeout(), capture_error_body=True,
         )
         if status != 200 or not isinstance(data, dict):
-            raise LocalPolicyError("Temporary executor compilation failed; code/details withheld.")
+            raise LocalPolicyError(self._runner_compile_failure(data))
         status_info = data.get("status")
         if (not isinstance(status_info, dict)
                 or "errors" not in status_info
                 or "summary" not in status_info
                 or status_info.get("errors") != []
                 or status_info.get("summary") not in (None, "")):
-            raise LocalPolicyError("Temporary executor compilation failed; code/details withheld.")
+            raise LocalPolicyError(self._runner_compile_failure(data))
 
     @staticmethod
     def _ephemeral_runner_sql_suffix(class_name):
@@ -1360,6 +2141,27 @@ class AtelierClient:
                 raise LocalPolicyError(failure)
         raise LocalPolicyError(failure)
 
+    # Exact bodies _send_request synthesizes for client-side timeout / unreachable
+    # transport (never a server-sent body). A pre-check failing this way means the
+    # server was not reached, which is distinct from a server-side refusal.
+    _RUNNER_TRANSPORT_FAILURES = frozenset({
+        (504, "Atelier client timeout"),
+        (500, "Atelier transport error"),
+    })
+    _RUNNER_UNREACHABLE_MESSAGE = (
+        "Temporary executor could not reach the server (transport timeout/unreachable); "
+        "payload was not executed."
+    )
+
+    @classmethod
+    def _raise_if_runner_unreachable(cls, status, data):
+        """Pre-check helpers raise the distinct unreachable message. Every post-PUT
+        caller catches Exception and treats it as cleanup failure, so cleanup
+        strictness is unchanged."""
+        if (isinstance(data, dict) and set(data) == {"error"}
+                and (status, data["error"]) in cls._RUNNER_TRANSPORT_FAILURES):
+            raise LocalPolicyError(cls._RUNNER_UNREACHABLE_MESSAGE)
+
     def _ephemeral_runner_has_pending_change(self, class_name):
         """Check only the generated document through the private metadata transport."""
         self._require_ephemeral_runner(class_name)
@@ -1369,6 +2171,7 @@ class AtelierClient:
             payload={"query": self._EPHEMERAL_CHANGE_SQL, "parameters": [document_name]},
             timeout=DEFAULT_HTTP_TIMEOUT,
         )
+        self._raise_if_runner_unreachable(status, data)
         if status != 200 or not isinstance(data, dict):
             raise LocalPolicyError("Temporary executor source-control check failed; server details withheld.")
         status_info = data.get("status")
@@ -1396,7 +2199,8 @@ class AtelierClient:
     def _ephemeral_runner_is_absent(self, class_name):
         self._require_ephemeral_runner(class_name)
         quoted_doc = urllib.parse.quote(class_name + ".cls", safe="")
-        status, _ = self._send_request(f"/doc/{quoted_doc}", method="GET")
+        status, data = self._send_request(f"/doc/{quoted_doc}", method="GET")
+        self._raise_if_runner_unreachable(status, data)
         return status == 404
 
     def _delete_ephemeral_runner(self, class_name):
@@ -1409,17 +2213,97 @@ class AtelierClient:
                 pass
         return False
 
+    def _runner_host_client(self):
+        """Client whose namespace hosts the ephemeral runner for this target.
+
+        Only an explicit runtime.runner_hosts entry for this namespace AND the
+        configured role selects another namespace; otherwise the target itself hosts
+        the runner. The sibling shares host, port, prefix, scheme, credentials,
+        production flags and role; only namespace/base_url differ and stay canonical.
+        """
+        import copy
+        entry = self.policy.runner_host_for(self.namespace, self._configured_role(), self.host)
+        if entry is None:
+            return self
+        runner_namespace = validate_namespace(entry.runner_namespace)
+        if runner_namespace == self.namespace:
+            raise LocalPolicyError("Runner host namespace must differ from the target namespace.")
+        sibling = copy.copy(self)
+        sibling.namespace = runner_namespace
+        sibling.base_url = (f"{getattr(self, 'scheme', 'http')}://{self.host}:{self.port}"
+                            f"{self.path_prefix}/api/atelier/v1/{runner_namespace}")
+        sibling._validate_target()
+        return sibling
+
+    def _namespace_switch_prefix(self):
+        """Payload prologue that moves the runner process into the target namespace."""
+        target = validate_namespace(self.namespace)
+        return f'New $NAMESPACE\nSet $NAMESPACE = "{self._escape_cos(target)}"\n'
+
+    def _runtime_audit_base(self, class_name, runner, code_str):
+        return {
+            "run_id": self._ephemeral_runner_sql_suffix(class_name),
+            "host": self.host,
+            "path_prefix": self.path_prefix,
+            "target_namespace": self.namespace,
+            "runner_namespace": runner.namespace,
+            "role": self._configured_role(),
+            "code_sha256": hashlib.sha256(code_str.encode("utf-8")).hexdigest(),
+            "code_length": len(code_str),
+        }
+
     def _execute_direct_objectscript(self, code_str):
         """Run the temporary executor under the RUNTIME gate (production gate only).
 
         Arbitrary ObjectScript may persist data but is not a source-code change
-        tracked by Perforce/TC, so CCR state does not authorize or deny it.
+        tracked by Perforce/TC, so CCR state does not authorize or deny it. When
+        runtime.runner_hosts names a host namespace for this target and role, the
+        runner lives there and the payload switches to the target namespace; both
+        namespaces must pass the runtime and runner gates. Every call is recorded in
+        the local runtime audit file before any server request (fail closed).
         """
+        import time
         import uuid
         class_name = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
         self._require_ephemeral_runner(class_name)
         self._require_runtime_operation()
-        class_content = self._runner_class_content(class_name, code_str)
+        runner = self._runner_host_client()
+        payload_code = code_str
+        if runner is not self:
+            runner._require_ephemeral_runner(class_name)
+            runner._require_runtime_operation()
+            payload_code = self._namespace_switch_prefix() + code_str
+        class_content = self._runner_class_content(class_name, payload_code)
+        audit = self._runtime_audit_base(class_name, runner, code_str)
+        try:
+            _append_runtime_audit(dict(audit, ts=_audit_timestamp(), event="start", code=code_str))
+        except Exception:
+            raise LocalPolicyError(
+                "Runtime audit record could not be written; execution blocked (set "
+                f"{RUNTIME_AUDIT_DIR_ENV} to a writable absolute directory)."
+            ) from None
+        started = time.monotonic()
+        outcome = "Temporary executor operation failed unexpectedly; details withheld."
+        try:
+            output = runner._run_direct_runner_lifecycle(class_name, class_content)
+            outcome = "ok"
+            return output
+        except LocalPolicyError as exc:
+            outcome = str(exc)
+            raise
+        finally:
+            try:
+                _append_runtime_audit(dict(
+                    audit, ts=_audit_timestamp(), event="end", outcome=outcome,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ))
+            except Exception:
+                log_debug("Runtime audit end record could not be written.")
+
+    def _run_direct_runner_lifecycle(self, class_name, class_content):
+        """Residue check, absence check, PUT, compile, query, delete and residue re-check
+        of the generated runner in THIS client's namespace."""
+        self._require_ephemeral_runner(class_name)
         if self._ephemeral_runner_has_pending_change(class_name):
             raise LocalPolicyError("Temporary executor blocked by pre-existing source-control residue.")
         if not self._ephemeral_runner_is_absent(class_name):
@@ -2417,6 +3301,9 @@ class AtelierClient:
         If flowOK {{
             Set inSC = 0, editable = 0, isCheckedOut = 0, user = ""
             Set statusSC = scInst.GetStatus(className, .inSC, .editable, .isCheckedOut, .user)
+            // GetStatus can print a NOTICE (e.g. "checked out by user ...") without a trailing
+            // newline; end that line so the next record starts on its own line.
+            Write:$X>0 !
             If $$$ISERR(statusSC) {{
                 Write "ERROR_STATUS|message=", $ZConvert($System.Status.GetErrorText(statusSC), "O", "URL"), !
                 Set flowOK = 0
@@ -2453,6 +3340,7 @@ class AtelierClient:
                 Set verifiedAction = "checkout"
                 Set sc = scInst.CheckOut(className, requestedCCR)
             }}
+            Write:$X>0 !
             If $$$ISERR(sc) {{
                 Write "ERROR_CHECKOUT|message=", $ZConvert($System.Status.GetErrorText(sc), "O", "URL"), !
                 Set flowOK = 0
@@ -2610,6 +3498,8 @@ class AtelierClient:
             safe_ids.append(cid)
         if not safe_ids:
             raise ValueError("change_ids must contain at least one ID")
+        if len(set(safe_ids)) != len(safe_ids):
+            raise ValueError("change_ids must not contain duplicates")
         list_items = ",".join(str(cid) for cid in safe_ids)
         ccr_id_esc = self._escape_cos(ccr_id)
         upload_token_esc = self._escape_cos(upload_token)
@@ -2648,12 +3538,127 @@ class AtelierClient:
                 }}
             }}
 
+            // Change-control engine discovery, in the same process that commits.
+            // %pkg.isc.changecontrol.CCR: Commit(ccr, list, .success, .absent, .errors)
+            // TC.ChangeControl.CCR (native TrakCare): Commit(Description, Changes, Key); it reads the
+            // token from %request and the user from %session, writes its log to the current device
+            // and always returns $$$OK, so its outcome is proven by the ItemSet capture below.
+            Set engine = "", tcLog = "", tcError = ""
             If flowOK {{
+                If ##class(%Dictionary.CompiledMethod).%ExistsId("%pkg.isc.changecontrol.CCR||Commit") {{
+                    Set engine = "%pkg.isc.changecontrol.CCR"
+                }}
+                If (engine = "") && ##class(%Dictionary.CompiledMethod).%ExistsId("TC.ChangeControl.CCR||Commit") {{
+                    Set engineSpec = ##class(%Dictionary.CompiledMethod).%OpenId("TC.ChangeControl.CCR||Commit").FormalSpec
+                    If ($Length(engineSpec, ",") = 3) && ($Piece($Piece(engineSpec, ",", 3), ":", 1) = "Key") {{
+                        Set engine = "TC.ChangeControl.CCR"
+                    }}
+                }}
+                If engine = "" {{
+                    Write "ERROR_ENGINE|message=No supported change-control Commit was found (pkg.isc.changecontrol.CCR or TC.ChangeControl.CCR)", !
+                    Set flowOK = 0
+                }} Else {{
+                    Write "COMMIT_ENGINE|name_enc=", $ZConvert(engine, "O", "URL"), !
+                }}
+            }}
+
+            // The native TC Commit does not check the rows it bundles: prove every change is a
+            // pending row of exactly this CCR before handing it over.
+            If flowOK && (engine = "TC.ChangeControl.CCR") {{
+                Set changeList = $ListBuild({list_items})
+                For changeIdx=1:1:$ListLength(changeList) {{
+                    Set changeId = $List(changeList, changeIdx)
+                    Set change = ##class(%Studio.SourceControl.Change).%OpenId(changeId)
+                    If '$IsObject(change) {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|message=Change does not exist", !
+                        Set flowOK = 0
+                    }} ElseIf change.Committed {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|message=Change is already committed", !
+                        Set flowOK = 0
+                    }} ElseIf change.CCR '= ccr {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|actual_ccr_enc=", $ZConvert(change.CCR, "O", "URL"), "|message=Change belongs to a blank or different CCR", !
+                        Set flowOK = 0
+                    }} ElseIf change.ItemFile = "" {{
+                        Write "ERROR_CHANGE_PRECHECK|change_id=", changeId, "|message=Change has no ItemFile", !
+                        Set flowOK = 0
+                    }}
+                    If 'flowOK {{
+                        Quit
+                    }}
+                }}
+                If flowOK && '$IsObject($Get(%session)) {{
+                    Write "ERROR_SESSION|message=TC.ChangeControl.CCR Commit needs a CSP session and none is available", !
+                    Set flowOK = 0
+                }}
+            }}
+
+            If flowOK {{
+                Set priorRequestDefined = $Data(%request)#2
+                Set priorRequest = $Get(%request)
                 Set %request = ##class(%CSP.Request).%New()
                 Set %request.Data("UploadToken", 1) = token
                 Set list = $ListBuild({list_items})
                 Kill success, absent, errors
-                Set commitSC = ##class(%pkg.isc.changecontrol.CCR).Commit(ccr, list, .success, .absent, .errors)
+                If engine = "%pkg.isc.changecontrol.CCR" {{
+                    Set commitSC = $ClassMethod(engine, "Commit", ccr, list, .success, .absent, .errors)
+                }} Else {{
+                    // TC records the committing user from %session; set it only when absent and restore it.
+                    Set priorUserDefined = $Data(%session.Data("LOGON.USERCODE"))
+                    Set priorUser = $Get(%session.Data("LOGON.USERCODE"))
+                    If priorUser = "" {{
+                        Set %session.Data("LOGON.USERCODE") = $Username
+                    }}
+                    Set commitIO = $IO, tcLogFile = ##class(%File).TempFilename("log"), tcLogOpen = 0
+                    Set commitSC = $$$OK
+                    Try {{
+                        Open tcLogFile:("WNS"):5
+                        If $Test {{
+                            Set tcLogOpen = 1
+                            Use tcLogFile
+                            // Only with the log captured: TC writes its raw log to the current device.
+                            Set commitSC = $ClassMethod(engine, "Commit", ccr, list, ccr)
+                        }} Else {{
+                            Set commitSC = $$$ERROR($$$GeneralError, "Could not open a temporary file to capture the TC commit log; commit not attempted")
+                        }}
+                    }} Catch tcEx {{
+                        Set commitSC = tcEx.AsStatus()
+                    }}
+                    Use commitIO
+                    If tcLogOpen {{
+                        Close tcLogFile
+                        Set tcStream = ##class(%Stream.FileCharacter).%New()
+                        If $$$ISOK(tcStream.LinkToFile(tcLogFile)) {{
+                            While 'tcStream.AtEnd && ($Length(tcLog) < 20000) {{
+                                Set tcLog = tcLog _ tcStream.Read(4000)
+                            }}
+                        }}
+                        Kill tcStream
+                        Do ##class(%File).Delete(tcLogFile)
+                    }}
+                    If token'="" {{
+                        Set tcLog = $Replace(tcLog, token, "<redacted>")
+                    }}
+                    If priorUserDefined {{
+                        Set %session.Data("LOGON.USERCODE") = priorUser
+                    }} Else {{
+                        Kill %session.Data("LOGON.USERCODE")
+                    }}
+                    Set tcUpload = $ZStrip($Piece($Piece(tcLog, "Upload Status:", 2), $Char(10), 1), "<>WC")
+                    Set tcError = ""
+                    For tcLine=1:1:$Length(tcLog, $Char(10)) {{
+                        Set tcText = $ZStrip($Piece(tcLog, $Char(10), tcLine), "<>WC")
+                        If (tcText [ "ERROR") || (tcText [ "No ItemSet was created") {{
+                            Set tcError = $Extract(tcText, 1, 300)
+                            Quit
+                        }}
+                    }}
+                    Write "COMMIT_UPLOAD_STATUS|message_enc=", $ZConvert(tcUpload, "O", "URL"), !
+                }}
+                If priorRequestDefined {{
+                    Set %request = priorRequest
+                }} Else {{
+                    Kill %request
+                }}
                 If $$$ISERR(commitSC) {{
                     Set errorText = $System.Status.GetErrorText(commitSC)
                     If token'="" {{
@@ -2696,10 +3701,15 @@ class AtelierClient:
                         Set localFile = afterRS.%Get("ItemSetFile")
                     }}
                     If newCount'=1 {{
-                        Write "ERROR_ITEMSET_COUNT|after_id=", beforeID, "|new_count=", newCount, "|message=Commit must create exactly one local ItemSet for this CCR", !
+                        Write "ERROR_ITEMSET_COUNT|after_id=", beforeID, "|new_count=", newCount, "|engine_enc=", $ZConvert(engine, "O", "URL"), "|engine_log_enc=", $ZConvert($Get(tcError), "O", "URL"), "|message=Commit must create exactly one local ItemSet for this CCR", !
                         Set flowOK = 0
                     }} ElseIf localName="" {{
                         Write "ERROR_LOCAL_CAPTURE|local_id=", localID, "|local_name=|message=New local ItemSet has no Name", !
+                        Set flowOK = 0
+                    }} ElseIf (engine = "TC.ChangeControl.CCR") && ($Get(tcUpload) '= "") && ($Get(tcUpload) '= "Success!") && ($Get(tcUpload) '[ "Check-in in progress") {{
+                        // TC created the local ItemSet and removed the rows, but its upload failed:
+                        // report it with the local id so iris_ccr_reupload_itemset can recover it.
+                        Write "ERROR_COMMIT_UPLOAD|local_id=", localID, "|local_name=", $ZConvert(localName, "O", "URL"), "|message=", $ZConvert("Local ItemSet created but TC upload failed: "_tcUpload_". Recover with iris_ccr_reupload_itemset; DO NOT re-commit.", "O", "URL"), !
                         Set flowOK = 0
                     }}
                 }}
@@ -3218,21 +4228,30 @@ class AtelierClient:
         """
         return self.execute_runtime_code(code).strip()
 
-    def ccr_download_load(self, itemset_id, load=True, token=""):
+    def ccr_download_load(self, itemset_id, load=True, token="", ccr_id=""):
         """CCR PROMOTION: download an APPROVED ItemSet from the central server by its
-        ServerItemSetID and, when load=1, load it (LoadToOS + LoadToNS). Mirrors the
-        CCRItemSetTask.OnTask flow: WSDownload -> Import -> LoadToOS -> LoadToNS. This is the
+        ServerItemSetID and, when load=1, load it (LoadToOS + LoadToNS) and confirm the load
+        to the central server (WSConfirmLoad). Mirrors the CCRItemSetTask.OnTask flow:
+        WSDownload -> Import -> LoadToOS -> LoadToNS -> WSConfirmLoad. This is the
         sanctioned promotion channel: it only downloads by ISID from the central server and
-        never loads an arbitrary local file.
+        never loads an arbitrary local file. WSDownload/WSConfirmLoad need the CCR job
+        (ccr_id, e.g. ACHS1046) and a CCR access token (ccr-portal ccr_upload_token).
 
-        Its own gate: the configured UAT role on the VIP (never a direct node) and the
+        Its own gate: any configured environment role (BASE, UAT, TEST, LIVE) and the
         same-process CONTROLLED_ACTIVE guard embedded in the very runner that loads."""
         itemset_id = int(itemset_id)
         token_esc = self._escape_cos(token)
+        # WSDownload pJob is the CCR / Perforce job (e.g. ACHS1046); Org^Sys makes the central
+        # web service fail with <SUBSCRIPT> (subscript 2 is "").
+        ccr_id = (ccr_id or "").strip()
+        if ccr_id:
+            ccr_id = self._require_ccr_id(ccr_id)
+        ccr_esc = self._escape_cos(ccr_id)
         do_load = "1" if load else "0"
         code = f"""
         Set env = $$Env^%buildccr
-        Set job = $$Org^%buildccr _ "^" _ $$Sys^%buildccr
+        Set job = "{ccr_esc}"
+        If job = "" Set job = $$Org^%buildccr _ "^" _ $$Sys^%buildccr
         Set isid = {itemset_id}
         Set isFile = ""
         Set sc = ##class(%Studio.SourceControl.ItemSet).WSDownload(job, env, "{token_esc}", "", .isid, .isFile)
@@ -3266,6 +4285,16 @@ class AtelierClient:
                 Quit
             }}
             Write "LOADED_NS|itemset=", IS.%Id(), !
+            // Report the load to the central CCR server (like CCRItemSetTask): without it the
+            // portal keeps the client ItemSet undeployed and blocks markMoveTo<Env>Complete.
+            Set confirmJob = $Select(IS.CCR '= "": IS.CCR, 1: job)
+            Set confirmLog = IS.Log
+            Set sc = ##class(%Studio.SourceControl.ItemSet).WSConfirmLoad(isid, confirmJob, env, "{token_esc}", $$$OK, .confirmLog)
+            If $$$ISERR(sc) {{
+                Write "ERROR_CONFIRM: ", $System.Status.GetErrorText(sc), !
+                Quit
+            }}
+            Write "CONFIRMED|isid=", isid, !
         }}
         Write "SUCCESS", !
         """
@@ -3326,6 +4355,15 @@ class IRISMCPServer:
         "iris_ensemble_production_control", "iris_ensemble_component_control",
         "iris_ensemble_default_settings", "iris_ensemble_queue_control",
     })
+    # LIVE CONFIG WINDOW category: gated per action inside the handler ('get' ->
+    # READ gate; 'set' -> LIVE CONFIG WINDOW gate, audited).
+    LIVE_CONFIG_WINDOW_TOOLS = frozenset({"iris_ensemble_item_setting"})
+    # Runtime actions that, on a PRODUCTION target and only while a window is
+    # configured, route through the LIVE CONFIG WINDOW gate instead of RUNTIME.
+    _LIVE_WINDOW_RUNTIME_ACTIONS = {
+        "iris_ensemble_production_control": frozenset({"status", "start", "stop", "restart"}),
+        "iris_ensemble_component_control": frozenset({"enable", "disable", "restart"}),
+    }
 
     def __init__(self, project_dir=None):
         """project_dir pins the project explicitly (CLI --project-dir); None resolves
@@ -3429,7 +4467,8 @@ class IRISMCPServer:
                 or type(config.get("is_production", False)) is not bool
                 or not isinstance(config.get("env_role", ""), str)
                 or config.get("scheme", "http") not in ("http", "https")
-                or type(config.get("verify_ssl", True)) is not bool):
+                or type(config.get("verify_ssl", True)) is not bool
+                or type(config.get("production_read", False)) is not bool):
             raise LocalPolicyError("Unresolved server target: malformed connection or policy settings.")
 
     def _server_catalog_record(self, server_id):
@@ -3465,6 +4504,7 @@ class IRISMCPServer:
             policy=self.policy,
             scheme=s.get("scheme", "http"),
             verify_ssl=s.get("verify_ssl", True),
+            production_read=s.get("production_read", False),
         )
 
     def get_client(self, server_id, namespace_override=None):
@@ -3541,6 +4581,321 @@ class IRISMCPServer:
             
         return None, "USER"
 
+    # ------------------------------------------------------------------
+    # LIVE CONFIG WINDOW handlers (routes.live_config_window)
+    # ------------------------------------------------------------------
+
+    def _live_window_audit(self, client, server_id, tool, action, result, reason, production=None,
+                           item=None, target=None, setting=None, before=None, after=None,
+                           ticket=None, extra=None):
+        """Append one audit line; returns a warning string when it could not be written.
+
+        Never stores connection credentials; values of sensitive-looking settings are
+        recorded as SHA-256 digests only.
+        """
+        window = self.policy.live_config_window
+        if window is None:
+            return None
+        sensitive = isinstance(setting, str) and _LIVE_WINDOW_SENSITIVE_SETTING_RE.search(setting)
+
+        def shown(value):
+            if value is None or not sensitive:
+                return value
+            return "sha256:" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+        try:
+            password = self._resolve_server_config(server_id)[1].get("password")
+        except Exception:
+            password = None
+        record = {
+            "ts": _audit_timestamp(), "server_id": server_id, "host": client.host,
+            "namespace": client.namespace, "tool": tool, "action": action,
+            "production": production, "item": item, "target": target, "setting": setting,
+            "before": shown(before), "after": shown(after), "ticket": ticket,
+            "window": window.label, "result": result, "reason": reason,
+        }
+        if extra:
+            record.update(extra)
+        if isinstance(password, str) and len(password) >= 4:
+            record = {key: (AtelierClient._redact_secret(value, password) if isinstance(value, str) else value)
+                      for key, value in record.items()}
+        try:
+            _append_live_window_audit(window, record)
+        except Exception:
+            log_debug("LIVE config window audit line could not be written.")
+            return "WARNING: the LIVE config window audit line could not be written; record this operation manually."
+        return None
+
+    @staticmethod
+    def _live_window_text_value(value, name):
+        if not isinstance(value, str):
+            raise LocalPolicyError(f"'{name}' must be a string.")
+        if len(value) > _LIVE_WINDOW_VALUE_MAX:
+            raise LocalPolicyError(f"'{name}' exceeds {_LIVE_WINDOW_VALUE_MAX} characters.")
+        if _XML_INVALID_CHARS_RE.search(value):
+            raise LocalPolicyError(f"'{name}' contains characters that the production XData cannot hold.")
+        return value
+
+    @classmethod
+    def _live_window_setting_spec(cls, arguments):
+        """Validate the item/setting coordinates locally, before any gate or network."""
+        production = arguments.get("production_name")
+        if not isinstance(production, str) or production.endswith(".cls") or production.startswith("%"):
+            raise LocalPolicyError("production_name must be a production class name without .cls.")
+        AtelierClient._validate_identifier(production)
+        item = arguments.get("item_name")
+        if (not isinstance(item, str) or not item or len(item) > 256
+                or re.search(r"[\x00-\x1f\x7f]", item)):
+            raise LocalPolicyError("item_name must be a non-empty item name without control characters.")
+        target = arguments.get("target")
+        if target not in ("Host", "Adapter"):
+            raise LocalPolicyError("target must be 'Host' or 'Adapter'.")
+        setting = arguments.get("setting_name")
+        if not isinstance(setting, str) or not _LIVE_WINDOW_SETTING_NAME_RE.fullmatch(setting):
+            raise LocalPolicyError("setting_name must be a plain setting identifier.")
+        return {"production": production, "item": item, "target": target, "setting": setting,
+                "document": production + ".cls"}
+
+    def _live_window_item_setting(self, client, server_id, arguments):
+        tool = "iris_ensemble_item_setting"
+        action = arguments.get("action")
+        if action not in ("get", "set"):
+            raise LocalPolicyError("action must be 'get' or 'set'.")
+        spec = self._live_window_setting_spec(arguments)
+        production, item, target, setting, document = (
+            spec["production"], spec["item"], spec["target"], spec["setting"], spec["document"])
+
+        if action == "get":
+            allowed, reason = client.is_read_allowed()
+            if not allowed:
+                return {"isError": True, "content": [{"type": "text", "text": f"Operation denied: {reason}"}]}
+            lines = client.get_document(document, strict=True)
+            root = _production_definition_root(lines, production)
+            present, value = _production_item_setting(root, item, target, setting)
+            structured = {"production": production, "item": item, "target": target,
+                          "setting": setting, "present": present, "value": value}
+            text = (f"### Item setting on {server_id} ({client.namespace})\n\n"
+                    f"- **Production**: `{production}`\n- **Item**: `{item}`\n"
+                    f"- **Setting**: `{target}.{setting}`\n"
+                    f"- **Present in XData**: {'yes' if present else 'no (class default applies)'}\n"
+                    f"- **Value**: `{value}`\n")
+            return {"structuredContent": structured, "content": [{"type": "text", "text": text}]}
+
+        ticket = arguments.get("ticket")
+        fields = {"production": production, "item": item, "target": target, "setting": setting,
+                  "ticket": ticket}
+
+        def finish(result, reason, is_error=True, before=None, after=None, extra=None, text=None):
+            warning = self._live_window_audit(client, server_id, tool, "set", result, reason,
+                                              before=before, after=after, extra=extra, **fields)
+            body = text or f"LIVE CONFIG WINDOW set {result}: {reason}"
+            if warning:
+                body += f"\n\n{warning}"
+            structured = {"result": result, "reason": reason}
+            structured.update(extra or {})
+            return {"isError": is_error or bool(warning), "structuredContent": structured,
+                    "content": [{"type": "text", "text": body}]}
+
+        window = self.policy.live_config_window
+        if window is None:
+            return finish("DENIED", "routes.live_config_window is not configured; 'set' is never "
+                                    "available outside the LIVE CONFIG WINDOW.")
+        value = arguments.get("value")
+        expected = arguments.get("expected_current_value")
+        try:
+            if value is None:
+                raise LocalPolicyError("'value' is required for set.")
+            if expected is None:
+                raise LocalPolicyError("'expected_current_value' is required for set (compare-and-set).")
+            self._live_window_text_value(value, "value")
+            self._live_window_text_value(expected, "expected_current_value")
+            if not isinstance(ticket, str) or ticket != window.ticket:
+                raise LocalPolicyError("'ticket' is required and must equal the window ticket.")
+        except LocalPolicyError as exc:
+            return finish("DENIED", str(exc))
+        try:
+            grant, gate_reason = client._issue_live_window_grant()
+        except LocalPolicyError as exc:
+            return finish("DENIED", str(exc))
+
+        try:
+            before_lines = client.get_document(document, strict=True)
+            before_root = _production_definition_root(before_lines, production)
+            present, current = _production_item_setting(before_root, item, target, setting)
+        except LocalPolicyError as exc:
+            return finish("FAILED", f"Production class could not be read or parsed: {exc} Nothing was written.")
+        except Exception:
+            return finish("FAILED", "Production class could not be read; server details withheld. Nothing was written.")
+        if current != expected:
+            return finish("DRIFT", "The class XData value differs from expected_current_value; nothing was written.",
+                          before=current)
+        try:
+            if client._live_window_pending_change(document):
+                return finish("DENIED", f"{document} has an uncommitted source-control change row; resolve it "
+                                        "first. Nothing was written.", before=current)
+        except LocalPolicyError as exc:
+            return finish("FAILED", f"{exc} Nothing was written.", before=current)
+        try:
+            _live_window_audit_preflight(window)
+        except Exception:
+            return finish("DENIED", "The LIVE config window audit file is not writable; nothing was written.",
+                          before=current)
+        try:
+            backup_path, backup_sha = _live_window_write_backup(window, client.namespace, production, before_lines)
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, LocalPolicyError) else "local I/O error"
+            return finish("FAILED", f"Backup could not be written ({detail}); nothing was written.", before=current)
+        extra = {"backup": str(backup_path), "backup_sha256": backup_sha}
+
+        code = _live_window_item_setting_code(production, item, target, setting, value, expected)
+        try:
+            output = client._run_live_window_runner(grant, code)
+            outcome = _parse_live_window_result(output)
+        except _LiveWindowNotPrimary as exc:
+            return finish("DENIED", str(exc), before=current, extra=extra)
+        except LocalPolicyError as exc:
+            return finish("UNKNOWN", f"{exc} Compare the class with the backup {backup_path}.",
+                          before=current, extra=extra)
+        extra.update(mirror_member=outcome["mirror_member"], mirror_primary=outcome["mirror_primary"],
+                     production_running=outcome["production_running"])
+        if outcome["status"] != "OK":
+            result = "DRIFT" if outcome["status"] == "DRIFT" else "FAILED"
+            return finish(result, f"Runner status {outcome['status']}: {outcome['message']}",
+                          before=outcome["before"], after=outcome["after"], extra=extra)
+
+        verified_value = None
+        others_unchanged = False
+        verify_error = ""
+        try:
+            after_lines = client.get_document(document, strict=True)
+            after_root = _production_definition_root(after_lines, production)
+            after_present, verified_value = _production_item_setting(after_root, item, target, setting)
+            if not after_present:
+                verified_value = None
+            others_unchanged = (_production_canonical_without(before_root, item, target, setting)
+                                == _production_canonical_without(after_root, item, target, setting))
+        except Exception as exc:
+            verify_error = str(exc) if isinstance(exc, LocalPolicyError) else "re-read failed; details withheld"
+        try:
+            residue = client._live_window_pending_change(document)
+        except LocalPolicyError:
+            residue = None
+        value_ok = verified_value == value
+        extra.update(verified_value_matches=value_ok, other_settings_unchanged=others_unchanged,
+                     source_control_change_row={True: "PRESENT", False: "NONE", None: "UNKNOWN"}[residue])
+        lines = [
+            f"### LIVE CONFIG WINDOW item setting on {server_id} ({client.namespace})",
+            "",
+            f"- **Gate**: {gate_reason}",
+            f"- **Production / item**: `{production}` / `{item}`",
+            f"- **Setting**: `{target}.{setting}`",
+            f"- **Before**: `{outcome['before']}` (present: {'yes' if outcome['before_present'] else 'no'})",
+            f"- **After (runner)**: `{outcome['after']}`",
+            f"- **Backup**: `{backup_path}` (sha256 {backup_sha})",
+            f"- **Class XData re-read**: value {'MATCHES' if value_ok else 'DOES NOT MATCH'}; "
+            f"rest of the production {'unchanged' if others_unchanged else 'CHANGED OR UNVERIFIED'}"
+            + (f" ({verify_error})" if verify_error else ""),
+            f"- **Source-control change row for `{document}`**: "
+            + {True: "PRESENT (created or pre-existing; not undone automatically, review it)",
+               False: "none", None: "UNKNOWN (check failed)"}[residue],
+        ]
+        if outcome["production_running"]:
+            lines.append(f"- **Hint**: production is running; restart item `{item}` for the change to take effect "
+                         "(not done automatically).")
+        if value_ok and others_unchanged:
+            return finish("OK", "Setting written and verified in the class XData.", is_error=False,
+                          before=outcome["before"], after=verified_value, extra=extra,
+                          text="\n".join(lines) + "\n")
+        lines.insert(0, "## FAILED: post-write verification did not confirm the change. Restore from the "
+                        "backup if needed.\n")
+        return finish("FAILED", "Post-write verification failed: "
+                      + ("value mismatch" if not value_ok else "other parts of the production changed or could not be compared"),
+                      before=outcome["before"], after=verified_value, extra=extra, text="\n".join(lines) + "\n")
+
+    def _live_window_ensemble_control(self, name, client, server_id, arguments):
+        """Production/component runtime actions on a production target, window-gated."""
+        action = arguments.get("action")
+        window = self.policy.live_config_window
+        prod_name = arguments.get("production_name")
+        comp_name = arguments.get("component_name")
+        fields = {"production": prod_name, "item": comp_name, "ticket": window.ticket}
+
+        def finish(result, reason, text=None):
+            warning = self._live_window_audit(client, server_id, name, action, result, reason, **fields)
+            body = text or f"LIVE CONFIG WINDOW {name} '{action}' {result}: {reason}"
+            if warning:
+                body += f"\n\n{warning}"
+            return {"isError": result != "OK" or bool(warning),
+                    "content": [{"type": "text", "text": body}]}
+
+        if name == "iris_ensemble_component_control" and not comp_name:
+            return finish("DENIED", f"'component_name' is required for action '{action}'.")
+        try:
+            timeout_val = int(arguments.get("timeout", 30))
+        except (TypeError, ValueError):
+            return finish("DENIED", "'timeout' must be an integer.")
+        if not 0 <= timeout_val <= 3600:
+            return finish("DENIED", "'timeout' must be between 0 and 3600 seconds.")
+        force_val = 1 if arguments.get("force", False) is True else 0
+        try:
+            grant, gate_reason = client._issue_live_window_grant()
+        except LocalPolicyError as exc:
+            return finish("DENIED", str(exc))
+        try:
+            _live_window_audit_preflight(window)
+        except Exception:
+            return finish("DENIED", "The LIVE config window audit file is not writable; nothing was executed.")
+
+        def run(code):
+            return client._run_live_window_runner(grant, code).strip()
+
+        where = f"{server_id} ({client.namespace})"
+        try:
+            if name == "iris_ensemble_production_control":
+                if action == "status":
+                    raw = run('Set sc = ##class(Ens.Director).GetProductionStatus(.pName, .pState) Write pName, "|", pState, !')
+                    parts = raw.split("|")
+                    state_num = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else -1
+                    state_map = {0: "Stopped", 1: "Running", 2: "Suspended", 3: "Troubled (errors/partial)"}
+                    text = (f"### Ensemble production status on {where}\n\n"
+                            f"- **Gate**: {gate_reason}\n"
+                            f"- **Active production**: `{(parts[0] if parts else '') or 'none'}`\n"
+                            f"- **State**: **{state_map.get(state_num, f'Unknown ({state_num})')}**\n")
+                    return finish("OK", "status read", text=text)
+                if action == "start":
+                    if not prod_name:
+                        prod_name = run('Set sc = ##class(Ens.Director).GetProductionStatus(.pName, .pState) Write pName, !')
+                        fields["production"] = prod_name
+                        if not prod_name:
+                            return finish("FAILED", "No 'production_name' was given and no production was previously recorded.")
+                    code = (f'Set sc = ##class(Ens.Director).StartProduction({_cos_string_expr(prod_name)}) '
+                            'If \'$$$ISOK(sc) { Write $System.Status.GetOneErrorText(sc), ! }')
+                elif action == "stop":
+                    code = (f'Set sc = ##class(Ens.Director).StopProduction({timeout_val}, {force_val}) '
+                            'If \'$$$ISOK(sc) { Write $System.Status.GetOneErrorText(sc), ! }')
+                else:
+                    code = (f'Set sc = ##class(Ens.Director).RestartProduction({timeout_val}, {force_val}) '
+                            'If \'$$$ISOK(sc) { Write $System.Status.GetOneErrorText(sc), ! }')
+            else:
+                item = _cos_string_expr(comp_name)
+                if action == "enable":
+                    code = f'Set sc = ##class(Ens.Director).EnableConfigItem({item}, 1) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
+                elif action == "disable":
+                    code = f'Set sc = ##class(Ens.Director).EnableConfigItem({item}, 0) If \'$$$ISOK(sc) {{ Write $System.Status.GetOneErrorText(sc), ! }}'
+                else:
+                    code = (f'Set sc = ##class(Ens.Director).EnableConfigItem({item}, 0) If \'$$$ISOK(sc) {{ Write "disable: ", $System.Status.GetOneErrorText(sc), ! }} '
+                            f'Hang 0.5 Set sc2 = ##class(Ens.Director).EnableConfigItem({item}, 1) If \'$$$ISOK(sc2) {{ Write "enable: ", $System.Status.GetOneErrorText(sc2), ! }}')
+            error_text = run(code)
+        except _LiveWindowNotPrimary as exc:
+            return finish("DENIED", str(exc))
+        except LocalPolicyError as exc:
+            return finish("FAILED", str(exc))
+        if error_text:
+            return finish("FAILED", f"IRIS reported: {AtelierClient._bounded_runner_text(error_text)}")
+        subject = f"component '{comp_name}'" if comp_name else f"production '{prod_name or ''}'".strip()
+        return finish("OK", f"{action} completed", text=(
+            f"LIVE CONFIG WINDOW: {action} of {subject} completed on {where}.\n\n- **Gate**: {gate_reason}\n"))
+
 
     def handle_tools_list(self):
         tools = [
@@ -3554,7 +4909,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_query_sql",
-                "description": "Runs a read-only SQL query on an InterSystems IRIS instance and returns a structured result listing. READ gate (blocks production) plus a conservative SQL policy: only statements that start with SELECT, with no CALL/INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/CREATE/GRANT/REVOKE/BUILD/TUNE tokens and no %SYSTEM./$SYSTEM. references; anything else is denied.",
+                "description": "Runs a read-only SQL query on an InterSystems IRIS instance and returns a structured result listing. READ gate (blocks production unless the entry sets production_read) plus a conservative SQL policy: only statements that start with SELECT, with no CALL/INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/CREATE/GRANT/REVOKE/BUILD/TUNE tokens and no %SYSTEM./$SYSTEM. references outside single-quoted string literals; unterminated literals and anything else are denied.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -3862,7 +5217,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_production_control",
-                "description": "Queries the status of, or controls, the Ensemble production (status, start, stop, restart).",
+                "description": "Queries the status of, or controls, the Ensemble production (status, start, stop, restart). Non-production targets: RUNTIME gate (ephemeral runner). Production targets: blocked, except while the project configures routes.live_config_window, in which case every action (status included) passes only the LIVE CONFIG WINDOW gate (window not expired, namespace and host listed, production_read, fresh Interoperability jobs in the window evidence namespace on this node, mirror-primary check inside the runner process) and is appended to <project>/.backup/live-config-window/audit.jsonl.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -3897,7 +5252,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ensemble_component_control",
-                "description": "Manages individual production components (Business Services, Processes, Operations): list, enable, disable or hot-restart.",
+                "description": "Manages individual production components (Business Services, Processes, Operations): list, enable, disable or hot-restart. 'list' uses the READ gate. enable/disable/restart: RUNTIME gate on non-production targets; on production targets blocked, except while routes.live_config_window is configured, in which case they pass only the LIVE CONFIG WINDOW gate (window not expired, namespace and host listed, production_read, fresh Interoperability jobs in the window evidence namespace on this node, mirror-primary check inside the runner process) and are audited to <project>/.backup/live-config-window/audit.jsonl.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4017,8 +5372,60 @@ class IRISMCPServer:
                 }
             },
             {
+                "name": "iris_ensemble_item_setting",
+                "description": "Reads or compare-and-sets ONE production Item setting stored in the production class XData (e.g. WebServiceURL, StorageNamespace, AllowedIPAddresses). 'get': READ gate only (production_read on production targets); parses the class XData fetched over REST, no runner. 'set': LIVE CONFIG WINDOW gate only (routes.live_config_window): production-flagged target, window not expired (local MCP host date), namespace and host listed, host is a configured direct HA node, production_read, and fresh Interoperability jobs in the window evidence namespace on this node; 'set' is never allowed on non-production targets. 'set' requires expected_current_value (compare-and-set: drift aborts without writing) and the window ticket; it stores an immutable timestamped backup of the class under <project>/.backup/live-config-window/<namespace>/, blocks if the class has a pending source-control change, then runs a FIXED runner (no caller ObjectScript; values travel base64-encoded) that checks the mirror primary in-process, updates Ens.Config.Production, %Save() and SaveToClass(). It re-reads the class to verify the new value and that nothing else changed, reports any source-control change row created for the class, and never applies or restarts the production (restart the item if it is running). Every 'set' (allowed or denied) is appended to <project>/.backup/live-config-window/audit.jsonl.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {
+                            "type": "string",
+                            "description": "Configured server ID."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Target namespace (must be listed in the window for 'set')."
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["get", "set"],
+                            "description": "'get' (read the setting) or 'set' (compare-and-set through the LIVE CONFIG WINDOW gate)."
+                        },
+                        "production_name": {
+                            "type": "string",
+                            "description": "Production class name (e.g. 'HMF.Router.Production')."
+                        },
+                        "item_name": {
+                            "type": "string",
+                            "description": "Exact Item Name (config name) inside the production."
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["Host", "Adapter"],
+                            "description": "Setting target: 'Host' or 'Adapter'."
+                        },
+                        "setting_name": {
+                            "type": "string",
+                            "description": "Setting name (e.g. 'WebServiceURL')."
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "New value (required for 'set')."
+                        },
+                        "expected_current_value": {
+                            "type": "string",
+                            "description": "Required for 'set': the value you expect now. An absent setting counts as ''. If the current value differs, nothing is written."
+                        },
+                        "ticket": {
+                            "type": "string",
+                            "description": "Required for 'set': must equal the ticket of routes.live_config_window."
+                        }
+                    },
+                    "required": ["server_id", "action", "production_name", "item_name", "target", "setting_name"]
+                }
+            },
+            {
                 "name": "iris_execute_objectscript",
-                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role, direct HA node) and a configured non-production role; CCR state neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Requires verified deletion of the runner and the absence of source-control residue.",
+                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role) and a configured non-production role; CCR state is not consulted and neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Direct HA nodes are not blocked by this gate; on a mirror backup the runner upload fails because the database is read-only. If the project policy runtime.runner_hosts maps the target namespace (for the configured role and, when the entry lists hosts, the target host) to a runner namespace, the runner is created there on the same instance and the payload first runs New $NAMESPACE and Set $NAMESPACE to the target; both namespaces must pass the gate. Requires verified deletion of the runner and the absence of source-control residue. Every call is appended under a cross-process file lock to the local audit file ~/.iris-mcp/audit/runtime.jsonl (ISC_AI_AUDIT_DIR overrides the directory) with target, runner namespace, outcome and the payload code verbatim: it never stores connection credentials or output, but secrets embedded in the code are recorded. If the start record cannot be written the code is not executed. The LIVE CONFIG WINDOW (routes.live_config_window) never opens this tool: it stays blocked on production targets.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4280,7 +5687,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_download_load",
-                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Only on the configured UAT role at the VIP (never a direct HA node) and with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, production (LIVE) or any error block, even with load=false. It never loads arbitrary local files.",
+                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Admitted in every configured environment (BASE, UAT, TEST, LIVE), on the VIP or a direct HA node (a mirror backup fails at its read-only database), always with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, an unconfigured role or any error block, even with load=false. It never loads arbitrary local files.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4305,6 +5712,7 @@ class IRISMCPServer:
                             "items": {"type": "string"},
                             "description": "Non-empty list, without case-insensitive duplicates, of exact documents with a valid extension that must already exist in UAT. It takes snapshots before loading and checks afterwards that each document changed; it is accepted only with load=true."
                         },
+                        "ccr_id": {"type": "string", "description": "CCR / Perforce job the ItemSet belongs to (e.g. 'ACHS1046'). WSDownload requires it together with a CCR access token (ccr-portal ccr_upload_token)."},
                         "token": {
                             "type": "string",
                             "description": "Optional session token for the download. Empty by default (download scoped to the environment)."
@@ -4351,7 +5759,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_commit",
-                "description": "Triggers a change-control commit (CCR/Perforce), captures the new local ItemSet and verifies by exact name that it exists on the central server. The native Commit already uploads the ItemSet; it NEVER re-uploads automatically (this avoids duplicate commits in Perforce). If the central server does not list it yet, it returns PENDING_VERIFICATION. It reports success only with a VERIFIED result.",
+                "description": "Triggers a change-control commit (CCR/Perforce), captures the new local ItemSet and verifies by exact name that it exists on the central server. The change-control engine is discovered in the committing process (%pkg.isc.changecontrol.CCR first, else the native TrakCare TC.ChangeControl.CCR, whose rows are pre-checked to be pending changes of exactly this CCR). The native Commit already uploads the ItemSet; it NEVER re-uploads automatically (this avoids duplicate commits in Perforce). If the central server does not list it yet, it returns PENDING_VERIFICATION. It reports success only with a VERIFIED result.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -5107,6 +6515,9 @@ class IRISMCPServer:
             elif name in self.CODE_WRITE_TOOLS:
                 allowed, reason = client.is_code_write_route_allowed(
                     promotion=(name == "iris_ccr_download_load"))
+            elif name in self.LIVE_CONFIG_WINDOW_TOOLS:
+                # Gated per action in the handler: get -> READ, set -> LIVE CONFIG WINDOW.
+                allowed, reason = True, ""
             else:
                 allowed, reason = False, "Tool has no gate category."
             if not allowed:
@@ -5117,6 +6528,13 @@ class IRISMCPServer:
                         "text": f"Operation denied: {reason}"
                     }]
                 }
+
+            if name in self.LIVE_CONFIG_WINDOW_TOOLS:
+                return self._live_window_item_setting(client, server_id, arguments)
+            if (self.policy.live_config_window is not None
+                    and arguments.get("action") in self._LIVE_WINDOW_RUNTIME_ACTIONS.get(name, ())
+                    and client._production_gate_reason() is not None):
+                return self._live_window_ensemble_control(name, client, server_id, arguments)
 
             if name == "iris_query_sql":
                 query = arguments.get("query", "")
@@ -6220,7 +7638,7 @@ class IRISMCPServer:
                 log_debug(f"CCR promotion: download+load ItemSet {itemset_id} (load={load}) in {client.namespace}...")
                 output = f"### CCR promotion: ItemSet `{itemset_id}` on {server_id} ({client.namespace})\n\n"
                 try:
-                    result = client.ccr_download_load(itemset_id, load=load, token=token)
+                    result = client.ccr_download_load(itemset_id, load=load, token=token, ccr_id=arguments.get("ccr_id") or "")
                 except Exception:
                     failure_state = {
                         "status": "DOWNLOAD_LOAD_FAILED",
