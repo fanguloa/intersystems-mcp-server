@@ -386,6 +386,10 @@ def _parse_cli_args(argv):
     docs_mode.add_argument("--apply", action="store_true", help=t("flag.docs.apply"))
     docs_mode.add_argument("--check", action="store_true", help=t("flag.docs.check"))
 
+    p_logi = _add_parser(sub, "logi", "cmd.logi.help", "cmd.logi.examples")
+    p_logi.add_argument("-m", "--manifest", required=True, metavar="PATH", help=t("flag.logi.manifest"))
+    p_logi.add_argument("--check", action="store_true", help=t("flag.logi.check"))
+
     p_agents = _add_parser(sub, "agents", "cmd.agents.help", "cmd.agents.examples")
     _add_project_dir(p_agents)
     agents_mode = p_agents.add_mutually_exclusive_group()
@@ -971,6 +975,17 @@ def _run_docs(args):
     return 0
 
 
+def _run_logi(args):
+    """Generate the Logi catalogs of a manifest; --check compares and writes nothing."""
+    from isc_ai.logigen.build import generate
+
+    result = generate(Path(args.manifest), check=args.check)
+    report = {"manifest": str(Path(args.manifest).resolve()), "check": bool(args.check),
+              "written": [str(path) for path in result.written], "problems": result.problems}
+    _emit(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0 if result.ok else 1
+
+
 def _run_suite(args):
     """Plan by default; --apply writes every file in one transaction or none."""
     runner = isc_suite.apply if args.apply else isc_suite.plan
@@ -1090,6 +1105,8 @@ def main(argv=None):
             return _run_agents(args)
         if args.command == "docs":
             return _run_docs(args)
+        if args.command == "logi":
+            return _run_logi(args)
         if args.command == "suite":
             return _run_suite(args)
         if args.command == "doctor":

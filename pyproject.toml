@@ -19,7 +19,7 @@ socks = ["PySocks>=1.7"]
 isc-ai = "isc_ai.cli:main"
 
 [tool.setuptools]
-packages = ["isc_ai", "isc_ai.locales"]
+packages = ["isc_ai", "isc_ai.locales", "isc_ai.logigen"]
 
 [tool.setuptools.package-data]
 # Globs must cover every file type the bundle actually carries: the manifest verifies
@@ -35,4 +35,5 @@ isc_ai = [
   "resources/harness/skills/*/*.md",
   "resources/harness/skills/*/references/*",
   "resources/harness/skills/*/assets/*",
+  "logigen/templates/*.xml",
 ]
