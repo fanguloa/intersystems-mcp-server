@@ -310,6 +310,20 @@ MESSAGES = {
     "flag.docs.apply": "write the changes",
     "flag.docs.check": "print the plan without writing (default)",
 
+    # -- logi ------------------------------------------------------------
+    "cmd.logi.help": "generate Logi report catalogs, reports and the deployer class from specs",
+    "cmd.logi.examples": (
+        "isc-ai logi --manifest jreports/manifest.json            write the generated files\n"
+        "isc-ai logi --manifest jreports/manifest.json --check    exit 1 if anything is out of date\n"
+        "\n"
+        "The manifest lists one catalog per area folder. Columns and parameters come from the\n"
+        "ROWSPEC of the ObjectScript sources it points to; layouts come from the JSON specs.\n"
+        "Each catalog may name a deployer class: it carries the files as XData, and its\n"
+        "Deploy() writes them, checks their SHA-256 and grants EXECUTE in any environment."
+    ),
+    "flag.logi.manifest": "path of the manifest.json that lists the catalogs",
+    "flag.logi.check": "compare with the files on disk and write nothing",
+
     # -- agents ----------------------------------------------------------
     "cmd.agents.help": "show or write the model assigned to each SDD sub-agent",
     "cmd.agents.examples": (

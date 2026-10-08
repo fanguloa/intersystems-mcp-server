@@ -1,6 +1,6 @@
 {
   "schema": "isc-ai.harness-manifest.v1",
-  "bundle_version": 7,
+  "bundle_version": 8,
   "reviewed": true,
   "omitted": [
     "commands/sdd-new.md",
@@ -190,6 +190,36 @@
       "source": "skills/intersystems-development/references/environment-package-policy.md",
       "destination": "skills/intersystems-development/references/environment-package-policy.md",
       "sha256": "1fa501d20eff1fe29b9874428f3ca84f8319fe95bf49c058fc1b52ce2c3bc3bc"
+    },
+    {
+      "category": "skill",
+      "source": "skills/logi-report-development/SKILL.md",
+      "destination": "skills/logi-report-development/SKILL.md",
+      "sha256": "f36654ba8fed75614be9742b8e596289716e87f8bdf55e776b3844ef4b035e81"
+    },
+    {
+      "category": "skill",
+      "source": "skills/logi-report-development/assets/logi-report-render.ts",
+      "destination": "skills/logi-report-development/assets/logi-report-render.ts",
+      "sha256": "1e2483ba161a009c42cf0e66ce14a9a99751f78289772078a2d8251b927aaf73"
+    },
+    {
+      "category": "skill",
+      "source": "skills/logi-report-development/assets/register-websys-report.mac.txt",
+      "destination": "skills/logi-report-development/assets/register-websys-report.mac.txt",
+      "sha256": "334c566191052b235b99f5e9cc412cff2188aab664b9f0a70315f3c3d354b5b9"
+    },
+    {
+      "category": "skill",
+      "source": "skills/logi-report-development/references/logi-gotchas.md",
+      "destination": "skills/logi-report-development/references/logi-gotchas.md",
+      "sha256": "7d41d73e211e0c606eb1005fa0befc7e203111c9d028acf918f552add9dabac0"
+    },
+    {
+      "category": "skill",
+      "source": "skills/logi-report-development/references/spec-reference.md",
+      "destination": "skills/logi-report-development/references/spec-reference.md",
+      "sha256": "b610d466c1aff437464b1badec1458839a522d1a64f3df2e01dabb8fbc77d333"
     },
     {
       "category": "skill",
