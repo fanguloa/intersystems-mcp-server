@@ -71,6 +71,16 @@ class BundleSafetyTests(unittest.TestCase):
         for skill in ("intersystems-development", "ccr-alignment", "review-changelist"):
             self.assertIn(skill, skills)
 
+    def test_the_logi_report_skill_travels_and_its_links_resolve(self):
+        import re
+        packaged = {entry["destination"] for entry in self.entries}
+        skill = "skills/logi-report-development/SKILL.md"
+        self.assertIn(skill, packaged)
+        text = (HARNESS / skill).read_text(encoding="utf-8")
+        for link in re.findall(r"\]\(((?:references|assets)/[^)]+)\)", text):
+            with self.subTest(link=link):
+                self.assertIn(f"skills/logi-report-development/{link}", packaged)
+
 
 if __name__ == "__main__":
     unittest.main()

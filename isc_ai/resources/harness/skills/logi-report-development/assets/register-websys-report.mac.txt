@@ -1,0 +1,47 @@
+// Register a Logi websys.Report in BASE under a CCR. Verified on TrakCare T2026.
+// Run with iris_execute_objectscript on BASE only, after explicit user approval: it persists a
+// configuration record and its CCR change row. Replace every <...> placeholder first.
+// Other environments receive the record with the ItemSet: never run this outside BASE.
+// Pn are positional report parameters: prefer an empty expression (value passed by the caller)
+// or a session expression; titles and footer texts come from SP columns, not from literals.
+Try {
+	Set code = "<Site.RPT.ReportCode>"
+	&sql(SELECT ID INTO :existing FROM websys.Report WHERE Code = :code)
+	If SQLCODE = 0 { Write "EXISTS id=", existing, ! Quit }
+	&sql(SELECT MAX(ID) INTO :maxChange FROM %Studio_SourceControl.Change)
+	New %xmlconfigitem
+	Set %xmlconfigitem = 1
+	Set r = ##class(websys.Report).%New()
+	Set r.Code = code
+	Set r.Description = "<Description (Logi)>"
+	Set r.Type = "JReport"
+	Set r.ReportUrl = "/<SITE>/<folder>/<ReportName>.cls.xml"
+	Set r.JReportCatalog = "/<SITE>/<folder>/<Catalog>.cat.xml"
+	Set r.P1Name = "<pFirstParam>", r.P1 = ""
+	Set r.P2Name = "pSSUSRRowId", r.P2 = "%session.Get(""LOGON.USERID"")"
+	Set r.OutputFormat = 2
+	Set r.ReportDisabled = 0
+	Set sc = r.%Save()
+	Kill %xmlconfigitem
+	If $$$ISERR(sc) { Write "save=", $System.Status.GetErrorText(sc), ! Quit }
+	Set id = r.%Id()
+	Write "saved id=", id, !
+	Set cc = ##class(TC.ChangeControl.CCR).%New($ListBuild($Username))
+	Set sc = cc.CheckOut($ListBuild(id, "websys.Report"))
+	Write "CheckOut=", $Select($$$ISOK(sc): "OK", 1: $System.Status.GetErrorText(sc)), !
+	Set in = $ListBuild(id, "websys.Report")
+	Set ext = cc.ExternalName(in)
+	Set sc = cc.ExportElement(in, ext)
+	Write "Export=", $Select($$$ISOK(sc): "OK", 1: $System.Status.GetErrorText(sc)), " exists=", ##class(%File).Exists(ext), " file=", ext, !
+	Write "GUID=", ##class(websys.Report).%OpenId(id, 0).GUID, !
+	// Attach the new change row of this record to the CCR
+	Set rs = ##class(%SQL.Statement).%ExecDirect(, "SELECT ID FROM %Studio_SourceControl.Change WHERE ID > ?", +maxChange)
+	While rs.%Next() {
+		Set ch = ##class(%Studio.SourceControl.Change).%OpenId(rs.%Get("ID"))
+		If $IsObject(ch) && (ch.CCR = "") && (ch.InternalName [ "websys.Report") {
+			Set ch.CCR = "<CCRID>"
+			Write "change ", rs.%Get("ID"), " CCR=", $Select(ch.%Save(): ch.CCR, 1: "SAVE FAILED"), !
+		}
+	}
+} Catch ex { Write "ERR=", ex.DisplayString(), ! }
+// Then confirm with iris_ccr_list_uncommitted (ccr_id=<CCRID>): one "add" row for /websys/Report/...
