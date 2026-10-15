@@ -1,0 +1,51 @@
+// Convert the deployed Logi XML files (.cls.xml/.cat.xml) of one catalog folder into the binary
+// .cls/.cat that Logi renders without the "Evaluation Copy" watermark. Verified on TrakCare T2026
+// (Linux host, Logi 24.1). Run with iris_execute_objectscript after Deploy(), only with explicit
+// user approval: it writes the binaries next to the XML files. Replace <folder> first.
+// Why the working directory: Logi's converter creates LogiReport_RF.log in the CURRENT directory,
+// and $ZF(-100) starts in the IRIS data directory, where the IRIS OS user may not write (log4j
+// fails, no binary is produced and the exit code still looks fine). The command therefore runs
+// from the IRIS temp directory and receives the report folder through -path.
+Try {
+	Set folder = "<folder>"
+	Set cfg = ##class(Report.JReport.Configuration).%OpenId(1)
+	Set script = cfg.PathToJavaConverterScript, version = cfg.FilesVersion
+	Set target = ##class(%File).NormalizeDirectory(folder, ##class(websys.Configuration).GetJReportPath())
+	Set work = ##class(%File).NormalizeDirectory(##class(%SYS.System).TempDirectory())
+	Write "script=", script, " version=", version, !, "target=", target, !, "work=", work, !
+	If '##class(%File).Exists(script) Write "ERR converter script not found", ! Quit
+	If '##class(%File).DirectoryExists(target) Write "ERR target folder not found (run Deploy first)", ! Quit
+	Set rs = ##class(%ResultSet).%New("%File:FileSet")
+	Do rs.Execute(target, "*.xml")
+	While rs.Next() {
+		Set xml = rs.Get("Name"), name = ##class(%File).GetFilename(xml)
+		Continue:(name '? 1.E1".cls.xml")&&(name '? 1.E1".cat.xml")
+		Set binary = $Extract(xml, 1, *-4)
+		Set out = work _ "logiconv-" _ $Job _ ".txt"
+		// One file per call: the separator of a multi-file -files list is not verified
+		Set cmd = "cd '" _ work _ "' && '" _ script _ "' -version " _ version _ " -path '" _ target _ "' -files '" _ name _ "' > '" _ out _ "' 2>&1"
+		Set before = $Select(##class(%File).Exists(binary): ##class(%File).GetFileDateModified(binary), 1: "")
+		Set rc = $ZF(-100, "/SHELL", "/bin/sh", "-c", cmd)
+		// The exit code is not trusted: the verdict is a fresh binary with the Logi magic header
+		Set ok = 0, header = ""
+		If ##class(%File).Exists(binary) && (##class(%File).GetFileDateModified(binary) '= before) {
+			Set stream = ##class(%Stream.FileBinary).%New()
+			Do stream.LinkToFile(binary)
+			Set header = stream.Read(4)
+			Set ok = (header = $Char(250, 206, 250, 222))
+		}
+		Write $Select(ok: "OK  ", 1: "FAIL"), " ", name, " -> ", ##class(%File).GetFilename(binary), " rc=", rc, !
+		If 'ok {
+			// Show the converter output (look for the "Caused by" line)
+			Set log = ##class(%Stream.FileCharacter).%New()
+			Do log.LinkToFile(out)
+			While 'log.AtEnd { Write "    ", log.ReadLine(), ! }
+		}
+		Do ##class(%File).Delete(out)
+	}
+	// Remove the converter's own log files from the working directory
+	Do rs.Execute(work, "LogiReport_RF*")
+	While rs.Next() { Do ##class(%File).Delete(rs.Get("Name")) }
+} Catch ex { Write "ERR=", ex.DisplayString(), ! }
+// Then point websys.Report ReportUrl/JReportCatalog to the .cls/.cat and render: the PDF must not
+// show "Logi Report Evaluation Copy".
