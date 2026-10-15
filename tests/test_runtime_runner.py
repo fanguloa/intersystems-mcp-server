@@ -332,6 +332,15 @@ class RuntimeAuditTests(HermeticTestCase):
                 patch("builtins.open", _REAL_OPEN),
                 patch("isc_ai.server._append_runtime_audit", side_effect=_REAL_APPEND))
 
+    def test_the_default_audit_directory_follows_the_state_directory(self):
+        home = Path(self.tempdir.name)
+        environ = {key: value for key, value in os.environ.items() if key != "ISC_AI_AUDIT_DIR"}
+        with patch.dict(os.environ, environ, clear=True), patch("pathlib.Path.home", return_value=home):
+            self.assertEqual(server_module._runtime_audit_path(), home / ".isc-ai" / "audit" / "runtime.jsonl")
+            # An existing legacy trail keeps growing in place until 'isc-ai migrate'.
+            (home / ".iris-mcp" / "audit").mkdir(parents=True)
+            self.assertEqual(server_module._runtime_audit_path(), home / ".iris-mcp" / "audit" / "runtime.jsonl")
+
     def test_start_and_end_records_are_written_without_credentials_or_output(self):
         directory = Path(self.tempdir.name) / "nested" / "audit"
         client = routed_client()

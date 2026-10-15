@@ -2,8 +2,11 @@
 
 Two scopes, because credentials have two natures:
 
-  ~/.iris-mcp/secrets.json          global: one per person (Jira token, IRIS password)
-  <project>/.iris-mcp/secrets.json  project: differs per deployment, and gitignored
+  ~/.isc-ai/secrets.json          global: one per person (Jira token, IRIS password)
+  <project>/.isc-ai/secrets.json  project: differs per deployment, and gitignored
+
+A store left in the legacy `.iris-mcp/` directory is still read and written in place until
+`isc-ai migrate` moves it, so an upgrade never makes a stored credential disappear.
 
 Resolution order when a `{env:VAR}` reference is expanded: the process environment first,
 so CI and a shell override always win, then the project store, then the global one. A
@@ -23,17 +26,29 @@ from pathlib import Path
 
 from isc_ai import config as isc_config
 
-SECRETS_RELATIVE = Path(".iris-mcp") / "secrets.json"
+SECRETS_NAME = "secrets.json"
+SECRETS_RELATIVE = Path(isc_config.STATE_DIR) / SECRETS_NAME
+LEGACY_SECRETS_RELATIVE = Path(isc_config.LEGACY_STATE_DIR) / SECRETS_NAME
 SCHEMA = "isc-ai.secrets.v1"
-GITIGNORE_LINE = ".iris-mcp/secrets.json"
+GITIGNORE_LINE = f"{isc_config.STATE_DIR}/{SECRETS_NAME}"
+LEGACY_GITIGNORE_LINE = f"{isc_config.LEGACY_STATE_DIR}/{SECRETS_NAME}"
+
+
+def _store_in(base):
+    """The current store, or the legacy one while it is the only one present."""
+    current = Path(base) / SECRETS_RELATIVE
+    legacy = Path(base) / LEGACY_SECRETS_RELATIVE
+    if not current.is_file() and legacy.is_file():
+        return legacy
+    return current
 
 
 def global_path(home=None):
-    return (Path.home() if home is None else Path(home)) / SECRETS_RELATIVE
+    return _store_in(Path.home() if home is None else Path(home))
 
 
 def project_path(project_dir):
-    return Path(project_dir) / SECRETS_RELATIVE
+    return _store_in(project_dir)
 
 
 def _read(path):
@@ -149,12 +164,13 @@ def ensure_ignored(project_dir):
     if not (Path(project_dir) / ".git").exists() and not gitignore.exists():
         return [f"{project_dir} is not a git repository; nothing to ignore"]
     existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
-    if GITIGNORE_LINE in existing.splitlines():
+    line = project_path(project_dir).relative_to(Path(project_dir)).as_posix()
+    if line in existing.splitlines():
         return []
     separator = "" if not existing or existing.endswith("\n") else "\n"
     comment = "# Credentials for the MCP suite: never committed.\n"
-    gitignore.write_text(existing + separator + comment + GITIGNORE_LINE + "\n", encoding="utf-8")
-    return [f"added {GITIGNORE_LINE} to {gitignore}"]
+    gitignore.write_text(existing + separator + comment + line + "\n", encoding="utf-8")
+    return [f"added {line} to {gitignore}"]
 
 
 def tracked_by_git(project_dir):

@@ -15,7 +15,7 @@ from isc_ai.ccr_discovery import (
 )
 from isc_ai import __version__
 from isc_ai import config as iris_mcp_config
-from isc_ai.config import ConfigError, SitePolicy
+from isc_ai.config import ConfigError, SitePolicy, STATE_DIR, LEGACY_STATE_DIR
 
 try:
     import sockshandler
@@ -115,7 +115,15 @@ _IS_WINDOWS = os.name == "nt"
 
 def _runtime_audit_path():
     override = os.environ.get(RUNTIME_AUDIT_DIR_ENV)
-    directory = Path(override) if override else Path.home() / ".iris-mcp" / "audit"
+    if override:
+        directory = Path(override)
+    else:
+        # Keep appending to a legacy trail until 'isc-ai migrate' moves the state directory:
+        # an audit split across two directories is harder to read than one in the old place.
+        directory = Path.home() / STATE_DIR / "audit"
+        legacy = Path.home() / LEGACY_STATE_DIR / "audit"
+        if not directory.is_dir() and legacy.is_dir():
+            directory = legacy
     if not directory.is_absolute():
         raise LocalPolicyError("Runtime audit directory must be an absolute path.")
     return directory / RUNTIME_AUDIT_FILE
@@ -1252,7 +1260,7 @@ class AtelierClient:
         the write exceptions are unknown, so no route exists at all.
         """
         if not self.policy.configured:
-            return None, ("Code write blocked: no project configuration loaded (.iris-mcp/config.json); "
+            return None, ("Code write blocked: no project configuration loaded (.isc-ai/config.json); "
                           "HA-node and route policy are unknown. Run 'isc-ai init' in the deployment directory.")
         role = self._configured_role()
         if promotion:
@@ -4404,7 +4412,7 @@ class IRISMCPServer:
 
     def __init__(self, project_dir=None):
         """project_dir pins the project explicitly (CLI --project-dir); None resolves
-        it from IRIS_MCP_PROJECT_DIR or the nearest ancestor of cwd with .iris-mcp/."""
+        it from ISC_AI_PROJECT_DIR (legacy IRIS_MCP_PROJECT_DIR) or the nearest ancestor of cwd with .isc-ai/."""
         self.servers = {}
         self.policy = SitePolicy()
         self.runtime_config = None
@@ -4412,7 +4420,7 @@ class IRISMCPServer:
         self.load_configuration()
 
     def load_configuration(self):
-        """Load project policy (<project>/.iris-mcp/config.json) and merged servers.
+        """Load project policy (<project>/.isc-ai/config.json) and merged servers.
 
         Called on construction and on every tools/call so CLI edits apply live.
         Failures never crash the server: on error the snapshot is cleared
@@ -5500,7 +5508,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_execute_objectscript",
-                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role) and a configured non-production role; CCR state is not consulted and neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Direct HA nodes are not blocked by this gate; on a mirror backup the runner upload fails because the database is read-only. If the project policy runtime.runner_hosts maps the target namespace (for the configured role and, when the entry lists hosts, the target host) to a runner namespace, the runner is created there on the same instance and the payload first runs New $NAMESPACE and Set $NAMESPACE to the target; both namespaces must pass the gate. Requires verified deletion of the runner and the absence of source-control residue. Every call is appended under a cross-process file lock to the local audit file ~/.iris-mcp/audit/runtime.jsonl (ISC_AI_AUDIT_DIR overrides the directory) with target, runner namespace, outcome and the payload code verbatim: it never stores connection credentials or output, but secrets embedded in the code are recorded. If the start record cannot be written the code is not executed. The LIVE CONFIG WINDOW (routes.live_config_window) never opens this tool: it stays blocked on production targets.",
+                "description": "Runs ObjectScript through a dedicated temporary runner and returns Write/output. The payload may persist data. RUNTIME gate: only the production gate (is_production, PROD/LIVE/PRD namespace/role) and a configured non-production role; CCR state is not consulted and neither authorizes nor denies this operation because it is not a tracked code change. LIVE/PROD always blocks. Direct HA nodes are not blocked by this gate; on a mirror backup the runner upload fails because the database is read-only. If the project policy runtime.runner_hosts maps the target namespace (for the configured role and, when the entry lists hosts, the target host) to a runner namespace, the runner is created there on the same instance and the payload first runs New $NAMESPACE and Set $NAMESPACE to the target; both namespaces must pass the gate. Requires verified deletion of the runner and the absence of source-control residue. Every call is appended under a cross-process file lock to the local audit file ~/.isc-ai/audit/runtime.jsonl (ISC_AI_AUDIT_DIR overrides the directory) with target, runner namespace, outcome and the payload code verbatim: it never stores connection credentials or output, but secrets embedded in the code are recorded. If the start record cannot be written the code is not executed. The LIVE CONFIG WINDOW (routes.live_config_window) never opens this tool: it stays blocked on production targets.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -6557,7 +6565,7 @@ class IRISMCPServer:
                 
                 output = "# Servidores InterSystems IRIS Configuraciones\n\n"
                 if not result_servers:
-                    output += "No servers configured: add entries to `~/.iris-mcp/servers.json` or to the project's `.iris-mcp/config.json` (`isc-ai config add-server`)"
+                    output += "No servers configured: add entries to `~/.isc-ai/servers.json` or to the project's `.isc-ai/config.json` (`isc-ai config add-server`)"
                 else:
                     output += "| ID | Target | State | Host | Port | Path prefix | Namespace | Detail |\n"
                     output += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"

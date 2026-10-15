@@ -225,7 +225,7 @@ def plan(project_dir=None, home=None, environ=None, suite_path=None, clients=Non
     if project_dir is not None:
         project = Path(project_dir).resolve()
     else:
-        # Same discovery as the rest of the CLI: nearest ancestor with .iris-mcp/.
+        # Same discovery as the rest of the CLI: nearest ancestor with .isc-ai/.
         from isc_ai import config as isc_config
         project = isc_config.find_project_root(Path.cwd())
     suite = audit.load_suite(suite_path)

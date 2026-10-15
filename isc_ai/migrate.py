@@ -114,4 +114,10 @@ def apply(project_dir=None, home=None):
                               "from": str(legacy)})
 
     report["performed"] = performed
+    # The project store moved directory, so its .gitignore line must follow it: a migrated
+    # credential store that git suddenly sees is a leak waiting for the next 'git add .'.
+    if project_dir is not None and any(item.get("scope") == "project" and item.get("name") == "secrets.json"
+                                       and item.get("action") == "moved" for item in performed):
+        from . import secrets as secrets_module
+        report["notes"] = secrets_module.ensure_ignored(Path(project_dir))
     return report

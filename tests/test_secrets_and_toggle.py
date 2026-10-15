@@ -113,6 +113,29 @@ class SecretStoreTests(StoreTestCase):
         isc_secrets.unset_secret("A", home=self.home)
         self.assertEqual(sorted(isc_secrets.load(home=self.home)), ["B"])
 
+    def test_a_new_store_lives_in_the_current_state_directory(self):
+        result = isc_secrets.set_secret("A", "1", home=self.home)
+        self.assertEqual(Path(result["path"]), self.home / ".isc-ai" / "secrets.json")
+        self.assertFalse((self.home / ".iris-mcp").exists())
+
+    def test_a_legacy_store_is_still_read_and_written_in_place(self):
+        legacy = self.home / ".iris-mcp" / "secrets.json"
+        legacy.parent.mkdir()
+        legacy.write_text(json.dumps({"secrets": {"OLD": "kept"}}), encoding="utf-8")
+        self.assertEqual(isc_secrets.load(home=self.home), {"OLD": "kept"})
+        result = isc_secrets.set_secret("NEW", "2", home=self.home)
+        self.assertEqual(Path(result["path"]), legacy)
+        self.assertEqual(isc_secrets.load(home=self.home), {"NEW": "2", "OLD": "kept"})
+
+    def test_the_gitignore_line_follows_the_store_that_is_written(self):
+        legacy = self.project / ".iris-mcp" / "secrets.json"
+        legacy.parent.mkdir()
+        legacy.write_text(json.dumps({"secrets": {}}), encoding="utf-8")
+        isc_secrets.set_secret("P4CLIENT", "x", scope="project", project_dir=self.project, home=self.home)
+        ignored = (self.project / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn(isc_secrets.LEGACY_GITIGNORE_LINE, ignored)
+        self.assertNotIn(isc_secrets.GITIGNORE_LINE, ignored)
+
 
 class ToggleTests(StoreTestCase):
     def setUp(self):

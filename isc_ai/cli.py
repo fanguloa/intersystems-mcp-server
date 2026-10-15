@@ -1,16 +1,16 @@
 """isc-ai command line.
 
     isc-ai mcp                      run the MCP server over stdio (what the client launches)
-    isc-ai init [DIR]               create <project>/.iris-mcp/config.json from the packaged template
+    isc-ai init [DIR]               create <project>/.isc-ai/config.json from the packaged template
     isc-ai config <sub>             show | set | unset | add-server | remove-server | validate
-    isc-ai servers migrate          copy legacy ~/.iris_mcp_servers.json into ~/.iris-mcp/servers.json
+    isc-ai servers migrate          copy legacy ~/.iris_mcp_servers.json into ~/.isc-ai/servers.json
     isc-ai facility render|install  render / conditionally install MCP.CCRMutation for this site
     isc-ai doctor                   what project, files and servers this process would use
     isc-ai setup                    plan/apply local OpenCode and Claude harness configuration
 
 The CLI only edits configuration files; only `mcp` and `facility install` talk to IRIS.
 Every command that resolves a project accepts `--project-dir` and otherwise searches
-upward from the current directory for `.iris-mcp/config.json`.
+upward from the current directory for `.isc-ai/config.json`.
 
 `isc-ai` with no command prints the full help (exit 0); every sub-command carries its
 own examples, reachable with `isc-ai <command> -h`.

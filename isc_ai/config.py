@@ -2,11 +2,11 @@
 
 Two configuration layers, both plain JSON:
 
-  project policy   <project>/.iris-mcp/config.json
+  project policy   <project>/.isc-ai/config.json
                    Site vocabulary (CCR format, production markers), the canonical
                    BASE route, HA/VIP write routes, the allowed-package catalog, the
                    controlled-mutation facility settings and optional servers.
-  user servers     ~/.iris-mcp/servers.json
+  user servers     ~/.isc-ai/servers.json
                    Private connection entries only. The legacy
                    ~/.iris_mcp_servers.json is still honoured as a fallback.
 
@@ -1089,7 +1089,7 @@ def load_runtime_config(project_dir=None, environ=None, home=None):
     if project_dir is None and explicit_config and not environ.get(PROJECT_DIR_ENV):
         # An explicit config file governs its own project: relative paths inside it
         # (mutation.local_source_root) resolve against the directory that holds
-        # .iris-mcp/, never against wherever the shell happens to be.
+        # .isc-ai/, never against wherever the shell happens to be.
         project_dir = Path(explicit_config).resolve().parent.parent
     else:
         project_dir = project_directory(environ) if project_dir is None else Path(project_dir).resolve()

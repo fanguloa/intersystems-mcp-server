@@ -34,7 +34,7 @@ MESSAGES = {
         "\n"
         "The MCP servers are launched by the clients, never by this CLI, and this CLI is never\n"
         "in the middle of that conversation. Commands that resolve a project accept\n"
-        "--project-dir; otherwise the nearest ancestor holding .iris-mcp/config.json wins, the\n"
+        "--project-dir; otherwise the nearest ancestor holding .isc-ai/config.json wins, the\n"
         "same way git finds .git."
     ),
     "app.examples": (
@@ -49,8 +49,8 @@ MESSAGES = {
     "app.footer": "Run 'isc-ai <command> -h' for the flags and examples of a single command.",
 
     # -- shared flags ----------------------------------------------------
-    "flag.project_dir": "project directory (default: nearest ancestor of cwd with .iris-mcp/, "
-                        "or IRIS_MCP_PROJECT_DIR)",
+    "flag.project_dir": "project directory (default: nearest ancestor of cwd with .isc-ai/, "
+                        "or ISC_AI_PROJECT_DIR)",
 
     # -- mcp -------------------------------------------------------------
     "cmd.mcp.help": "run the MCP server over stdio",
@@ -65,9 +65,9 @@ MESSAGES = {
     ),
 
     # -- init ------------------------------------------------------------
-    "cmd.init.help": "create .iris-mcp/config.json from the packaged template (idempotent)",
+    "cmd.init.help": "create .isc-ai/config.json from the packaged template (idempotent)",
     "cmd.init.examples": (
-        "isc-ai init                            create .iris-mcp/config.json in the cwd\n"
+        "isc-ai init                            create .isc-ai/config.json in the cwd\n"
         "isc-ai init C:\\work\\deployments\\site\n"
         "isc-ai init --no-servers               policy only, no example servers\n"
         "isc-ai init --force                    regenerate from the template\n"
@@ -118,7 +118,7 @@ MESSAGES = {
         "--password 'literal'\n"
         "\n"
         "The project file is committable, so it only accepts {{env:VAR}} references for\n"
-        "credentials; --user writes literal secrets to ~/.iris-mcp/servers.json instead."
+        "credentials; --user writes literal secrets to ~/.isc-ai/servers.json instead."
     ),
     "flag.add.role": "env_role, e.g. BASE, UAT, LIVE",
     "flag.add.production": "mark as is_production=true",
@@ -126,13 +126,13 @@ MESSAGES = {
     "flag.add.password": "literal or {{env:VAR}} reference",
     "flag.add.upload_token": "literal or {{env:VAR}} reference for the CCR upload token",
     "flag.add.ccr_id": "default CCR identifier for this server",
-    "flag.add.user": "write to ~/.iris-mcp/servers.json instead of the project file",
+    "flag.add.user": "write to ~/.isc-ai/servers.json instead of the project file",
     "cmd.config.remove_server.help": "remove a server entry",
     "cmd.config.remove_server.examples": (
         "isc-ai config remove-server my-base\n"
         "isc-ai config remove-server my-base --user"
     ),
-    "flag.remove.user": "remove from ~/.iris-mcp/servers.json instead of the project file",
+    "flag.remove.user": "remove from ~/.isc-ai/servers.json instead of the project file",
     "cmd.config.validate.help": "load and validate the effective configuration",
     "cmd.config.validate.examples": (
         "isc-ai config validate\n"
@@ -148,10 +148,10 @@ MESSAGES = {
         "isc-ai servers migrate\n"
         "isc-ai servers migrate --force"
     ),
-    "cmd.servers.migrate.help": "copy legacy ~/.iris_mcp_servers.json into ~/.iris-mcp/servers.json",
+    "cmd.servers.migrate.help": "copy legacy ~/.iris_mcp_servers.json into ~/.isc-ai/servers.json",
     "cmd.servers.migrate.examples": (
         "isc-ai servers migrate\n"
-        "isc-ai servers migrate --force        overwrite an existing ~/.iris-mcp/servers.json"
+        "isc-ai servers migrate --force        overwrite an existing ~/.isc-ai/servers.json"
     ),
     "flag.migrate.force": "overwrite the destination file",
 
@@ -295,7 +295,7 @@ MESSAGES = {
         "isc-ai docs --apply\n"
         "\n"
         "Two blocks, delimited by <!-- isc-ai:NAME --> markers:\n"
-        "  topology  in WORKFLOW.md, derived from .iris-mcp/config.json so the documented\n"
+        "  topology  in WORKFLOW.md, derived from .isc-ai/config.json so the documented\n"
         "            hosts, HA nodes, VIP aliases, write exceptions, package catalog and\n"
         "            CCR format cannot drift away from the policy that is enforced\n"
         "  language  in AGENTS.md, the language the agents must reply in\n"
@@ -355,8 +355,8 @@ MESSAGES = {
         "type token.txt | isc-ai secrets set JIRA_API_TOKEN\n"
         "isc-ai secrets unset JIRA_API_TOKEN\n"
         "\n"
-        "Two scopes: ~/.iris-mcp/secrets.json for what is yours (one Jira, one password)\n"
-        "and <project>/.iris-mcp/secrets.json for what differs per deployment, which is\n"
+        "Two scopes: ~/.isc-ai/secrets.json for what is yours (one Jira, one password)\n"
+        "and <project>/.isc-ai/secrets.json for what differs per deployment, which is\n"
         "added to .gitignore on first write.\n"
         "\n"
         "A value is never taken from the command line: it would land in shell history, in\n"
@@ -498,7 +498,7 @@ MESSAGES = {
     # -- doctor ----------------------------------------------------------
     "msg.doctor.no_config": "no project configuration found; run 'isc-ai init' in the deployment directory.",
     "msg.doctor.home_policy": "the governing project configuration is in your HOME directory; every "
-                              "deployment without its own .iris-mcp/config.json inherits it. "
+                              "deployment without its own .isc-ai/config.json inherits it. "
                               "Remove it unless intended.",
     "msg.doctor.ancestor": "policy inherited from ancestor {project_dir}.",
 
