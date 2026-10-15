@@ -1,5 +1,7 @@
 # Default for source files: normalize to LF in the repository.
 * text=auto
+# A shell script with CRLF fails under sh even on Windows (Git Bash, WSL).
+*.sh text eol=lf
 
 # Packaged resources are verified byte for byte against the sha256 digests recorded in
 # isc_ai/resources/harness/manifest.json. Any line-ending translation breaks that
