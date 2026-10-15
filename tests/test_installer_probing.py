@@ -46,10 +46,17 @@ class InstallShProbingTests(unittest.TestCase):
         exit_after = self.text.index("exit 1", auth_failed_index)
         self.assertGreater(exit_after, auth_failed_index)
 
-    def test_extension_probing_runs_after_core_install_in_the_apply_path(self):
-        core_install_index = self.text.index('isc-ai setup --apply')
-        probing_call_index = self.text.rindex("report_extensions")
-        self.assertGreater(probing_call_index, core_install_index)
+    def test_extensions_are_probed_before_anything_is_installed(self):
+        # An auth failure must stop before uv changes the installation.
+        probing_call_index = self.text.index("\nreport_extensions\n")
+        core_install_index = self.text.index('uv tool install "$@"')
+        self.assertLess(probing_call_index, core_install_index)
+        self.assertLess(core_install_index, self.text.index('setup --apply', core_install_index))
+
+    def test_an_extension_rides_on_the_core_source_never_on_a_bare_index_name(self):
+        # 'isc-ai' is not published on the public index: a bare name would resolve there.
+        self.assertNotRegex(self.text, r"uv tool install --with \S+ isc-ai")
+        self.assertIn('set -- "$@" --with "$extension"', self.text)
 
 
 class InstallPs1ProbingParityTests(unittest.TestCase):
@@ -77,10 +84,15 @@ class InstallPs1ProbingParityTests(unittest.TestCase):
         exit_after = self.text.index("exit 1", auth_failed_index)
         self.assertGreater(exit_after, auth_failed_index)
 
-    def test_extension_probing_runs_after_core_install_in_the_apply_path(self):
-        core_install_index = self.text.index('isc-ai setup --apply')
-        probing_call_index = self.text.rindex("Report-Extensions")
-        self.assertGreater(probing_call_index, core_install_index)
+    def test_extensions_are_probed_before_anything_is_installed(self):
+        probing_call_index = self.text.index("$With = Report-Extensions")
+        core_install_index = self.text.index("& $Uv.Source @InstallArgs")
+        self.assertLess(probing_call_index, core_install_index)
+        self.assertLess(core_install_index, self.text.index("setup --apply", core_install_index))
+
+    def test_an_extension_rides_on_the_core_source_never_on_a_bare_index_name(self):
+        self.assertNotRegex(self.text, r"tool install --with \S+ isc-ai")
+        self.assertIn('$InstallArgs = @("tool", "install") + $Source + $With', self.text)
 
     def test_probing_logic_mirrors_install_sh_not_just_flag_parity(self):
         sh_text = (ROOT / "install.sh").read_text(encoding="utf-8")

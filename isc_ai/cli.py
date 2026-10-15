@@ -892,7 +892,7 @@ def _run_doctor(args):
         summary["project_source"] = "cwd (no configuration found)"
     summary["env"] = {
         name: os.environ.get(name)
-        for name in (isc_config.PROJECT_DIR_ENV, isc_config.PROJECT_CONFIG_ENV, isc_config.EXTRA_PACKAGES_ENV,
+        for name in (*isc_config.PROJECT_DIR_ENVS, *isc_config.PROJECT_CONFIG_ENVS, isc_config.EXTRA_PACKAGES_ENV,
                      "IRIS_MCP_TIMEOUT", i18n.LANGUAGE_ENV)
         if os.environ.get(name) is not None
     }
