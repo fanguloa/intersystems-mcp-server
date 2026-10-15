@@ -1,6 +1,8 @@
 // Register a Logi websys.Report in BASE under a CCR. Verified on TrakCare T2026.
 // Run with iris_execute_objectscript on BASE only, after explicit user approval: it persists a
 // configuration record and its CCR change row. Replace every <...> placeholder first.
+// ReportUrl/JReportCatalog point to the binaries made by convert-logi-binary.mac.txt: the XML
+// files render with the "Logi Report Evaluation Copy" watermark.
 // Other environments receive the record with the ItemSet: never run this outside BASE.
 // Pn are positional report parameters: prefer an empty expression (value passed by the caller)
 // or a session expression; titles and footer texts come from SP columns, not from literals.
@@ -15,8 +17,8 @@ Try {
 	Set r.Code = code
 	Set r.Description = "<Description (Logi)>"
 	Set r.Type = "JReport"
-	Set r.ReportUrl = "/<SITE>/<folder>/<ReportName>.cls.xml"
-	Set r.JReportCatalog = "/<SITE>/<folder>/<Catalog>.cat.xml"
+	Set r.ReportUrl = "/<SITE>/<folder>/<ReportName>.cls"
+	Set r.JReportCatalog = "/<SITE>/<folder>/<Catalog>.cat"
 	Set r.P1Name = "<pFirstParam>", r.P1 = ""
 	Set r.P2Name = "pSSUSRRowId", r.P2 = "%session.Get(""LOGON.USERID"")"
 	Set r.OutputFormat = 2

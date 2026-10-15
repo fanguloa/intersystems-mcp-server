@@ -26,7 +26,7 @@ Query Header(pRowId As %String) As %Query(ROWSPEC = "RowId,Title,Unit,Notes") [ 
 {
 }
 
-Query Items(pRowId As %String) As %Query(ROWSPEC = "Item,Detail") [ SqlProc ]
+Query Items(pRowId As %String) As %Query(ROWSPEC = "Item,Detail,SectionOrder:%Integer,Section") [ SqlProc ]
 {
 }
 
@@ -182,6 +182,120 @@ class LogiGeneratorTests(unittest.TestCase):
     def test_the_catalog_template_is_packaged_with_the_generator(self):
         from isc_ai.logigen.catalog import TEMPLATE
         self.assertTrue(TEMPLATE.is_file())
+
+    def test_a_grouped_table_has_column_titles_once_and_a_heading_row_per_group(self):
+        grouped = dict(COMPONENT, layouts=[{"type": "groupedTable", "groupBy": "SectionOrder", "groupTitle": "Section",
+                                            "columns": [["Check", "Item", 0.5], ["Answer", "Detail", 0.5]]}])
+        (self.root / "jreports" / "specs" / "Items.json").write_text(json.dumps(grouped), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Items.cls.xml")).getroot()
+        header_texts = [f.findtext("Text") for f in root.find(".//BandedHeader").iter("TextField")]
+        self.assertEqual(header_texts, ["Check", "Answer"])
+        group = root.find(".//GroupPanel")
+        self.assertEqual(group.findtext("GroupBy"), "SECTIONORDER")
+        self.assertEqual(group.find("GroupHeaderPanel/DBField/ColumnName").text, "SECTION")
+        self.assertEqual([f.findtext("ColumnName") for f in group.find("DetailPanel").iter("DBField")], ["ITEM", "DETAIL"])
+        self.assertTrue(generate(self.manifest, check=True).ok)
+
+    def test_an_unknown_grouped_table_column_is_a_contract_violation(self):
+        grouped = dict(COMPONENT, layouts=[{"type": "groupedTable", "groupBy": "Nope", "groupTitle": "Item",
+                                            "columns": [["Check", "Item", 1.0]]}])
+        (self.root / "jreports" / "specs" / "Items.json").write_text(json.dumps(grouped), encoding="utf-8")
+        result = generate(self.manifest)
+        self.assertFalse(result.ok)
+        self.assertIn("contract violation", result.problems[0])
+
+    def test_record_per_page_starts_only_the_first_body_panel_on_a_new_page(self):
+        paged = dict(REPORT, recordPerPage=True)
+        (self.root / "jreports" / "specs" / "Demo.json").write_text(json.dumps(paged), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Demo.cls.xml")).getroot()
+        page_panel = root.find(".//BandedPagePanel")
+        body = page_panel.findall("DetailPanel")
+        self.assertEqual(body[0].findtext("OnNewPage"), "true")
+        self.assertEqual(sum(1 for p in root.iter() if p.tag == "OnNewPage"), 1)
+        self.assertTrue(generate(self.manifest, check=True).ok)
+
+    def test_reports_do_not_start_records_on_a_new_page_by_default(self):
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Demo.cls.xml")).getroot()
+        self.assertFalse(any(p.tag == "OnNewPage" for p in root.iter()))
+
+    def test_a_component_block_can_cross_pages_only_when_asked(self):
+        crossing = dict(REPORT, blocks=[{"type": "title", "text": "LIST"},
+                                        {"type": "component", "component": "Items", "links": {"RowId": "pRowId"}, "crossPage": True}])
+        (self.root / "jreports" / "specs" / "Demo.json").write_text(json.dumps(crossing), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Demo.cls.xml")).getroot()
+        panels = [p for p in root.iter("DetailPanel") if p.find("SubReport") is not None]
+        self.assertEqual(len(panels), 1)
+        self.assertEqual(panels[0].findtext("CanCrossPage"), "true")
+        self.assertIsNone(panels[0].find("SubReport").find("CanCrossPage"))
+        # The default stays unchanged: no other panel crosses pages
+        self.assertEqual(sum(1 for p in root.iter() if p.tag == "CanCrossPage"), 1)
+
+    def test_a_signature_block_draws_the_line_and_its_caption_in_one_panel(self):
+        signed = dict(REPORT, blocks=REPORT["blocks"] + [
+            {"type": "title", "text": "SIGNATURE"},
+            {"type": "signature", "text": "Patient signature", "width": 4.0, "height": 0.5}])
+        (self.root / "jreports" / "specs" / "Demo.json").write_text(json.dumps(signed), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Demo.cls.xml")).getroot()
+        for panel in root.iter("DetailPanel"):
+            fields = list(panel.iter("TextField"))
+            texts = [f.findtext("Text") for f in fields]
+            if "Patient signature" in texts:
+                self.assertIn("SIGNATURE", texts, "the heading stays with the signature")
+                line = next(f for f in fields if f.findtext("DisplayName") == "Rule" and f.findtext("Width") == "4.00000")
+                caption = next(f for f in fields if f.findtext("Text") == "Patient signature")
+                self.assertGreater(float(caption.findtext("Y")), float(line.findtext("Y")))
+                break
+        else:
+            self.fail("signature caption not found")
+
+    def test_a_signature_caption_can_come_from_a_column_and_sit_at_the_right(self):
+        signed = dict(REPORT, blocks=REPORT["blocks"] + [
+            {"type": "signature", "column": "Title", "align": "right", "width": 3.0}])
+        (self.root / "jreports" / "specs" / "Demo.json").write_text(json.dumps(signed), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Demo.cls.xml")).getroot()
+        caption = next(f for f in root.iter("DBField") if f.findtext("ColumnName") == "TITLE"
+                       and f.findtext("HorizontalAlignment") == "Center")
+        content_w = 8.26772 - 2 * 0.39
+        self.assertAlmostEqual(float(caption.findtext("X")), content_w - 3.0, places=3)
+
+    def test_an_unknown_signature_align_is_rejected(self):
+        signed = dict(REPORT, blocks=[{"type": "signature", "text": "x", "align": "middle"}])
+        (self.root / "jreports" / "specs" / "Demo.json").write_text(json.dumps(signed), encoding="utf-8")
+        self.assertFalse(generate(self.manifest).ok)
+
+    def test_a_table_note_is_a_second_line_inside_the_same_row_panel(self):
+        noted = dict(COMPONENT, layouts=[{"type": "table", "columns": [["Item", "Item", 1.0]],
+                                          "note": {"label": "Notes:", "column": "Detail", "indent": 0.2}}])
+        (self.root / "jreports" / "specs" / "Items.json").write_text(json.dumps(noted), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Items.cls.xml")).getroot()
+        detail = root.find(".//BandedPagePanel/DetailPanel")
+        self.assertEqual([f.findtext("ColumnName") for f in detail.iter("DBField")], ["ITEM", "DETAIL"])
+        note = next(f for f in detail.iter("DBField") if f.findtext("ColumnName") == "DETAIL")
+        self.assertGreater(float(note.findtext("Y")), 0.0)
+        self.assertEqual(float(detail.findtext("Height")), 0.48)
+        self.assertIn("Notes:", [f.findtext("Text") for f in detail.iter("TextField")])
+
+    def test_a_section_compresses_without_records_and_carries_its_band_in_the_header(self):
+        section = dict(COMPONENT, layouts=[{"type": "section", "title": "HOSPITAL STAY", "columns": 2,
+                                            "cells": [["Item", "Item"], ["Detail", "Detail"]]}])
+        (self.root / "jreports" / "specs" / "Items.json").write_text(json.dumps(section), encoding="utf-8")
+        self.assertTrue(generate(self.manifest).ok)
+        root = ET.parse(self.output("Items.cls.xml")).getroot()
+        banded = root.find(".//BandedObject")
+        self.assertEqual(banded.findtext("CompressIfNoRecord"), "true")
+        header = banded.find("BandedHeader")
+        self.assertIsNone(header.find("Invisible"))
+        self.assertIn("HOSPITAL STAY", [f.findtext("Text") for f in header.iter("TextField")])
+        detail = banded.find("BandedPagePanel/DetailPanel")
+        self.assertEqual([f.findtext("ColumnName") for f in detail.iter("DBField")], ["ITEM", "DETAIL"])
+        self.assertTrue(generate(self.manifest, check=True).ok)
 
 
 if __name__ == "__main__":

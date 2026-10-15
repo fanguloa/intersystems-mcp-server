@@ -36,16 +36,17 @@ Load when creating or changing a TrakCare Logi (InterSystems Reports) printable:
 3. Write the spec ([reference](references/spec-reference.md)) and list it in the manifest.
 4. `isc-ai logi --manifest <manifest>`, then the same with `--check` (exit 0).
 5. Save and compile the procedures and the deployer under the CCR (`iris_save_class_from_file`, `ccr_id`, `compile=true`). On a timeout of the large deployer, verify XData and compile time before retrying.
-6. In BASE run `Deploy()` (writes files, checks SHA-256, grants EXECUTE); `Verify()` only checks.
-7. Register the `websys.Report` once in BASE with [the recipe](assets/register-websys-report.mac.txt).
-8. Render through TrakCare with [the Playwright helper](assets/logi-report-render.ts), read the PDF, compare it with the mockup and iterate from step 2 or 3.
-9. CCR Implementation Plan per environment: load the ItemSet, then `Deploy()`.
+6. In BASE run `Deploy()`: writes the files, checks SHA-256, converts them to binary `.cls`/`.cat` and grants EXECUTE; `Verify()` only checks (also that each binary exists and is not older than its XML). Generated XML renders with the "Logi Report Evaluation Copy" watermark, so the conversion is on by default (manifest `convertToBinary`). The converter runs from the IRIS temp directory, never from the data directory, where log4j fails.
+7. Only for a deployer generated before the conversion existed: convert by hand with [the conversion recipe](assets/convert-logi-binary.mac.txt), after approval.
+8. Register the `websys.Report` once in BASE with [the recipe](assets/register-websys-report.mac.txt), pointing `ReportUrl`/`JReportCatalog` to the binary `.cls`/`.cat`.
+9. Render through TrakCare with [the Playwright helper](assets/logi-report-render.ts), read the PDF, compare it with the mockup and iterate from step 2 or 3. No page may show "Logi Report Evaluation Copy".
+10. CCR Implementation Plan per environment: load the ItemSet, then `Deploy()` (it converts too).
 
 ## Output Contract
 
-Report new procedures/columns, generated files, `Deploy()`/`Verify()` result, PDF path and page count, deviations from the mockup and pending functional decisions (one question at a time).
+Report new procedures/columns, generated files, `Deploy()`/`Verify()` result, conversion result per file, PDF path and page count, deviations from the mockup and pending functional decisions (one question at a time).
 
 ## References
 
 - [Spec reference](references/spec-reference.md), [Logi/TrakCare gotchas](references/logi-gotchas.md)
-- [websys.Report recipe](assets/register-websys-report.mac.txt), [Playwright render helper](assets/logi-report-render.ts)
+- [websys.Report recipe](assets/register-websys-report.mac.txt), [binary conversion recipe](assets/convert-logi-binary.mac.txt), [Playwright render helper](assets/logi-report-render.ts)

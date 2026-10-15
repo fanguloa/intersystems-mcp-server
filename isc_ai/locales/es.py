@@ -320,7 +320,8 @@ MESSAGES = {
         "El manifest lista un catálogo por carpeta de área. Columnas y parámetros salen de la\n"
         "ROWSPEC de las fuentes ObjectScript que referencia; los layouts, de los specs JSON.\n"
         "Cada catálogo puede declarar una clase de despliegue: lleva los archivos como XData y\n"
-        "su Deploy() los escribe, verifica su SHA-256 y otorga EXECUTE en cualquier ambiente."
+        "su Deploy() los escribe, verifica su SHA-256, los convierte a binario .cls/.cat (Logi\n"
+        "marca el XML con su marca de agua de evaluación) y otorga EXECUTE en cualquier ambiente."
     ),
     "flag.logi.manifest": "ruta del manifest.json que lista los catálogos",
     "flag.logi.check": "compara con los archivos en disco y no escribe nada",

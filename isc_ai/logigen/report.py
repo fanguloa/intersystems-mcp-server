@@ -96,6 +96,37 @@ def _textbox(panel, names, block, w, field, y=0.0):
     return y + height
 
 
+SIGNATURE_ALIGN = ("left", "center", "right")
+
+
+def _signature(panel, names, block, w, field, y=0.0):
+    """Signature space: blank room to sign, the signing line and its caption centered below.
+    The caption is a fixed "text" or a dataset "column" (e.g. the signer's name and RUT);
+    "align" places the line at the left (default), center or right of the page. Optional
+    "imageColumn" is a column with the file path or URL of the signature image, drawn in the
+    signing room just above the line (same binding as the header logo)."""
+    line_w = min(block.get("width", w * 0.6), w)
+    align = block.get("align", "left")
+    if align not in SIGNATURE_ALIGN:
+        raise ValueError(f"unknown signature align {align}")
+    x = {"left": 0.0, "center": (w - line_w) / 2, "right": w - line_w}[align]
+    room = block.get("height", 0.55)
+    if block.get("imageColumn"):
+        image_h = max(room - 0.04, 0.1)
+        image_w = min(block.get("imageWidth", image_h * 2.5), line_w)
+        k.image(panel, names, field(block["imageColumn"]), x + (line_w - image_w) / 2, y + 0.02, image_w, image_h,
+                align="Center", display_name="Firma", constrain=True)
+    y += room
+    k.rule(panel, names, x, y, line_w, 0.012, THEME["faint"])
+    style = {"size": 7.5, "color": THEME["faint"], "align": "Center", "wrap": True}
+    caption_h = block.get("captionHeight", 0.2)
+    if block.get("column"):
+        k.db_field(panel, names, field(block["column"]), x, y + 0.04, line_w, caption_h, style)
+    else:
+        k.label(panel, names, block.get("text", ""), x, y + 0.04, line_w, caption_h, style)
+    return y + caption_h + 0.04
+
+
 def _component(panel, names, block, w, ctx, y=0.0):
     component = ctx["components"][block["component"]]
     tab = component["tabs"][block.get("tab", 0)]
@@ -136,12 +167,18 @@ def _body_panels(banded_page_panel, names, blocks, w, ctx, field):
                 k.panel(banded_page_panel, "DetailPanel", names.next("DetailPanel"), w, block["after"], label_text="DetailPanel")
             continue
         panel = k.panel(banded_page_panel, "DetailPanel", names.next("DetailPanel"), w, 0.1, label_text="DetailPanel")
+        if block.get("crossPage"):
+            # Logi "Cross Page" (XML CanCrossPage): a long subreport splits at the page break
+            # instead of moving whole to the next page and leaving the previous one blank
+            k.props(panel, {"CanCrossPage": True})
         y = _headings(panel, names, pending, w)
         pending = []
         if kind == "textbox":
             used = _textbox(panel, names, block, w, field, y)
         elif kind == "component":
             used = _component(panel, names, block, w, ctx, y)
+        elif kind == "signature":
+            used = _signature(panel, names, block, w, field, y)
         elif kind == "space":
             used = y + block.get("height", 0.1)
         else:
@@ -315,6 +352,10 @@ def build_report(spec: dict, model: CatalogModel, components: dict) -> ET.Elemen
     header = k.panel(page_panel, "BandedPageHeader", names.next("BandedPageHeader"), content_w, 0.1, label_text="BandedPageHeader")
     header.find("Height").text = k.num(_component(header, names, spec["pageHeader"], content_w, ctx) + 0.08)
     _body_panels(page_panel, names, spec["blocks"], content_w, ctx, field)
+    if spec.get("recordPerPage"):
+        # One document per dataset row (e.g. a batch of orders): the first body panel of every
+        # record starts a new page (Logi "On New Page", product archivo/EtiquetaDeSeguimiento)
+        k.props(page_panel.find("DetailPanel"), {"OnNewPage": True})
     # Product pattern (rce/IndicacionesDiarias): the page footer is suppressed on the last page and
     # the banded footer, pushed to the page bottom, prints the same footer there. Otherwise the
     # last page footer follows the content instead of sitting at the bottom of the sheet.
@@ -350,6 +391,10 @@ def build_component(spec: dict, model: CatalogModel) -> ET.ElementTree:
             _grouped_list_layout(page_panel, names, width, field, layout)
         elif kind == "table":
             _table_layout(banded, page_panel, names, width, field, layout)
+        elif kind == "groupedTable":
+            _grouped_table_layout(banded, page_panel, names, width, field, layout)
+        elif kind == "section":
+            _section_layout(banded, page_panel, names, width, field, layout)
         else:
             raise ValueError(f"unknown layout {kind}")
         _report_tail(report, body, banded, names, tab, content_w, geometry)
@@ -359,9 +404,12 @@ def build_component(spec: dict, model: CatalogModel) -> ET.ElementTree:
 
 def _header_layout(page_panel, names, w, field):
     panel = k.panel(page_panel, "DetailPanel", names.next("DetailPanel"), w, 0.86, label_text="DetailPanel")
-    k.image(panel, names, field("LogoUrl"), 0.0, 0.05, 1.45, 0.62)
-    k.db_field(panel, names, field("Titulo"), 1.7, 0.18, w - 3.9, 0.34,
-               {"font": "*SourceSansPro-SemiBold", "size": 14, "color": THEME["primary"], "align": "Center"})
+    # The logo keeps its proportions inside the box (a fixed box stretched non-matching images)
+    k.image(panel, names, field("LogoUrl"), 0.0, 0.05, 1.45, 0.62, constrain=True)
+    # Long titles wrap up to three lines inside the space between the logo and the print data
+    k.db_field(panel, names, field("Titulo"), 1.55, 0.04, w - 3.8, 0.70,
+               {"font": "*SourceSansPro-SemiBold", "size": 13, "color": THEME["primary"], "align": "Center",
+                "valign": "Center", "wrap": True, "grow": False})
     right = {"size": 7, "color": THEME["faint"], "align": "Right"}
     k.db_field(panel, names, field("ImpresoEl"), w - 2.2, 0.06, 2.2, 0.17, right)
     k.db_field(panel, names, field("Establecimiento"), w - 2.2, 0.23, 2.2, 0.17, right)
@@ -392,18 +440,88 @@ def _grouped_list_layout(page_panel, names, w, field, layout):
     k.panel(group, "GroupFooterPanel", names.next("GroupFooterPanel"), w, 0.06, label_text="GroupFooterPanel")
 
 
-def _table_layout(banded, page_panel, names, w, field, layout):
-    # Column titles go in the banded header (printed once, also inside a subreport);
-    # a banded page header is not printed when the report runs as a subreport.
+def _table_header(banded, names, w, columns):
+    """Column titles in the banded header (printed once, also inside a subreport);
+    a banded page header is not printed when the report runs as a subreport."""
     header = banded.find("BandedHeader")
     invisible = header.find("Invisible")
     if invisible is not None:
         header.remove(invisible)
     header.find("Height").text = k.num(0.26)
-    detail = k.panel(page_panel, "DetailPanel", names.next("DetailPanel"), w, ROW, label_text="DetailPanel", bottom_rule=THEME["rule"])
     x = 0.0
-    for caption, column, width in layout["columns"]:
+    for caption, _column, width in columns:
         k.label(header, names, caption, x, 0.02, width * w, 0.22,
                 {"font": "*SourceSansPro-SemiBold", "size": 8, "color": THEME["label"], "background": THEME["muted"]})
+        x += width * w
+
+
+def _table_row(detail, names, w, field, columns):
+    x = 0.0
+    for _caption, column, width in columns:
         k.db_field(detail, names, field(column), x, 0.0, width * w, ROW, {"size": 8, "color": THEME["text"], "wrap": True})
         x += width * w
+    return ROW
+
+
+def _table_note(detail, names, w, field, note, y):
+    """Optional second line of a table row: "label: value" from column "indent" (fraction of the
+    width) to the right edge, in the same panel so it grows and breaks with its row."""
+    x = note.get("indent", 0.0) * w
+    label_w = note.get("labelWidth", 0.9)
+    k.label(detail, names, note.get("label", ""), x, y, label_w, ROW,
+            {"font": "*SourceSansPro-SemiBold", "size": 7.5, "color": THEME["label"]})
+    k.db_field(detail, names, field(note["column"]), x + label_w, y, w - x - label_w, ROW,
+               {"size": 7.5, "color": THEME["faint"], "wrap": True})
+    return y + ROW
+
+
+def _table_detail(page_panel, names, w, field, layout, parent=None):
+    detail = k.panel(parent if parent is not None else page_panel, "DetailPanel", names.next("DetailPanel"), w, ROW,
+                     label_text="DetailPanel", bottom_rule=THEME["rule"])
+    used = _table_row(detail, names, w, field, layout["columns"])
+    if layout.get("note"):
+        used = _table_note(detail, names, w, field, layout["note"], used)
+    detail.find("Height").text = k.num(used)
+    return detail
+
+
+def _table_layout(banded, page_panel, names, w, field, layout):
+    _table_header(banded, names, w, layout["columns"])
+    _table_detail(page_panel, names, w, field, layout)
+
+
+def _section_layout(banded, page_panel, names, w, field, layout):
+    """Conditional section: a band heading and a label/value grid that are printed only when the
+    component dataset returns a row. The heading is the banded header and the banded object
+    compresses when there is no record (Logi "CompressIfNoRecord"), so a procedure that returns
+    no rows hides the whole section. Link it from a main report "component" block with a small
+    height: the subreport grows with its content."""
+    banded.find("CompressIfNoRecord").text = "true"
+    header = banded.find("BandedHeader")
+    invisible = header.find("Invisible")
+    if invisible is not None:
+        header.remove(invisible)
+    header.find("Height").text = k.num(_band(header, names, layout["title"], w, layout.get("band", "band")))
+    columns = layout.get("columns", 2)
+    cells = layout["cells"]
+    for start in range(0, len(cells), columns):
+        panel = k.panel(page_panel, "DetailPanel", names.next("DetailPanel"), w, 0.1,
+                        label_text="DetailPanel", bottom_rule=THEME["rule"])
+        panel.find("Height").text = k.num(_grid_row(panel, names, layout, cells[start:start + columns], w, field))
+    if layout.get("after"):
+        k.panel(page_panel, "DetailPanel", names.next("DetailPanel"), w, layout["after"], label_text="DetailPanel")
+
+
+def _grouped_table_layout(banded, page_panel, names, w, field, layout):
+    """Table with section rows: column titles once, then per group a heading row (subband
+    style) and its detail rows. Logi groups by "groupBy": return it as a sortable order."""
+    columns = layout["columns"]
+    _table_header(banded, names, w, columns)
+    group = k.sub(page_panel, "GroupPanel", Name=names.next("GroupPanel"))
+    k.props(group, {"GroupBy": field(layout["groupBy"]).upper(), "DisplayName": "Group Panel", "SelectN": -1})
+    header = k.panel(group, "GroupHeaderPanel", names.next("GroupHeaderPanel"), w, 0.24,
+                     label_text="GroupHeaderPanel", bottom_rule=THEME["rule"])
+    k.db_field(header, names, field(layout["groupTitle"]), 0.0, 0.0, w, 0.24,
+               {"font": "*SourceSansPro-SemiBold", "size": 7.5, "color": THEME["accent"], "background": THEME["soft"]})
+    _table_detail(page_panel, names, w, field, layout, parent=group)
+    k.panel(group, "GroupFooterPanel", names.next("GroupFooterPanel"), w, 0.01, label_text="GroupFooterPanel")

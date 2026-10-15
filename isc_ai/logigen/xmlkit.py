@@ -62,6 +62,8 @@ STYLE_DEFAULTS = {
     "align": "Left",
     "valign": "Center",
     "wrap": False,
+    # With wrap: grow the height to fit the text (True) or wrap inside the fixed box (False)
+    "grow": True,
 }
 
 
@@ -124,7 +126,7 @@ def db_field(parent: ET.Element, names: Names, mapping: str, x: float, y: float,
     }
     values.update(_common(s, x, y, w, h))
     if s["wrap"]:
-        values.update(_grow_down(w))
+        values.update(_grow_down(w) if s["grow"] else {"WordWrap": True})
     return props(element, values)
 
 
@@ -148,12 +150,16 @@ def rule(parent: ET.Element, names: Names, x: float, y: float, w: float, h: floa
     })
 
 
-def image(parent: ET.Element, names: Names, mapping: str, x: float, y: float, w: float, h: float) -> ET.Element:
-    """Image whose URL comes from a dataset field (same binding syntax as product HeaderFooter)."""
+def image(parent: ET.Element, names: Names, mapping: str, x: float, y: float, w: float, h: float,
+          align: str = "Left", display_name: str = "Logo", constrain: bool = False) -> ET.Element:
+    """Image whose URL comes from a dataset field (same binding syntax as product HeaderFooter).
+    constrain=True keeps the picture proportions inside the box: ScalingMode is left at the Logi
+    default (fit image) because "Customize" stretches the picture to the box and overrides
+    Constrain_Proportion (verified in a rendered PDF)."""
     element = sub(parent, "Image", Name=names.next("Image"))
-    return props(element, {
+    values = {
         "display": "inline",
-        "DisplayName": "Logo",
+        "DisplayName": display_name,
         "X": x,
         "Y": y,
         "Width": w,
@@ -161,11 +167,15 @@ def image(parent: ET.Element, names: Names, mapping: str, x: float, y: float, w:
         "SameEncode": True,
         "ExportToCSV": False,
         "VerticalAlignment": "Center",
-        "HorizontalAlignment": "Left",
-        "ScalingMode": "Customize",
+        "HorizontalAlignment": align,
         "PictureName": f"@{mapping}|||0|@",
         "GotoDetail": False,
-    })
+    }
+    if constrain:
+        values["Constrain_Proportion"] = True
+    else:
+        values["ScalingMode"] = "Customize"
+    return props(element, values)
 
 
 def panel(parent: ET.Element, tag: str, name: str, w: float, h: float, invisible: bool = False,
