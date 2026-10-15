@@ -9,7 +9,9 @@ Components are canonical: they are written into every area folder that uses them
 Logi subreport must belong to the same catalog as its main report.
 
 Optional per-catalog manifest keys: "theme" (palette overrides), "sqlRole", "grantMethod"
-(site grant helper Package.Class.Method; default plain SQL GRANT) and "formulaSeed".
+(site grant helper Package.Class.Method; default plain SQL GRANT), "formulaSeed" and
+"convertToBinary" (default true: Deploy() converts the files to binary .cls/.cat, because Logi
+stamps the XML with its evaluation watermark).
 """
 from __future__ import annotations
 
@@ -106,7 +108,8 @@ def generate(manifest_path: pathlib.Path, check: bool = False) -> Result:
         if catalog.get("deployerClass"):
             args = (catalog["deployerClass"], catalog["folder"], catalog["name"], folder,
                     [f"{p.schema}.{p.sql_name}" for p in procedures],
-                    catalog.get("sqlRole", DEFAULT_SQL_ROLE), catalog.get("grantMethod", ""))
+                    catalog.get("sqlRole", DEFAULT_SQL_ROLE), catalog.get("grantMethod", ""),
+                    catalog.get("convertToBinary", True))
             try:
                 if check:
                     target = deployer_path(source_root, catalog["deployerClass"])

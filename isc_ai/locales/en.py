@@ -319,7 +319,8 @@ MESSAGES = {
         "The manifest lists one catalog per area folder. Columns and parameters come from the\n"
         "ROWSPEC of the ObjectScript sources it points to; layouts come from the JSON specs.\n"
         "Each catalog may name a deployer class: it carries the files as XData, and its\n"
-        "Deploy() writes them, checks their SHA-256 and grants EXECUTE in any environment."
+        "Deploy() writes them, checks their SHA-256, converts them to binary .cls/.cat (Logi\n"
+        "stamps the XML with its evaluation watermark) and grants EXECUTE in any environment."
     ),
     "flag.logi.manifest": "path of the manifest.json that lists the catalogs",
     "flag.logi.check": "compare with the files on disk and write nothing",
