@@ -3,7 +3,7 @@
 WORKFLOW.md mixes three things with three different owners. The doctrine is generic and
 belongs in the packaged skills. The site-specific tables -- canonical BASE, HA nodes,
 VIP aliases, UAT write exceptions, package catalog, CCR format -- are a prose view of
-data this tool already owns in `.iris-mcp/config.json`, and that is exactly where drift
+data this tool already owns in `.isc-ai/config.json`, and that is exactly where drift
 comes from: change the VIP in the policy and the table keeps saying the old one. The
 annexes and documented cases are the author's and nobody else's.
 
@@ -25,7 +25,7 @@ from isc_ai import config as isc_config
 from isc_ai.setup import ManagedWrite, _apply_transaction, _managed_target
 
 MARKER = "isc-ai"
-GENERATED_NOTE = ("Bloque generado por `isc-ai docs` desde `.iris-mcp/config.json`. "
+GENERATED_NOTE = ("Bloque generado por `isc-ai docs` desde `.isc-ai/config.json`. "
                   "No editar a mano: se reescribe en cada corrida. "
                   "Lo que esté fuera de los marcadores es tuyo y no se toca.")
 
@@ -178,7 +178,7 @@ BLOCKS = {
     "topology": {
         "document": "WORKFLOW.md",
         "render": render_topology,
-        "summary": "site topology derived from .iris-mcp/config.json",
+        "summary": "site topology derived from .isc-ai/config.json",
     },
     "language": {
         "document": "AGENTS.md",
@@ -205,7 +205,7 @@ def plan(project_dir=None, home=None, environ=None):
               "blocks": [], "skipped": []}
     writes = []
     if project is None:
-        report["skipped"].append("no project resolved; the topology block needs .iris-mcp/config.json")
+        report["skipped"].append("no project resolved; the topology block needs .isc-ai/config.json")
         return report, writes
 
     runtime = isc_config.load_runtime_config(project, environ=environ)

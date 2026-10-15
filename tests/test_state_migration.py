@@ -165,6 +165,17 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(moved.read_text(encoding="utf-8"), "keep me")
             self.assertIn("unrecognised", report["moves"][0]["purpose"])
 
+    def test_a_moved_project_store_stays_out_of_version_control(self):
+        with tempfile.TemporaryDirectory() as raw:
+            (Path(raw) / ".git").mkdir()
+            store = Path(raw) / isc_config.LEGACY_STATE_DIR / "secrets.json"
+            store.parent.mkdir(parents=True)
+            store.write_text('{"secrets": {}}', encoding="utf-8")
+            (Path(raw) / ".gitignore").write_text(".iris-mcp/secrets.json\n", encoding="utf-8")
+            isc_migrate.apply(project_dir=raw)
+            ignored = (Path(raw) / ".gitignore").read_text(encoding="utf-8").splitlines()
+            self.assertIn(".isc-ai/secrets.json", ignored)
+
     def test_a_missing_legacy_directory_is_reported_not_an_error(self):
         with tempfile.TemporaryDirectory() as raw:
             report = isc_migrate.plan(project_dir=raw)

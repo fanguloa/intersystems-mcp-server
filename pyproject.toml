@@ -1,16 +1,22 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "isc-ai"
-version = "0.3.0"
+dynamic = ["version"]
 description = "InterSystems IRIS/TrakCare MCP server with CCR-aware write gates, plus the CLI that manages its per-project configuration."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = []
+authors = [{ name = "Felipe Angulo", email = "felipe.angulo@intersystems.com" }]
+maintainers = [{ name = "Felipe Angulo", email = "felipe.angulo@intersystems.com" }]
+
+[project.urls]
+Repository = "https://gitlab.iscinternal.com/isc-ai-squad/isc-ai"
+Issues = "https://gitlab.iscinternal.com/isc-ai-squad/isc-ai/-/issues"
 
 [project.optional-dependencies]
 socks = ["PySocks>=1.7"]
@@ -20,6 +26,11 @@ isc-ai = "isc_ai.cli:main"
 
 [tool.setuptools]
 packages = ["isc_ai", "isc_ai.locales", "isc_ai.logigen"]
+
+[tool.setuptools.dynamic]
+# One source of truth: --version, the MCP serverInfo, the installers' default tag and the
+# release tag all derive from isc_ai.__version__ (tests/test_distribution.py keeps them equal).
+version = { attr = "isc_ai.__version__" }
 
 [tool.setuptools.package-data]
 # Globs must cover every file type the bundle actually carries: the manifest verifies

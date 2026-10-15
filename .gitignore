@@ -18,8 +18,12 @@ env.bak/
 venv.bak/
 
 # Private server credentials (never commit). The project policy
-# .iris-mcp/config.json IS committable when secrets use {env:VAR} references.
+# .isc-ai/config.json (legacy .iris-mcp/config.json) IS committable when secrets use
+# {env:VAR} references.
+.isc-ai/servers.json
+.isc-ai/secrets.json
 .iris-mcp/servers.json
+.iris-mcp/secrets.json
 mcp_config.json
 .iris_mcp_servers.json
 

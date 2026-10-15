@@ -1,0 +1,48 @@
+# Pipeline for isc-ai: unit tests and an installed-wheel smoke test on every merge request
+# and on main; a vX.Y.Z tag additionally publishes the wheel and sdist to this project's
+# GitLab Package Registry. Nothing here contacts IRIS, Perforce or any site server.
+
+stages:
+  - test
+  - package
+  - release
+
+default:
+  image: python:3.12
+  before_script:
+    - python -m pip install --quiet --disable-pip-version-check uv
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+unit-tests:
+  stage: test
+  script:
+    - python -m unittest discover -s tests -t .
+
+smoke-install:
+  stage: package
+  script:
+    - uv build --out-dir dist .
+    - python tools/smoke_install.py --wheel dist/isc_ai-*.whl
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 30 days
+
+publish:
+  stage: release
+  needs: [smoke-install]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  script:
+    - VERSION=$(python -c "import isc_ai; print(isc_ai.__version__)")
+    - |
+      if [ "v$VERSION" != "$CI_COMMIT_TAG" ]; then
+        echo "Tag $CI_COMMIT_TAG does not match isc_ai.__version__ ($VERSION): bump the version first."
+        exit 1
+      fi
+    - uv publish --publish-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" --username gitlab-ci-token --password "${CI_JOB_TOKEN}" dist/*

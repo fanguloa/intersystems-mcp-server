@@ -22,7 +22,7 @@ same command prints the same words in your shell, in CI and in documentation:
     --lang es  >  ISC_AI_LANG=es  >  English
 
 Language is a property of the person reading, not of the deployment, which is why
-it is not a key of .iris-mcp/config.json.
+it is not a key of .isc-ai/config.json.
 """
 
 import os

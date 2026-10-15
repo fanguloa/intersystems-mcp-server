@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "Project policy for the IRIS MCP server. Created by 'isc-ai init'; edit with 'isc-ai config set' or your editor. Secrets go in ~/.iris-mcp/servers.json or as {env:VAR} references; never store them here.",
+  "_comment": "Project policy for the IRIS MCP server. Created by 'isc-ai init'; edit with 'isc-ai config set' or your editor. Secrets go in ~/.isc-ai/servers.json or as {env:VAR} references; never store them here.",
   "site": {
     "name": "my-site",
     "ccr_id": {

@@ -1,24 +1,170 @@
-# InterSystems IRIS - Model Context Protocol (MCP) Server 🚀
+# isc-ai — entorno agéntico para InterSystems IRIS y TrakCare 🚀
 
 [![MCP Version](https://img.shields.io/badge/mcp-2024--11--05-blue.svg)](https://modelcontextprotocol.io/)
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-brightgreen.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Un servidor de **Model Context Protocol (MCP)** para conectar asistentes de desarrollo con instancias de **InterSystems IRIS**, mediante la API de Atelier.
+`isc-ai` es un único comando que deja lista tu estación para desarrollar con asistentes
+de IA (OpenCode, Claude Code y VS Code) sobre **InterSystems IRIS / TrakCare**:
 
-Se distribuye como el paquete Python instalable `isc-ai` (versión 0.3.0, solo
-biblioteca estándar, Python 3.11 o superior). El paquete expone un único binario,
-`isc-ai`, que agrupa el servidor MCP (`isc-ai mcp`), la CLI que administra la
-configuración por proyecto (`init`, `config`, `servers`, `facility`, `doctor`) y la
-instalación local de los clientes de IA (`setup`: entrada MCP en OpenCode, logo y el
-harness SDD de Claude con sus agentes, comandos y skills empaquetados).
-Reemplaza al script suelto `intersystems-mcp-server/iris_mcp_server.py`.
+- **Servidor MCP** (`isc-ai mcp`) que conecta al asistente con IRIS mediante la API de
+  Atelier, con gates de escritura conscientes de CCR y bloqueo de producción.
+- **CLI de configuración**: clientes de IA, la suite de servidores MCP recomendada, el
+  harness de instrucciones (agentes, comandos y skills), credenciales y la política de
+  cada proyecto.
 
-**Activación: HOLD.** El candidato local tiene discovery CCR parcial y controles
-fail-closed; la detección completa en destinos reales no está verificada. La nueva
-revisión independiente sigue pendiente. Consultar el
-[informe de remediación, evidencia y limitaciones](../docs/agent-environment-remediation.md)
-antes de cualquier registro, reinicio o prueba contra servidores.
+Es un paquete Python sin dependencias fuera de la biblioteca estándar (Python 3.11+).
+
+## 👤 Autor y mantenedor
+
+| | |
+|---|---|
+| **Nombre** | Felipe Angulo |
+| **Cargo** | Technical Specialist, InterSystems |
+| **Correo** | [felipe.angulo@intersystems.com](mailto:felipe.angulo@intersystems.com) |
+
+Dudas, errores o propuestas: abre un issue en
+[isc-ai-squad/isc-ai](https://gitlab.iscinternal.com/isc-ai-squad/isc-ai/-/issues) o escribe al correo.
+
+---
+
+## ⚡ Guía rápida (usuario)
+
+### 1. Requisitos
+
+| Necesitas | Cómo comprobarlo | Si falta |
+| :--- | :--- | :--- |
+| **uv** (instala Python y la herramienta) | `uv --version` | Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"` · Linux/macOS: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| **git** con acceso a GitLab interno (llave SSH o login HTTPS) | `git ls-remote git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git HEAD` | Agrega tu llave SSH en GitLab, o usa HTTPS con tu login |
+| Al menos un cliente de IA (OpenCode, Claude Code o VS Code) | `isc-ai clients` (después de instalar) | `isc-ai clients --apply` lo instala |
+
+No necesitas instalar Python a mano: `uv` trae uno si no hay 3.11+.
+
+### 2. Instalar (sin clonar)
+
+Una sola línea, con la versión publicada (tag):
+
+```powershell
+# SSH (recomendado si ya usas llave SSH con GitLab)
+uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.0"
+
+# HTTPS (usa tu login de GitLab)
+uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.0"
+```
+
+El ejecutable queda en el directorio de herramientas de `uv` (`~/.local/bin`). Si la
+terminal no encuentra `isc-ai`, ejecuta `uv tool update-shell` y abre una terminal nueva.
+
+Alternativa con instalador (además prueba e instala la extensión `isc-ai-technical` si
+tienes acceso, y aplica `isc-ai setup`). Es **dry-run por defecto**: muestra los comandos
+y solo con `-Apply` / `--apply` los ejecuta.
+
+```powershell
+# Desde un clon del repositorio (instalación editable: 'git pull' actualiza)
+.\install.ps1            # plan
+.\install.ps1 -Apply     # instala y configura
+
+# Desde un clon, pero instalando la versión publicada en GitLab
+.\install.ps1 -Apply -Remote -Ref v0.4.0 -Transport https
+```
+
+```sh
+./install.sh             # plan
+./install.sh --apply     # instala y configura
+./install.sh --apply --remote --ref v0.4.0 --https
+```
+
+### 3. Verificar
+
+```powershell
+isc-ai --version         # isc-ai 0.4.0
+isc-ai doctor            # qué proyecto, archivos y servidores ve este directorio
+isc-ai audit             # estado de clientes, suite MCP, harness y modelos (solo lectura)
+```
+
+### 4. Configurar tu estación
+
+La forma guiada pregunta paso a paso y no escribe nada hasta que confirmas el plan:
+
+```powershell
+isc-ai wizard            # o: isc-ai wizard --dry-run para solo ver el plan
+```
+
+O paso a paso (cada comando es un plan hasta que agregas `--apply`):
+
+```powershell
+isc-ai setup --apply                 # entrada MCP en OpenCode, logo y harness de instrucciones
+isc-ai suite --apply                 # registra los 7 servidores MCP recomendados en los 3 clientes
+isc-ai secrets set JIRA_API_TOKEN    # guarda una credencial sin eco (nunca como argumento)
+isc-ai agents --apply                # modelo de cada sub-agente SDD en OpenCode
+isc-ai audit                         # debería quedar sin errores
+```
+
+Reinicia el cliente de IA después de cambiar su configuración.
+
+### 5. Configurar un proyecto (despliegue IRIS)
+
+Desde la carpeta del despliegue:
+
+```powershell
+isc-ai init                                    # crea .isc-ai/config.json desde la plantilla
+isc-ai config set site.ccr_id.prefix SITE      # ejemplo: formato de CCR del sitio
+isc-ai config add-server my-base --host base.example.invalid --path-prefix /base01 --namespace BASE-SITE --role BASE --user
+isc-ai secrets set IRIS_USER                   # --user referencia {env:IRIS_USER} y {env:IRIS_PASSWORD}
+isc-ai secrets set IRIS_PASSWORD
+isc-ai config validate
+isc-ai doctor
+```
+
+La política del proyecto (`.isc-ai/config.json`) se puede commitear; las credenciales
+nunca: viven en `~/.isc-ai/servers.json`, en el store de `isc-ai secrets` o en variables
+de entorno. Detalle completo en la sección **Configuración** más abajo.
+
+### 6. Actualizar y desinstalar
+
+```powershell
+# Cambiar a otra versión publicada (el tag fija la versión)
+uv tool install --reinstall "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.0"
+
+# Instalación desde un clon editable
+git pull
+
+uv tool list                 # qué hay instalado y desde dónde
+uv tool uninstall isc-ai
+```
+
+Si vienes de una versión que usaba `.iris-mcp/`, todo sigue funcionando; para moverte al
+directorio nuevo `.isc-ai/`:
+
+```powershell
+isc-ai migrate           # plan: qué archivos se moverían
+isc-ai migrate --apply   # copia, verifica y recién entonces borra el original
+```
+
+### 7. Problemas frecuentes
+
+| Síntoma | Causa probable | Solución |
+| :--- | :--- | :--- |
+| `isc-ai: command not found` / no se reconoce | El directorio de `uv` no está en `PATH` | `uv tool update-shell` y abre una terminal nueva |
+| `uv is required and was not found on PATH` | Falta uv | Instálalo (paso 1) |
+| La instalación pide usuario/contraseña o queda esperando | Sin credenciales para ese transporte | Usa el otro (SSH ↔ HTTPS) o ejecuta una vez `git ls-remote <url>` para autenticarte |
+| `Skipping extension isc-ai-technical: ... Request access` | No tienes acceso a la extensión | Normal: se instala solo el núcleo. Pide acceso en el enlace del mensaje |
+| `doctor`: `Environment variable X referenced by configuration is not set` | La configuración referencia `{env:X}` y no existe | `isc-ai secrets set X` o define la variable de entorno |
+| `holds both .isc-ai/config.json and .iris-mcp/config.json` | Migración a medias | Deja uno de los dos; `isc-ai migrate` te muestra el detalle |
+| `Code write blocked: no project configuration loaded` | El servidor MCP no encontró `.isc-ai/config.json` hacia arriba de su directorio | Abre el cliente de IA dentro del despliegue o ejecuta `isc-ai init`; verifica con `isc-ai doctor` |
+| El asistente no ve cambios recién instalados | El proceso MCP sigue corriendo con la versión anterior | Reinicia el cliente de IA |
+
+Todos los comandos tienen ayuda con ejemplos: `isc-ai <comando> -h` (en español con
+`--lang es` o `ISC_AI_LANG=es`).
+
+---
+
+## ⚠️ Estado y alcance de las escrituras
+
+Las rutas de escritura controlada tienen discovery CCR parcial y controles
+fail-closed; la detección completa en destinos reales no está verificada en todos los
+sitios. Su activación por sitio (registro, reinicio o pruebas contra servidores)
+requiere revisión humana.
 
 Guardar, compilar y borrar son escrituras. La ejecución ObjectScript y algunas
 herramientas de diagnóstico crean, compilan, ejecutan y eliminan clases temporales;
@@ -26,15 +172,17 @@ pueden persistir datos y no son lecturas puras ni operaciones de “cero huella�
 
 ---
 
+# Referencia técnica
+
 ## ✨ Características Destacadas
 
 * 📡 **Conexión stdio robusta**: Implementa el protocolo estándar JSON-RPC 2.0 nativo sobre canales de entrada y salida estándar, compatible con múltiples entornos e IDEs.
-* 📦 **Configuración en dos capas, sin datos de sitio en el código**: la política del proyecto vive en `<proyecto>/.iris-mcp/config.json` (formato de CCR, ruta BASE canónica, rutas HA/VIP, catálogo de packages, facilidad de mutación) y las conexiones privadas en `~/.iris-mcp/servers.json`. Los secretos se referencian como `{env:VAR}` y se resuelven desde el entorno del proceso, extendido por el store de credenciales (`isc-ai secrets`). El listado expone metadatos seleccionados, nunca credenciales, y conserva los aliases no resueltos con su diagnóstico. Ver la sección **Configuración**.
+* 📦 **Configuración en dos capas, sin datos de sitio en el código**: la política del proyecto vive en `<proyecto>/.isc-ai/config.json` (formato de CCR, ruta BASE canónica, rutas HA/VIP, catálogo de packages, facilidad de mutación) y las conexiones privadas en `~/.isc-ai/servers.json`. Los secretos se referencian como `{env:VAR}` y se resuelven desde el entorno del proceso, extendido por el store de credenciales (`isc-ai secrets`). El listado expone metadatos seleccionados, nunca credenciales, y conserva los aliases no resueltos con su diagnóstico. Ver la sección **Configuración**.
 * 🔀 **Manejo Inteligente de Namespaces (Pregunta Dinámica)**: Todas las herramientas permiten especificar un namespace en caliente. Si se omite y el servidor cuenta con múltiples entornos (ej: `BASE-CLME` e `INT`), el servidor detecta la ambigüedad y retorna una pregunta interactiva con las alternativas para que el asistente consulte cuál utilizar. Si solo hay un entorno de trabajo, se rutea de forma automática y transparente.
 * 🛡️ **Diagnóstico acotado**: Los errores de transporte omiten cuerpos, argumentos y trazas sensibles. La conexión de red y la VPN requieren alcance aprobado por separado.
 * 🔒 **Discovery parcial**: Identidad de namespace, presencia del motor y source control genérico se consultan sin runners. UNKNOWN bloquea toda mutación, incluida la ejecución ObjectScript arbitraria, incluso en BASE; no se consulta la suspensión de otro proceso para autorizar una escritura.
 * 🧭 **Administra la suite de IA completa, no solo su propio MCP**: `isc-ai audit` compara los tres clientes (OpenCode, Claude Code, VS Code) contra un baseline declarativo de 7 servidores recomendados y reporta con códigos estables qué falta, qué está registrado con otro nombre, qué apunta a una ruta muerta y qué secreto quedó literal. `isc-ai suite` lo corrige. Ninguno de los dos pone a `isc-ai` en el camino crítico: los clientes siguen levantando y reseteando sus MCPs con sus propias herramientas.
-* 🎓 **Harness SDD y doctrina InterSystems distribuibles**: el paquete lleva 47 archivos verificados por SHA-256 —agentes, comandos y 17 skills— incluida la doctrina de TrakCare que antes vivía en una sola máquina. Un gate de empaquetado impide que una credencial, una ruta personal o el identificador de un cliente entren al bundle, y un test lo mantiene cierto.
+* 🎓 **Harness SDD y doctrina InterSystems distribuibles**: el paquete lleva 116 archivos verificados por SHA-256 —agentes, comandos y skills— incluida la doctrina de TrakCare que antes vivía en una sola máquina. Un gate de empaquetado impide que una credencial, una ruta personal o el identificador de un cliente entren al bundle, y un test lo mantiene cierto.
 * 🗣️ **Idioma configurable en dos niveles distintos**: `--lang` / `ISC_AI_LANG` cambia lo que imprime esta CLI; `agents.reply_language` (por defecto `es-CL`) cambia el idioma en que **responden los agentes**, renderizado en el archivo de instrucciones que siempre se carga. Los artefactos —código, identificadores, JSON, respuestas MCP— quedan siempre en inglés porque son contratos.
 
 ---
@@ -70,7 +218,7 @@ El servidor MCP registra las siguientes **herramientas nativas** para tu asisten
 | `iris_ensemble_item_setting` | Lee (`get`, gate READ, sin runner) o hace compare-and-set (`set`, solo **gate LIVE CONFIG WINDOW**) de UN setting de un Item guardado en el XData de la clase de producción (ej. `WebServiceURL`, `StorageNamespace`, `AllowedIPAddresses`). `set` exige `expected_current_value` y el `ticket` de la ventana, respalda la clase antes de escribir, verifica después y audita. | `server_id`, `namespace`, `action` (get/set), `production_name`, `item_name`, `target` (Host/Adapter), `setting_name`, `value`, `expected_current_value`, `ticket` |
 | `iris_ensemble_default_settings` | Consulta, crea, actualiza o elimina ajustes por defecto del sistema de Ensemble (`Ens.Config.DefaultSettings`). | `server_id`, `action` (list/set/delete), `id` (int/string), `production_name`, `item_name`, `host_class_name`, `setting_name`, `setting_value`, `deployable` (bool), `namespace` (opcional) |
 | `iris_ensemble_queue_control` | Monitorea colas de mensajes de Ensemble (`list_queues`, `list_messages`), re-envía mensajes (`resend_message`, via `Ens.MessageHeader.ResendDuplicatedMessage`: clona el header, misma SessionId, destino original o `new_target`; devuelve el nuevo header id) o desencola/aborta mensajes atascados (`abort_message`). | `server_id`, `action` (list_queues/list_messages/resend_message/abort_message), `queue_name` (string), `message_id` (int/string), `new_target` (string, ej. `HL7 Rule`), `limit` (int), `namespace` (opcional) |
-| `iris_execute_objectscript` | Ejecuta código mediante una clase temporal fija `User.McpTmpRun*`; el payload puede persistir datos. Gate RUNTIME: solo el gate de producción (`is_production`, namespace/rol PROD/LIVE/PRD) y un rol no productivo configurado; el estado CCR no se consulta. Los nodos HA directos no se bloquean en este gate (en un backup del mirror la subida falla porque la base es read-only). Con `runtime.runner_hosts` el runner se aloja en otro namespace de la misma instancia y el payload cambia al namespace destino. Cada llamada queda auditada en `~/.iris-mcp/audit/runtime.jsonl`. | `server_id`, `code`, `namespace` (opcional) |
+| `iris_execute_objectscript` | Ejecuta código mediante una clase temporal fija `User.McpTmpRun*`; el payload puede persistir datos. Gate RUNTIME: solo el gate de producción (`is_production`, namespace/rol PROD/LIVE/PRD) y un rol no productivo configurado; el estado CCR no se consulta. Los nodos HA directos no se bloquean en este gate (en un backup del mirror la subida falla porque la base es read-only). Con `runtime.runner_hosts` el runner se aloja en otro namespace de la misma instancia y el payload cambia al namespace destino. Cada llamada queda auditada en `~/.isc-ai/audit/runtime.jsonl`. | `server_id`, `code`, `namespace` (opcional) |
 | `iris_ccr_status` | Consulta el estado de control de cambios (CCR/Perforce) de una clase o documento (bloqueado, editable, checkout). | `server_id`, `class_name` **o** `document_name`, `namespace` (opcional) |
 | `iris_ccr_checkout` | Realiza un Checkout (bloqueo/edición) de una clase o documento bajo un identificador de CCR. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
 | `iris_ccr_undocheckout` | Revierte un Checkout en el servidor, removiendo bloqueos y deshaciendo cambios no confirmados. | `server_id`, `class_name` **o** `document_name`, `ccr_id`, `namespace` (opcional) |
@@ -237,7 +385,7 @@ Si un pre-chequeo del runner (residuos o ausencia) falla por timeout o transport
 error es "could not reach the server ... payload was not executed"; después del PUT
 se mantiene la semántica de resultado desconocido y limpieza estricta.
 
-Cada llamada deja un registro append-only en `~/.iris-mcp/audit/runtime.jsonl`
+Cada llamada deja un registro append-only en `~/.isc-ai/audit/runtime.jsonl`
 (`ISC_AI_AUDIT_DIR` sustituye el directorio): un `start` antes de cualquier request
 al servidor —si no puede escribirse, el código no se ejecuta— y un `end` con el
 resultado y la duración. Varios procesos MCP pueden escribir a la vez: cada línea se
@@ -343,29 +491,19 @@ persistentes ni modifica el estado **HOLD**.
 
 ---
 
-## 📦 Instalación
+## 📦 Instalación: detalles
 
-El repositorio vive en `Documents/work/tools/isc-ai`. Instalación editable como
-herramienta de usuario (idempotente: volver a ejecutarla actualiza la instalación):
+La guía rápida cubre el caso normal. Fuentes soportadas, de la más estable a la de
+desarrollo:
 
-```powershell
-uv tool install --editable C:\ruta\a\isc-ai
-```
+| Fuente | Comando | Actualizar |
+| :--- | :--- | :--- |
+| Tag publicado (recomendado) | `uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@vX.Y.Z"` | El mismo comando con el tag nuevo y `--reinstall` |
+| Clon editable (desarrollo) | `uv tool install --editable C:\ruta\a\isc-ai` | `git pull`; reinicia el cliente de IA |
+| Wheel del pipeline | `uv tool install isc_ai-X.Y.Z-py3-none-any.whl` (artefacto `dist/` del job `smoke-install` o del Package Registry del proyecto) | Instalar el wheel nuevo |
 
-El binario `isc-ai` queda en `~/.local/bin` (agregar ese directorio al `PATH` si
-`uv` lo indica). Alternativa desde la raíz del repositorio, sin modo editable:
-
-```powershell
-uv tool install .
-```
-
-Mantenimiento:
-
-```powershell
-uv tool upgrade isc-ai
-uv tool uninstall isc-ai
-isc-ai --version
-```
+No instales `isc-ai` por nombre desde el índice público (`uv tool install isc-ai` a
+secas): ese nombre no está publicado por este proyecto en PyPI.
 
 ### Setup local de clientes
 
@@ -415,10 +553,22 @@ administradas. Si luego falla una escritura, los archivos se revierten, pero una
 instalación externa que ya terminó no es rollbackable automáticamente.
 
 Los bootstrappers `install.ps1` e `install.sh` requieren un `uv` existente y son
-dry-run por defecto. `install.sh` acepta solo cero argumentos, `--apply` o
-`--help`, y rechaza cualquier otro argumento. `-Apply` / `--apply` instala el repositorio local y luego
-delega toda configuración a `isc-ai setup --apply`; no instala Node, no edita PATH
-o perfiles y no contacta IRIS.
+dry-run por defecto: imprimen el comando `uv tool install` exacto y `isc-ai setup
+--apply`. Solo `-Apply` / `--apply` los ejecuta. Si el script está dentro de un clon
+instalan ese clon en modo editable; fuera de un clon, o con `-Remote` / `--remote`,
+instalan el tag `-Ref` / `--ref` (por defecto el de esta versión) por SSH o, con
+`-Transport https` / `--https`, por HTTPS. `install.sh` rechaza cualquier otro
+argumento.
+
+Antes de instalar prueban con `git ls-remote` (las mismas credenciales de git, sin
+token de API y sin prompts interactivos) la extensión `isc-ai-technical` por el mismo
+transporte. Si es accesible se instala **en la misma llamada** a `uv`, sobre la misma
+fuente del núcleo; si GitLab responde 403/404, o el repositorio existe pero todavía no
+publica esa rama o tag, se informa y se instala solo el núcleo; si las credenciales no
+se pueden evaluar, se detiene antes de cambiar nada. Después
+ejecutan `isc-ai setup --apply` con el ejecutable recién instalado aunque todavía no
+esté en `PATH`, y avisan si falta `uv tool update-shell`. No instalan Node ni clientes,
+no editan PATH o perfiles y no contactan IRIS.
 
 Con la instalación editable, los cambios en `isc_ai/` se reflejan al siguiente
 arranque del proceso; el servidor MCP en ejecución debe reiniciarse (ver más abajo).
@@ -429,14 +579,16 @@ arranque del proceso; el servidor MCP en ejecución debe reiniciarse (ver más a
 
 ```text
 isc-ai/
-├── pyproject.toml                   # nombre isc-ai, versión 0.3.0, entry point isc-ai = isc_ai.cli:main
+├── pyproject.toml                   # nombre isc-ai, versión desde isc_ai.__version__, entry point isc-ai = isc_ai.cli:main
 ├── README.md
 ├── LICENSE
 ├── .gitattributes                   # los recursos empaquetados NO pasan por traducción de fin de línea
-├── install.ps1 / install.sh         # dry-run por defecto; delegan en uv tool install + isc-ai setup
+├── .gitlab-ci.yml                   # tests + smoke de instalación en cada MR; publica en tags vX.Y.Z
+├── install.ps1 / install.sh         # dry-run por defecto; clon editable o tag de GitLab + isc-ai setup
 ├── isc_ai/
-│   ├── cli.py                       # CLI: mcp | init | config | servers | facility | audit | suite
-│   │                                #      docs | agents | secrets | enable | disable | clients | doctor | setup
+│   ├── cli.py                       # CLI: wizard | migrate | init | config | servers | rules | facility | audit
+│   │                                #      suite | docs | logi | agents | secrets | enable | disable | clients
+│   │                                #      doctor | setup (y mcp, oculto: lo lanzan los clientes)
 │   ├── config.py                    # dos capas, búsqueda ascendente, {env:VAR}, agents.reply_language/models
 │   ├── i18n.py                      # idioma de la superficie humana de la CLI: --lang, ISC_AI_LANG, fallback
 │   ├── locales/
@@ -452,18 +604,23 @@ isc-ai/
 │   ├── setup.py                     # escritura atómica con rollback, lock y harness
 │   ├── server.py                    # servidor MCP stdio, herramientas iris_* y gates
 │   ├── ccr_discovery.py             # discovery CCR parcial y política local
+│   ├── migrate.py                   # .iris-mcp -> .isc-ai: copia, verifica y recién entonces borra
+│   ├── rules.py / rules_*.py        # isc-ai.rules.json: grants y excepciones con vencimiento
+│   ├── wizard.py                    # configuración guiada
+│   ├── logigen/                     # reportes Logi como código (isc-ai logi)
 │   └── resources/
 │       ├── config.template.json     # plantilla que usa `isc-ai init`
 │       ├── mcp-suite.json           # baseline: 3 clientes y 7 servidores, con scope de cada setting
 │       ├── reply-languages.json     # perfiles de idioma de respuesta de los agentes
-│       ├── harness/                 # bundle SDD: 47 archivos con manifest verificado por SHA-256
+│       ├── harness/                 # bundle SDD: 116 archivos con manifest verificado por SHA-256
 │       ├── opencode/isc-logo.tsx    # plugin TUI
 │       └── MCP/
 │           └── CCRMutation.cls.template   # facilidad MCP.CCRMutation renderizada por sitio
 ├── tools/                           # utilidades de mantenimiento, no se distribuyen
 │   ├── bundle_gate.py               # qué nunca entra al bundle: credencial, ruta personal, cliente
 │   ├── pack_harness.py              # renderiza los modelos por rol en el bundle
-│   └── add_doctrine_skills.py       # agrega skills al bundle, con el gate por delante
+│   ├── add_doctrine_skills.py       # agrega skills al bundle, con el gate por delante
+│   └── smoke_install.py             # construye el wheel, lo instala aislado y prueba la CLI
 └── tests/
     ├── hermetic_test_support.py
     ├── test_config.py
@@ -475,6 +632,7 @@ isc-ai/
     ├── test_secrets_and_toggle.py   # el valor nunca sale en un reporte; tres mecanismos
     ├── test_clients.py              # nunca pregunta en un pipe; verifica por versión
     ├── test_bundle_safety.py        # el bundle es seguro de distribuir
+    ├── test_distribution.py         # una sola versión, recursos completos en el wheel
     ├── test_setup.py
     ├── test_dictionary_tools.py
     ├── test_ccr_discovery.py
@@ -493,19 +651,19 @@ mutación) proviene de dos archivos JSON. Ambos se releen en **cada llamada de
 herramienta**, por lo que las ediciones por CLI aplican en vivo; un archivo mal
 formado conserva el snapshot anterior y registra el fallo sin detalles.
 
-### Capa 1: política del proyecto — `<proyecto>/.iris-mcp/config.json`
+### Capa 1: política del proyecto — `<proyecto>/.isc-ai/config.json`
 
 **Resolución del proyecto.** Tanto el servidor MCP como todo comando de la CLI que
-necesita un proyecto buscan **hacia arriba** desde el `cwd` el `.iris-mcp/config.json`
+necesita un proyecto buscan **hacia arriba** desde el `cwd` el `.isc-ai/config.json`
 más cercano, del mismo modo en que git localiza `.git`. Por eso el servidor puede
 lanzarse desde cualquier subdirectorio de un despliegue y toma la política de ese
 despliegue. Precedencia:
 
-1. `IRIS_MCP_PROJECT_DIR`: directorio de proyecto explícito; **desactiva la búsqueda**.
-2. Ancestro más cercano del `cwd` (incluido el propio `cwd`) con `.iris-mcp/config.json`.
+1. `ISC_AI_PROJECT_DIR` (o el heredado `IRIS_MCP_PROJECT_DIR`): directorio de proyecto explícito; **desactiva la búsqueda**.
+2. Ancestro más cercano del `cwd` (incluido el propio `cwd`) con `.isc-ai/config.json`.
 3. El `cwd` mismo, que produce una política **no configurada**.
 
-`IRIS_MCP_CONFIG` fuerza la ruta del archivo de configuración con independencia del
+`ISC_AI_CONFIG` (o el heredado `IRIS_MCP_CONFIG`) fuerza la ruta del archivo de configuración con independencia del
 directorio resuelto. Los comandos `config`, `facility` y `doctor` aceptan además
 `--project-dir DIR`. `isc-ai doctor` muestra qué proyecto y qué archivos resolvió
 el proceso.
@@ -556,7 +714,7 @@ La tool MCP `iris_rules` lee y audita libremente, aplica solo cambios que **rest
 (quitar, acortar vencimiento) y para los que **amplían** (agregar, extender) deja un plan
 que aplica una persona con `isc-ai rules apply <huella>`.
 
-### Capa 2: servidores del usuario — `~/.iris-mcp/servers.json`
+### Capa 2: servidores del usuario — `~/.isc-ai/servers.json`
 
 ```json
 { "servers": { "my-base": { "host": "base.example.invalid", "port": 80, "path_prefix": "/base01",
@@ -632,24 +790,24 @@ arguments`, `invalid choice`) pertenecen a su dominio gettext y quedan en inglé
 | Comando | Efecto |
 | :--- | :--- |
 | `isc-ai mcp` | Ejecuta el servidor MCP sobre stdio. Es lo que lanza el cliente de IA. |
-| `isc-ai init [DIR] [--from PLANTILLA] [--force] [--no-servers]` | Crea `<DIR o cwd>/.iris-mcp/config.json` desde la plantilla empaquetada (`isc_ai/resources/config.template.json`) o una plantilla propia (validada). **Idempotente**: si el archivo ya existe no hace nada, lo informa y termina en `0`; `--force` lo regenera. `--no-servers` omite la sección de servidores de ejemplo. |
+| `isc-ai init [DIR] [--from PLANTILLA] [--force] [--no-servers]` | Crea `<DIR o cwd>/.isc-ai/config.json` desde la plantilla empaquetada (`isc_ai/resources/config.template.json`) o una plantilla propia (validada). **Idempotente**: si el archivo ya existe no hace nada, lo informa y termina en `0`; `--force` lo regenera. `--no-servers` omite la sección de servidores de ejemplo. |
 | `isc-ai config show [--servers] [--reveal]` | Imprime la política del proyecto o, con `--servers`, los servidores mezclados de ambas capas; secretos redactados salvo `--reveal`. Las notas de carga van a stderr. |
 | `isc-ai config set <ruta.punteada> <valor>` | Tipa el valor según el esquema actual (int/bool/lista/objeto vía JSON; cadena en otro caso), valida la política y rechaza secretos literales antes de escribir. Ej.: `canonical_base.host`. |
 | `isc-ai config unset <ruta.punteada>` | Elimina una clave de la política. |
-| `isc-ai config add-server <id> --host H [--port] [--path-prefix] [--namespace] [--role] [--production] [--username] [--password] [--upload-token] [--ccr-id] [--proxy] [--description] [--user]` | Agrega o reemplaza una entrada. `--user` escribe en `~/.iris-mcp/servers.json` en lugar del archivo del proyecto; usuario y contraseña valen `{env:IRIS_USER}` / `{env:IRIS_PASSWORD}` por defecto. |
+| `isc-ai config add-server <id> --host H [--port] [--path-prefix] [--namespace] [--role] [--production] [--username] [--password] [--upload-token] [--ccr-id] [--proxy] [--description] [--user]` | Agrega o reemplaza una entrada. `--user` escribe en `~/.isc-ai/servers.json` en lugar del archivo del proyecto; usuario y contraseña valen `{env:IRIS_USER}` / `{env:IRIS_PASSWORD}` por defecto. |
 | `isc-ai config remove-server <id> [--user]` | Elimina una entrada del proyecto o, con `--user`, del archivo del usuario. |
 | `isc-ai config validate` | Resumen JSON de la configuración efectiva; sale con `1` si hay problemas (secretos sin resolver, entradas mal formadas, `canonical_base.server_id` sin entrada de servidor). |
-| `isc-ai servers migrate [--force]` | Copia el archivo heredado `~/.iris_mcp_servers.json` a `~/.iris-mcp/servers.json`. Falla si el destino existe, salvo `--force`. |
+| `isc-ai servers migrate [--force]` | Copia el archivo heredado `~/.iris_mcp_servers.json` a `~/.isc-ai/servers.json`. Falla si el destino existe, salvo `--force`. |
 | `isc-ai facility render [--output RUTA]` | Renderiza `MCP.CCRMutation` para el sitio configurado e imprime clase, SHA-256 y tamaño, sin conectarse. `--output` escribe la clase renderizada. |
 | `isc-ai facility install --server S --namespace NS --ccr CCR [--upgrade --expected-current-sha256 H]` | Instala o actualiza condicionalmente la facilidad en el `canonical_base` (ver **Guía rápida**, paso 3). `--upgrade` y `--expected-current-sha256` son obligatorios uno con otro. |
-| `isc-ai doctor` | Informe JSON de lo que resolvería este proceso: `project_dir`, rutas y presencia de `project_config` y `user_servers`, `site`, `configured`, `ccr_format`, `canonical_base`, `mutation_configured`, `servers`, `notes`, `problems`, `cwd`, variables de entorno relevantes (`IRIS_MCP_PROJECT_DIR`, `IRIS_MCP_CONFIG`, `IRIS_EXTRA_PACKAGES`, `IRIS_MCP_TIMEOUT`, `ISC_AI_LANG`), `language`, `language_source` y `version`. Sale con `1` si hay problemas; si no encuentra configuración de proyecto sugiere `isc-ai init` en stderr. |
+| `isc-ai doctor` | Informe JSON de lo que resolvería este proceso: `project_dir`, rutas y presencia de `project_config` y `user_servers`, `site`, `configured`, `ccr_format`, `canonical_base`, `mutation_configured`, `servers`, `notes`, `problems`, `cwd`, variables de entorno relevantes (`ISC_AI_PROJECT_DIR`, `ISC_AI_CONFIG` y sus nombres heredados `IRIS_MCP_*`, `IRIS_EXTRA_PACKAGES`, `IRIS_MCP_TIMEOUT`, `ISC_AI_LANG`), `language`, `language_source` y `version`. Sale con `1` si hay problemas; si no encuentra configuración de proyecto sugiere `isc-ai init` en stderr. |
 | `isc-ai setup [--check|--apply] [--adopt-harness]` | Planifica la configuración local de OpenCode, logo y harness Claude; solo `--apply` escribe. `--adopt-harness` sobrescribe los archivos del harness en conflicto y registra el bundle como línea base: es la salida de un conflicto permanente cuando un archivo lo instaló otra herramienta. Admite `--claude-project`, `--opencode-config`, exclusiones, timeout y `--with-opencode`. |
 | `isc-ai audit [--errors-only]` | Auditoría **de solo lectura** de la suite: presencia y versión de los tres clientes, los 7 servidores recomendados × 3 clientes, estado del harness, modelos por sub-agente y bloques gestionados de documentación. Nunca escribe, nunca levanta un servidor, nunca abre una conexión. Códigos de hallazgo estables y en inglés (`SECRET_LEAK`, `PATH_NOT_FOUND`, `COMMAND_NOT_FOUND`, `SERVER_DRIFT`, `SERVER_ALIAS`, `SERVER_DUPLICATE`, `HARNESS_FROZEN`, …). Sale con `1` si hay errores, `2` si solo hay advertencias, `0` si está limpio. |
 | `isc-ai suite [--apply] [--client C] [--server S] [--prune-claude-global]` | Escribe la suite recomendada en los tres clientes. Normaliza la forma pero **nunca inventa valores**: preserva lo que ya existe, mapea nombres de variable viejos conservando su valor y propaga un valor de un cliente a otro antes que adivinar. Los secretos nunca quedan literales: referencia en la sintaxis de cada cliente, y en VS Code su mecanismo nativo `inputs` con `password: true`. Un scope de escritura por cliente. Todo en una transacción o ninguna. |
-| `isc-ai docs [--apply]` | Refresca los bloques gestionados `<!-- isc-ai:NOMBRE -->`: `topology` en `WORKFLOW.md` (derivado de `.iris-mcp/config.json`, así la topología documentada no puede separarse de la vigente) y `language` en `AGENTS.md`. Nada fuera de los marcadores se lee ni se reescribe. |
+| `isc-ai docs [--apply]` | Refresca los bloques gestionados `<!-- isc-ai:NOMBRE -->`: `topology` en `WORKFLOW.md` (derivado de `.isc-ai/config.json`, así la topología documentada no puede separarse de la vigente) y `language` en `AGENTS.md`. Nada fuera de los marcadores se lee ni se reescribe. |
 | `isc-ai logi --manifest <manifest.json> [--check]` | Reportes Logi (InterSystems Reports) como código: genera catálogos `.cat.xml`, reportes `.cls.xml` y la clase de despliegue desde specs JSON. Columnas y parámetros salen de la `ROWSPEC` de las fuentes ObjectScript, así una columna inexistente aborta sin escribir. La clase de despliegue lleva los archivos como XData; su `Deploy()` los escribe, verifica su SHA-256 y otorga `EXECUTE` en cualquier ambiente. `--check` sale con `1` si algo está desactualizado. Flujo completo en la skill `logi-report-development`. |
 | `isc-ai agents [--apply] [--no-verify-models]` | Modelo por sub-agente SDD. Claude Code lo lee del frontmatter empaquetado; OpenCode de `agent.<rol>.model`, que exige id con proveedor. **Un id concreto nunca se inventa**: sale de `agents.models` y se valida contra `opencode models`, así un id viejo es error antes de escribir. Sin configurar, el sub-agente se declara sin modelo y se reportan los candidatos de su familia. |
-| `isc-ai secrets list\|set\|unset <KEY> [--scope global\|project]` | Store de credenciales. Dos scopes: `~/.iris-mcp/secrets.json` y `<proyecto>/.iris-mcp/secrets.json`, este último agregado al `.gitignore` en la primera escritura. **El valor nunca se toma de la línea de comandos** (historial, lista de procesos, grabaciones): se lee de un prompt sin eco o de stdin. `list` nunca imprime un valor. Los stores extienden el entorno al resolver `{env:VAR}`; gana el proceso, después el proyecto, al final el global. |
+| `isc-ai secrets list\|set\|unset <KEY> [--scope global\|project]` | Store de credenciales. Dos scopes: `~/.isc-ai/secrets.json` y `<proyecto>/.isc-ai/secrets.json`, este último agregado al `.gitignore` en la primera escritura. **El valor nunca se toma de la línea de comandos** (historial, lista de procesos, grabaciones): se lee de un prompt sin eco o de stdin. `list` nunca imprime un valor. Los stores extienden el entorno al resolver `{env:VAR}`; gana el proceso, después el proyecto, al final el global. |
 | `isc-ai enable\|disable <server> [--apply] [--client C]` | Un verbo, tres mecanismos nativos: OpenCode `enabled: false`, Claude Code las listas `projects.<ruta>.disabledMcpjsonServers`, y VS Code —que no tiene ese campo— quitando o reescribiendo la entrada. El reporte dice cuál se usó. |
 | `isc-ai clients [<client>…] [--apply] [--yes]` | Reporta qué clientes están instalados con su versión real e instala el que falte con la receta del baseline. Es lo único que cambia el sistema fuera de archivos de configuración: plan por defecto, confirmación por cliente, y **la confirmación es interactiva solo en una terminal** porque este binario también sirve MCP por stdio. El éxito se verifica preguntando la versión, no por exit code. |
 
@@ -682,10 +840,10 @@ isc-ai audit                   # deberia quedar en 0 errores
 
 ---
 
-## 🚀 Guía rápida local — activación HOLD
+## 🚀 Activación en un sitio (HOLD hasta revisión)
 
 ### 1. Revisar el candidato y sus backups
-El informe enlazado arriba identifica archivos, manifests SHA-256, cambios de
+El informe de remediación del sitio identifica archivos, manifests SHA-256, cambios de
 compatibilidad y pasos de rollback. La aprobación de trabajo local no autoriza
 conexiones, lectura de credenciales, instalación ni activación.
 
@@ -744,14 +902,14 @@ termina en `0`, y cada comando trae sus propios ejemplos en `isc-ai <comando> -h
 
 ## ⚙️ Registro en Clientes de IA
 
-**Pendiente mientras continúe HOLD.** El transporte es stdio, pero el registro y
-reinicio requieren revisión completada y autorización explícita. No se ha verificado
-la activación de este candidato en ningún cliente de IA o servidor real.
+`isc-ai setup --apply` (OpenCode) e `isc-ai suite --apply` (OpenCode, Claude Code y
+VS Code) escriben esta entrada por ti. El transporte es stdio. En un sitio nuevo, las
+rutas de escritura siguen sujetas a la revisión descrita en la sección anterior.
 
-Cuando exista autorización, el registro es **una sola entrada para todos los
+El registro es **una sola entrada para todos los
 proyectos**: no hay variables de entorno por proyecto ni rutas al repositorio. El
 servidor resuelve el proyecto desde su `cwd` con la búsqueda ascendente de
-`.iris-mcp/config.json`. Ejemplo para `opencode.json`:
+`.isc-ai/config.json`. Ejemplo para `opencode.json`:
 
 ```json
 {
@@ -767,7 +925,7 @@ servidor resuelve el proyecto desde su `cwd` con la búsqueda ascendente de
 ```
 
 OpenCode lanza el proceso en el contexto de trabajo de la sesión; si ese directorio
-(o alguno de sus ancestros) contiene `.iris-mcp/config.json`, esa política gobierna
+(o alguno de sus ancestros) contiene `.isc-ai/config.json`, esa política gobierna
 la sesión. Sin configuración de proyecto, las herramientas READ/RUNTIME funcionan y
 las escrituras de código quedan bloqueadas. Para confirmar qué proyecto verá el
 servidor, ejecutar `isc-ai doctor` desde el mismo directorio.
@@ -785,6 +943,31 @@ parte del quickstart offline:
 * 🔨 *"Modifica el método `OnProcess` para añadir manejo de excepciones y compila la clase de nuevo."*
 * 📊 *"Ejecuta la consulta SQL 'SELECT TOP 10 ID, Name FROM Sample.Person' en el servidor de desarrollo."*
 * 🚨 *"¿Hay algún error o warning reciente en el log de Ensemble de integración?"*
+
+---
+
+## 🧪 Desarrollo, pruebas y publicación
+
+```powershell
+python -m unittest discover -s tests -t . -p "test_*.py"   # suite hermética, sin red
+python tools/smoke_install.py                              # construye el wheel, lo instala aislado y prueba la CLI
+```
+
+`tools/smoke_install.py` revisa lo que recibe un usuario y no el árbol de fuentes: que el
+wheel se instale sin dependencias, que `--version` coincida, que cada comando responda
+`-h`, que los comandos de solo lectura no escriban en `HOME`, que `init`/`doctor`
+encuentren el proyecto, que `isc-ai mcp` responda `initialize` y `tools/list`, y que
+cada archivo del harness viaje en el wheel con su SHA-256. Corre con `HOME` y los
+directorios de configuración redirigidos a un sandbox temporal.
+
+El pipeline de GitLab (`.gitlab-ci.yml`) corre la suite y el smoke test en cada merge
+request y en `main`. Para publicar una versión:
+
+1. Sube `__version__` en `isc_ai/__init__.py` y `ISC_AI_REF` en `install.ps1` e
+   `install.sh` al mismo valor (`tests/test_distribution.py` exige que coincidan).
+2. Merge a `main`.
+3. Crea el tag `vX.Y.Z` sobre ese commit y súbelo. El job `publish` rechaza un tag
+   distinto de `__version__` y publica wheel y sdist en el Package Registry del proyecto.
 
 ---
 

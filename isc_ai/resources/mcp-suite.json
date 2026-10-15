@@ -8,8 +8,8 @@
     "clients against it and reports drift; nothing is written unless you ask for it.",
     "",
     "credentials.scope decides where a value is read from and written to:",
-    "  project  <project>/.iris-mcp/  - differs per deployment (IRIS namespaces, CCR)",
-    "  global   ~/.iris-mcp/          - one per person (Jira token, Perforce identity)",
+    "  project  <project>/.isc-ai/    - differs per deployment (IRIS namespaces, CCR)",
+    "  global   ~/.isc-ai/            - one per person (Jira token, Perforce identity)",
     "Secret values never go in a committable file: config.json holds {env:VAR}",
     "references, secrets.json holds the literals and is gitignored.",
     "",
@@ -166,7 +166,7 @@
           "default": "1800"
         }
       },
-      "notes": "Site policy and server connections are not settings of this entry: they live in .iris-mcp/config.json and ~/.iris-mcp/servers.json.",
+      "notes": "Site policy and server connections are not settings of this entry: they live in .isc-ai/config.json and ~/.isc-ai/servers.json.",
       "verify": {
         "min_tools": 30
       }
