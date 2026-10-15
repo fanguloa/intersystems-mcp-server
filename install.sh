@@ -96,13 +96,22 @@ fi
 # the whole install. An authentication failure stops here, loudly, with a login
 # instruction -- it means the user's git credentials cannot even be evaluated yet.
 probe_extension() {
-  # $1=url. Echoes one of: ok / not-found / forbidden / auth-failed
+  # $1=url $2=ref. Echoes one of: ok / no-ref / not-found / forbidden / auth-failed
   # GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never and ssh BatchMode: fail
   # immediately instead of hanging on a credential prompt when no cached git
   # credentials are available (an existing GIT_SSH_COMMAND is respected).
   ssh_command=${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}
-  output=$(GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_SSH_COMMAND="$ssh_command" \
-    git ls-remote "$1" HEAD 2>&1) && { printf 'ok\n'; return 0; }
+  if output=$(GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_SSH_COMMAND="$ssh_command" \
+    git ls-remote "$1" "$2" 2>&1); then
+    # A reachable repository without that branch or tag (e.g. still empty) lists
+    # nothing: installing it would fail the whole uv call, core included.
+    if printf '%s\n' "$output" | grep -Eq '^[0-9a-f]{40}[[:space:]]'; then
+      printf 'ok\n'
+      return 0
+    fi
+    printf 'no-ref\n'
+    return 1
+  fi
   case "$output" in
     *"Authentication failed"*|*"could not read Username"*|*"terminal prompts disabled"*|*"401"*|*"Permission denied"*|*"Host key verification failed"*)
       printf 'auth-failed\n' ;;
@@ -124,11 +133,15 @@ report_extensions() {
     else
       ext_url=${ext_urls%%|*}
     fi
-    result=$(probe_extension "$ext_url") || true
+    result=$(probe_extension "$ext_url" "$ISC_AI_TECHNICAL_REF") || true
     case "$result" in
       ok)
         printf '  extension %s: reachable, installed together with isc-ai\n' "$ext_name"
         with_args="$with_args git+${ext_url}@${ISC_AI_TECHNICAL_REF}"
+        ;;
+      "no-ref")
+        printf "Skipping extension %s: reachable, but '%s' is not published there yet.\n" \
+          "$ext_name" "$ISC_AI_TECHNICAL_REF" >&2
         ;;
       "not-found")
         printf 'Skipping extension %s: not found or no access (GitLab returns 404 for both). Request access: %s\n' \

@@ -76,8 +76,8 @@ if ($IsClone -and -not $Remote) {
 }
 
 function Probe-Extension {
-    # Returns one of: ok / not-found / forbidden / auth-failed
-    param([string]$Url)
+    # Returns one of: ok / no-ref / not-found / forbidden / auth-failed
+    param([string]$Url, [string]$Ref)
     # GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never: fail immediately instead
     # of hanging on a terminal prompt or a Git Credential Manager login window
     # when no cached git credentials are available.
@@ -93,7 +93,7 @@ function Probe-Extension {
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $output = & git ls-remote $Url HEAD 2>&1 | ForEach-Object { "$_" }
+        $output = & git ls-remote $Url $Ref 2>&1 | ForEach-Object { "$_" }
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousPreference
@@ -101,7 +101,12 @@ function Probe-Extension {
         Remove-Item Env:\GCM_INTERACTIVE -ErrorAction SilentlyContinue
         if ($setSsh) { Remove-Item Env:\GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
     }
-    if ($exitCode -eq 0) { return "ok" }
+    if ($exitCode -eq 0) {
+        # A reachable repository without that branch or tag (e.g. still empty) lists nothing:
+        # installing it would fail the whole uv call, core included.
+        if (@($output | Where-Object { $_ -match "^[0-9a-f]{40}\s" }).Count -gt 0) { return "ok" }
+        return "no-ref"
+    }
     $text = [string]::Join("`n", $output)
     if ($text -match "Authentication failed|could not read Username|terminal prompts disabled|401|Permission denied|Host key verification failed") {
         return "auth-failed"
@@ -122,11 +127,14 @@ function Report-Extensions {
     $with = @()
     foreach ($extension in $Extensions) {
         $url = $extension[$Transport]
-        $result = Probe-Extension -Url $url
+        $result = Probe-Extension -Url $url -Ref $ISC_AI_TECHNICAL_REF
         switch ($result) {
             "ok" {
                 Write-Host "  extension $($extension.Name): reachable, installed together with isc-ai"
                 $with += @("--with", "git+$($url)@$ISC_AI_TECHNICAL_REF")
+            }
+            "no-ref" {
+                Write-Warning "Skipping extension $($extension.Name): reachable, but '$ISC_AI_TECHNICAL_REF' is not published there yet."
             }
             "not-found" {
                 Write-Warning "Skipping extension $($extension.Name): not found or no access (GitLab returns 404 for both). Request access: $ExtensionAccessUrl"

@@ -563,8 +563,9 @@ argumento.
 Antes de instalar prueban con `git ls-remote` (las mismas credenciales de git, sin
 token de API y sin prompts interactivos) la extensión `isc-ai-technical` por el mismo
 transporte. Si es accesible se instala **en la misma llamada** a `uv`, sobre la misma
-fuente del núcleo; si GitLab responde 403/404 se informa y se instala solo el núcleo;
-si las credenciales no se pueden evaluar, se detiene antes de cambiar nada. Después
+fuente del núcleo; si GitLab responde 403/404, o el repositorio existe pero todavía no
+publica esa rama o tag, se informa y se instala solo el núcleo; si las credenciales no
+se pueden evaluar, se detiene antes de cambiar nada. Después
 ejecutan `isc-ai setup --apply` con el ejecutable recién instalado aunque todavía no
 esté en `PATH`, y avisan si falta `uv tool update-shell`. No instalan Node ni clientes,
 no editan PATH o perfiles y no contactan IRIS.

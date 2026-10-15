@@ -96,9 +96,16 @@ class InstallPs1ProbingParityTests(unittest.TestCase):
 
     def test_probing_logic_mirrors_install_sh_not_just_flag_parity(self):
         sh_text = (ROOT / "install.sh").read_text(encoding="utf-8")
-        for marker in ("not-found", "forbidden", "auth-failed", "Skipping extension"):
+        for marker in ("not-found", "forbidden", "auth-failed", "no-ref", "Skipping extension"):
             self.assertIn(marker, sh_text)
             self.assertIn(marker, self.text)
+
+    def test_a_reachable_extension_without_the_ref_is_skipped_not_installed(self):
+        # An empty repository answers ls-remote with exit 0 and no refs; '--with' on it
+        # would fail the whole uv call and take the core install down with it.
+        self.assertIn("git ls-remote $Url $Ref", self.text)
+        sh_text = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('git ls-remote "$1" "$2"', sh_text)
 
 
 class ExtensionRefPinningTests(unittest.TestCase):
