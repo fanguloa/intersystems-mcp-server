@@ -78,10 +78,10 @@ Una sola línea, con la versión publicada (tag):
 
 ```powershell
 # SSH (recomendado si ya usas llave SSH con GitLab)
-uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.1"
+uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.2"
 
 # HTTPS (usa tu login de GitLab)
-uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.1"
+uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.2"
 ```
 
 El ejecutable queda en el directorio de herramientas de `uv` (`~/.local/bin`). Si la
@@ -97,19 +97,19 @@ y solo con `-Apply` / `--apply` los ejecuta.
 .\install.ps1 -Apply     # instala y configura
 
 # Desde un clon, pero instalando la versión publicada en GitLab
-.\install.ps1 -Apply -Remote -Ref v0.4.1 -Transport https
+.\install.ps1 -Apply -Remote -Ref v0.4.2 -Transport https
 ```
 
 ```sh
 ./install.sh             # plan
 ./install.sh --apply     # instala y configura
-./install.sh --apply --remote --ref v0.4.1 --https
+./install.sh --apply --remote --ref v0.4.2 --https
 ```
 
 ### 3. Verificar
 
 ```powershell
-isc-ai --version         # isc-ai 0.4.1
+isc-ai --version         # isc-ai 0.4.2
 isc-ai doctor            # qué proyecto, archivos y servidores ve este directorio
 isc-ai audit             # estado de clientes, suite MCP, harness y modelos (solo lectura)
 ```

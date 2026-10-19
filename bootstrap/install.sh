@@ -16,7 +16,7 @@
 set -u
 
 # Kept equal to isc_ai.__version__ by tests/test_distribution.py.
-ISC_AI_REF="v0.4.1"
+ISC_AI_REF="v0.4.2"
 GITLAB_HOST="gitlab.iscinternal.com"
 CORE_SSH="git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"
 CORE_HTTPS="https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"

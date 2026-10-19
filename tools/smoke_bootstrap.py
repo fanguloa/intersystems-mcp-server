@@ -176,7 +176,7 @@ def main():
     r = step("b5-again", new_terminal + with_key + f"& '{script}'{source} -Yes -SkipWizard")[0]
     again = ["[OK] uv: already installed", "[OK] engram: already installed"]
     if remote:
-        again += ["[OK] isc-ai: isc-ai 0.4.1 already installed", "[OK] perforce-mcp-server: already installed"]
+        again += ["[OK] isc-ai: isc-ai 0.4.2 already installed", "[OK] perforce-mcp-server: already installed"]
     check(r["exit_code"] == 0 and all(a in r["output"] for a in again), "second run is idempotent")
 
     r = step("b6-scriptblock",
@@ -188,7 +188,7 @@ def main():
              "# a new terminal: the user PATH would hold these two directories\n"
              "isc-ai --version; (Get-Command uv, engram, isc-ai).Source; "
              "isc-ai audit | ConvertFrom-Json | Select-Object -ExpandProperty summary | Format-List")
-    check("isc-ai 0.4.1" in r[0]["output"], "isc-ai 0.4.1 on PATH")
+    check("isc-ai 0.4.2" in r[0]["output"], "isc-ai 0.4.2 on PATH")
 
     report = {"generated": datetime.now().isoformat(timespec="seconds"), "sandbox_root": str(box.root),
               "home": str(box.home), "shimmed_clients": box.shimmed, "gitlab_reachable": not gitlab_down,

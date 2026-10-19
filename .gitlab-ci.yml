@@ -9,6 +9,9 @@ stages:
 
 default:
   image: python:3.12
+  # The instance runners only take tagged jobs (run_untagged = false): without tags
+  # every job stays pending until it fails with stuck_pending_no_matching_runners.
+  tags: [docker, x86]
   before_script:
     - python -m pip install --quiet --disable-pip-version-check uv
 
