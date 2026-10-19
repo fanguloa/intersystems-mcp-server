@@ -19,7 +19,7 @@
 .EXAMPLE
     .\install.ps1 -Apply          # install this clone and run 'isc-ai setup --apply'
 .EXAMPLE
-    .\install.ps1 -Apply -Remote -Ref v0.4.0 -Transport https
+    .\install.ps1 -Apply -Remote -Ref v0.4.1 -Transport https
 #>
 param(
     [switch]$Apply,
@@ -35,7 +35,7 @@ $ErrorActionPreference = "Stop"
 
 # Default release for a remote install. Kept equal to isc_ai.__version__ by
 # tests/test_distribution.py, so a release bumps both in the same commit.
-$ISC_AI_REF = "v0.4.0"
+$ISC_AI_REF = "v0.4.1"
 $CoreUrls = @{
     ssh   = "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"
     https = "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"

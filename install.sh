@@ -13,7 +13,7 @@ set -eu
 
 # Default release for a remote install. Kept equal to isc_ai.__version__ by
 # tests/test_distribution.py, so a release bumps both in the same commit.
-ISC_AI_REF="v0.4.0"
+ISC_AI_REF="v0.4.1"
 CORE_URL_SSH="git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"
 CORE_URL_HTTPS="git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"
 

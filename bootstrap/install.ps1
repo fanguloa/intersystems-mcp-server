@@ -38,7 +38,7 @@ function Install-IscAi {
 
     $ErrorActionPreference = "Stop"
     # Kept equal to isc_ai.__version__ by tests/test_distribution.py.
-    $ISC_AI_REF = "v0.4.0"
+    $ISC_AI_REF = "v0.4.1"
     $GitLabHost = "gitlab.iscinternal.com"
     $CoreRepo = @{
         ssh   = "git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"

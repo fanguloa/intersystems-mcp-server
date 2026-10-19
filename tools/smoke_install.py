@@ -7,7 +7,7 @@ offline, with HOME and every config directory redirected to a temporary sandbox,
 reads or writes the real AI-client configuration and never contacts a server.
 
     python tools/smoke_install.py                 # builds with 'uv build', then checks
-    python tools/smoke_install.py --wheel dist/isc_ai-0.4.0-py3-none-any.whl
+    python tools/smoke_install.py --wheel dist/isc_ai-0.4.1-py3-none-any.whl
 
 Exit code 0 when every check passes; the report lists each check either way.
 """
