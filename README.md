@@ -30,6 +30,38 @@ Dudas, errores o propuestas: abre un issue en
 
 ## ⚡ Guía rápida (usuario)
 
+### 0. Instalación en una línea (recomendada)
+
+Con la VPN de InterSystems conectada (no la de un cliente), un solo comando instala todo lo
+que falte: git, uv, Node.js LTS, el cliente de línea de comandos de Perforce, engram, isc-ai
+con sus extensiones, el servidor MCP de Perforce, los clientes de IA y los 7 servidores MCP
+de la suite en cada cliente. Al final abre `isc-ai wizard` para los ambientes IRIS y sus
+credenciales. Lo que ya está instalado no se toca, así que se puede repetir sin riesgo.
+
+```powershell
+# Windows (PowerShell)
+irm <pages-url>/install.ps1 | iex
+
+# Con opciones: solo ver el plan, sin preguntas, sin el asistente...
+& ([scriptblock]::Create((irm <pages-url>/install.ps1))) -DryRun
+```
+
+```sh
+# macOS / Linux
+curl -fsSL <pages-url>/install.sh | bash
+curl -fsSL <pages-url>/install.sh | bash -s -- --dry-run
+```
+
+`<pages-url>` es la URL de GitLab Pages del proyecto (Deploy → Pages); el job `pages` la
+publica en cada tag `vX.Y.Z` con el SHA-256 de cada script. Si no tienes llave SSH, el
+instalador la crea, la copia al portapapeles y abre la página de GitLab para agregarla.
+Opciones: `-Ref`, `-Transport https`, `-DryRun`, `-Yes`, `-SkipPerforce`, `-SkipEngram`,
+`-SkipClients`, `-SkipSuite`, `-SkipWizard` (en `install.sh`: `--ref`, `--https`, `--dry-run`,
+`--yes`, `--skip-*`). La fuente está en `bootstrap/`; `tools/smoke_bootstrap.py` la prueba en
+un sandbox limpio.
+
+Las secciones siguientes son el camino manual, paso a paso.
+
 ### 1. Requisitos
 
 | Necesitas | Cómo comprobarlo | Si falta |
@@ -585,6 +617,7 @@ isc-ai/
 ├── .gitattributes                   # los recursos empaquetados NO pasan por traducción de fin de línea
 ├── .gitlab-ci.yml                   # tests + smoke de instalación en cada MR; publica en tags vX.Y.Z
 ├── install.ps1 / install.sh         # dry-run por defecto; clon editable o tag de GitLab + isc-ai setup
+├── bootstrap/install.ps1 / .sh      # instalador en una línea (GitLab Pages): dependencias + isc-ai + suite + wizard
 ├── isc_ai/
 │   ├── cli.py                       # CLI: wizard | migrate | init | config | servers | rules | facility | audit
 │   │                                #      suite | docs | logi | agents | secrets | enable | disable | clients
@@ -620,7 +653,9 @@ isc-ai/
 │   ├── bundle_gate.py               # qué nunca entra al bundle: credencial, ruta personal, cliente
 │   ├── pack_harness.py              # renderiza los modelos por rol en el bundle
 │   ├── add_doctrine_skills.py       # agrega skills al bundle, con el gate por delante
-│   └── smoke_install.py             # construye el wheel, lo instala aislado y prueba la CLI
+│   ├── smoke_install.py             # construye el wheel, lo instala aislado y prueba la CLI
+│   ├── smoke_bootstrap.py           # corre bootstrap/install.ps1 de punta a punta en un sandbox (Windows)
+│   └── build_pages.py               # arma el sitio de GitLab Pages con los instaladores y sus SHA-256
 └── tests/
     ├── hermetic_test_support.py
     ├── test_config.py

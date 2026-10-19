@@ -24,7 +24,7 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(PYPROJECT["tool"]["setuptools"]["dynamic"]["version"], {"attr": "isc_ai.__version__"})
 
     def test_the_installers_default_to_the_release_tag_of_this_version(self):
-        for name in ("install.ps1", "install.sh"):
+        for name in ("install.ps1", "install.sh", "bootstrap/install.ps1", "bootstrap/install.sh"):
             text = (ROOT / name).read_text(encoding="utf-8")
             with self.subTest(installer=name):
                 self.assertRegex(text, rf'ISC_AI_REF\s*=\s*"v{re.escape(__version__)}"')

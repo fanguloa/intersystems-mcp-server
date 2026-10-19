@@ -46,3 +46,17 @@ publish:
         exit 1
       fi
     - uv publish --publish-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" --username gitlab-ci-token --password "${CI_JOB_TOKEN}" dist/*
+
+# The one-line installers: GitLab Pages serves bootstrap/install.ps1 and install.sh of the
+# latest release tag. build_pages.py refuses a tag the scripts do not install.
+pages:
+  stage: release
+  needs: [smoke-install]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  before_script: []
+  script:
+    - python tools/build_pages.py --ref "$CI_COMMIT_TAG" --out public --base-url "${CI_PAGES_URL}"
+  artifacts:
+    paths:
+      - public
