@@ -22,7 +22,7 @@ CORE_SSH="git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"
 CORE_HTTPS="https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"
 P4MCP_SSH="ssh://git@gitlab.iscinternal.com/isc-ai-squad/perforce-mcp-server.git"
 P4MCP_HTTPS="https://gitlab.iscinternal.com/isc-ai-squad/perforce-mcp-server.git"
-P4MCP_REF="main"
+P4MCP_REF="master"
 ENGRAM_VERSION="3.0.0"
 NVM_VERSION="v0.40.3"
 SSH_KEYS_PAGE="https://gitlab.iscinternal.com/-/user_settings/ssh_keys"
@@ -221,15 +221,20 @@ if [ -n "$installed" ] && [ "v$installed" = "$ref" ] && [ -z "$from" ]; then ok 
 elif [ -n "$dry_run" ]; then plan isc-ai "would install isc-ai from ${from:-GitLab $ref ($transport)} and run 'isc-ai setup --apply'"
 else
   [ -n "$installed" ] && uv tool uninstall isc-ai
+  log="${TMPDIR:-/tmp}/isc-ai-install.log"
   if [ -z "$from" ]; then
     tmp="$(mktemp -d)"
     if [ "$transport" = "ssh" ]; then url="$CORE_SSH"; https_flag=""; else url="$CORE_HTTPS"; https_flag="--https"; fi
     # shellcheck disable=SC2086
-    git clone --quiet --depth 1 --branch "$ref" "$url" "$tmp/isc-ai" && sh "$tmp/isc-ai/install.sh" --apply --remote --ref "$ref" $https_flag
+    { git clone --quiet --depth 1 --branch "$ref" "$url" "$tmp/isc-ai" && sh "$tmp/isc-ai/install.sh" --apply --remote --ref "$ref" $https_flag; } >"$log" 2>&1
     code=$?; rm -rf "$tmp"
   else
-    sh "$from/install.sh" --apply; code=$?
+    sh "$from/install.sh" --apply >"$log" 2>&1; code=$?
   fi
+  # install.sh prints the whole setup report: show only what a person needs.
+  grep -E '^(Source:|Skipping extension|  extension |Installed [0-9]| \+ |isc-ai [0-9])' "$log" | sed 's/^/    /'
+  [ $code -ne 0 ] && tail -n 30 "$log" | sed 's/^/    /'
+  echo "    full log: $log"
   add_path "$(uv tool dir --bin 2>/dev/null)"
   if [ $code -eq 0 ] && have isc-ai; then ok isc-ai "$(isc-ai --version) installed, setup applied"
   else fail isc-ai "install.sh exited with $code"; finish "isc-ai did not install."; fi

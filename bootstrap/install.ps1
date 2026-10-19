@@ -49,7 +49,7 @@ function Install-IscAi {
         https = "https://gitlab.iscinternal.com/isc-ai-squad/perforce-mcp-server.git"
     }
     # The Perforce MCP server has no release tag yet: it follows its default branch.
-    $PerforceMcpRef = "main"
+    $PerforceMcpRef = "master"
     $EngramVersion = "3.0.0"
     $SshKeysPage = "https://gitlab.iscinternal.com/-/user_settings/ssh_keys"
     # Tests and sandboxes set this so no installer touches the persistent user PATH.
@@ -121,7 +121,16 @@ function Install-IscAi {
             $installerArgs = @("-Apply")
         }
         try {
-            $code = Invoke-Native powershell.exe (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installer) + $installerArgs) -AllowFailure -PassThruCode -Show
+            # install.ps1 prints the whole setup report: keep it in a log, show only the lines
+            # a person needs, and the tail of the log if something fails.
+            $log = Join-Path ([IO.Path]::GetTempPath()) "isc-ai-install.log"
+            $lines = Invoke-Native powershell.exe (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installer) + $installerArgs) -AllowFailure
+            $code = $LASTEXITCODE
+            $lines | Set-Content -Path $log -Encoding UTF8
+            $lines | Where-Object { $_ -match "^(Source:|Skipping extension|\s*extension |Installed \d|\s*\+ |isc-ai \d)" } |
+                ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+            if ($code -ne 0) { $lines | Select-Object -Last 30 | ForEach-Object { Write-Host "    $_" } }
+            Write-Host "    full log: $log" -ForegroundColor DarkGray
         } finally {
             if ($temp) { Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue }
         }

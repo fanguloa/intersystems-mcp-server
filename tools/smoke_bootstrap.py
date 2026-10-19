@@ -105,18 +105,33 @@ class Sandbox:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--from", dest="source", required=True, help="clone of the release tag")
-    parser.add_argument("--perforce-from", default="", help="clone of perforce-mcp-server (optional)")
+    parser.add_argument("--from", dest="source", default="", help="clone of the release tag (offline mode)")
+    parser.add_argument("--perforce-from", default="", help="clone of perforce-mcp-server (offline mode)")
+    parser.add_argument("--ssh-key", default="", help="private key for GitLab, read in place (remote mode)")
     parser.add_argument("--out", default=str(ROOT / "dist" / "bootstrap-smoke.json"))
     parser.add_argument("--root", default=str(Path(tempfile.gettempdir()) / "isc-ai-bootstrap-smoke"))
     args = parser.parse_args()
     if os.name != "nt":
         sys.exit("smoke_bootstrap.py is Windows-only")
+    if bool(args.source) == bool(args.ssh_key):
+        sys.exit("choose one mode: --from <clone> (offline) or --ssh-key <key> (remote, GitLab reachable)")
 
     box = Sandbox(Path(args.root))
     script = str(BOOTSTRAP)
-    src = str(Path(args.source).resolve())
-    pf = f" -PerforceFrom '{Path(args.perforce_from).resolve()}'" if args.perforce_from else ""
+    remote = bool(args.ssh_key)
+    if remote:
+        # The key stays where it is; only the sandbox known_hosts is written.
+        key = Path(args.ssh_key).resolve().as_posix()
+        known = (box.home / ".ssh" / "known_hosts").as_posix()
+        (box.home / ".ssh").mkdir()
+        ssh_command = (f"C:/Windows/System32/OpenSSH/ssh.exe -i {key} -o IdentitiesOnly=yes -o BatchMode=yes "
+                       f"-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={known}")
+        source = ""
+    else:
+        source = f" -From '{Path(args.source).resolve()}'"
+        if args.perforce_from:
+            source += f" -PerforceFrom '{Path(args.perforce_from).resolve()}'"
+    with_key = f"$env:GIT_SSH_COMMAND = '{ssh_command}'; " if remote else ""
     steps = []
     checks = []
 
@@ -139,22 +154,30 @@ def main():
     check(not (box.home / ".local").exists() and not (box.home / "AppData" / "Local" / "engram").exists(),
           "dry run writes nothing")
 
-    r = step("b3-no-gitlab", f"& '{script}' -Yes -SkipWizard -SkipEngram")[0]
+    r = step("b3-no-access", f"& '{script}' -Yes -SkipWizard -SkipEngram")[0]
     gitlab_down = "does not resolve" in r["output"]
-    check(r["exit_code"] == 1 and ("STOPPED" in r["output"]), "without GitLab access it stops with a clear reason and exit 1")
+    stopped = r["exit_code"] == 1 and "STOPPED" in r["output"]
+    if gitlab_down:
+        check(stopped, "without GitLab access it stops with a clear reason and exit 1")
+    else:
+        check(stopped and "[FAIL] ssh" in r["output"], "without an SSH key it stops at the SSH step with exit 1")
 
-    r = step("b4-install", f"& '{script}' -From '{src}'{pf} -Yes -SkipWizard")[0]
-    check(r["exit_code"] == 0, "full install from the release clone exits 0")
+    r = step("b4-install", with_key + f"& '{script}'{source} -Yes -SkipWizard")[0]
+    check(r["exit_code"] == 0, f"full install ({'GitLab' if remote else 'local clone'}) exits 0")
     expected = ["[OK] uv: installed", "[OK] engram: installed", "[OK] isc-ai: isc-ai", "[OK] suite", "[OK] audit"]
-    if pf:
+    if remote:
+        expected += ["[OK] network", "[OK] ssh"]
+    if remote or args.perforce_from:
         expected.append("[OK] perforce-mcp-server: installed")
     for item in expected:
         check(item in r["output"], f"install reports {item}")
 
     new_terminal = "$env:Path = \"$env:USERPROFILE\\.local\\bin;$env:LOCALAPPDATA\\engram\\bin;$env:Path\"; "
-    r = step("b5-again", new_terminal + f"& '{script}' -From '{src}'{pf} -Yes -SkipWizard")[0]
-    check(r["exit_code"] == 0 and "[OK] uv: already installed" in r["output"]
-          and "[OK] engram: already installed" in r["output"], "second run is idempotent")
+    r = step("b5-again", new_terminal + with_key + f"& '{script}'{source} -Yes -SkipWizard")[0]
+    again = ["[OK] uv: already installed", "[OK] engram: already installed"]
+    if remote:
+        again += ["[OK] isc-ai: isc-ai 0.4.0 already installed", "[OK] perforce-mcp-server: already installed"]
+    check(r["exit_code"] == 0 and all(a in r["output"] for a in again), "second run is idempotent")
 
     r = step("b6-scriptblock",
              f"& ([scriptblock]::Create((Get-Content -Raw '{script}'))) -DryRun -SkipWizard -SkipPerforce; 'after-bootstrap'")[0]
@@ -169,6 +192,7 @@ def main():
 
     report = {"generated": datetime.now().isoformat(timespec="seconds"), "sandbox_root": str(box.root),
               "home": str(box.home), "shimmed_clients": box.shimmed, "gitlab_reachable": not gitlab_down,
+              "mode": "remote" if remote else "local",
               "steps": steps, "checks": [{"ok": ok, "name": n} for ok, n in checks]}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
