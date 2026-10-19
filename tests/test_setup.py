@@ -459,7 +459,7 @@ class SetupTestCase(unittest.TestCase):
 
     def test_managed_file_target_symlink_is_rejected(self):
         config_dir = setup.opencode_config_dir(self.home, self.environ)
-        target = config_dir / "plugins" / "isc-logo.tsx"
+        target = config_dir / "tui-plugins" / "isc-logo.tsx"
         target.parent.mkdir(parents=True)
         outside = self.root / "outside-logo.tsx"
         outside.write_text("user", encoding="utf-8")
@@ -467,7 +467,9 @@ class SetupTestCase(unittest.TestCase):
             target.symlink_to(outside)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"file symlinks unavailable: {exc}")
-        with self.assertRaisesRegex(setup.SetupError, "must not be a symlink"):
+        # The resolved target lands outside the managed root, so it is refused before the
+        # symlink check; either refusal protects the user's file.
+        with self.assertRaisesRegex(setup.SetupError, "must not be a symlink|escapes its root"):
             setup.run_setup(
                 apply=True, home=self.home, environ=self.environ,
                 configure_opencode=True, install_logo=True, install_harness=False,
