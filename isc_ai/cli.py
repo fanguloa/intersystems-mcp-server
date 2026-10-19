@@ -2,7 +2,7 @@
 
     isc-ai mcp                      run the MCP server over stdio (what the client launches)
     isc-ai init [DIR]               create <project>/.isc-ai/config.json from the packaged template
-    isc-ai config <sub>             show | set | unset | add-server | remove-server | validate
+    isc-ai config <sub>             show | set | unset | add-server | remove-server | validate | from-ccr
     isc-ai servers migrate          copy legacy ~/.iris_mcp_servers.json into ~/.isc-ai/servers.json
     isc-ai facility render|install  render / conditionally install MCP.CCRMutation for this site
     isc-ai doctor                   what project, files and servers this process would use
@@ -287,6 +287,16 @@ def _parse_cli_args(argv):
     p_remove.add_argument("--user", action="store_true", help=t("flag.remove.user"))
 
     _add_parser(config_sub, "validate", "cmd.config.validate.help", "cmd.config.validate.examples")
+
+    p_ccr = _add_parser(config_sub, "from-ccr", "cmd.config.from_ccr.help", "cmd.config.from_ccr.examples")
+    p_ccr.add_argument("site", nargs="?", help=t("flag.ccr.site"))
+    p_ccr.add_argument("--system", action="append", default=[], help=t("flag.ccr.system"))
+    p_ccr.add_argument("--credential-prefix", help=t("flag.ccr.credential_prefix"))
+    p_ccr.add_argument("--host-alias", action="append", default=[], metavar="HOST=NAME", help=t("flag.ccr.host_alias"))
+    p_ccr.add_argument("--endpoint", action="append", default=[], metavar="SERVER_ID=URL", help=t("flag.ccr.endpoint"))
+    p_ccr.add_argument("--from-json", help=t("flag.ccr.from_json"))
+    p_ccr.add_argument("--save-json", help=t("flag.ccr.save_json"))
+    p_ccr.add_argument("--apply", action="store_true", help=t("flag.ccr.apply"))
 
     p_servers = _add_parser(sub, "servers", "cmd.servers.help", "cmd.servers.examples")
     servers_sub = p_servers.add_subparsers(dest="servers_command", title=t("chrome.group.subcommands"),
@@ -712,7 +722,85 @@ def _run_config(args):
         _emit(json.dumps(summary, indent=2, ensure_ascii=False))
         return 1 if problems else 0
 
+    if command == "from-ccr":
+        return _run_config_from_ccr(args, project_dir)
+
     raise ConfigError(t("error.unsupported.config"))
+
+
+def _choose_site(catalog):
+    """Numbered menu of the known sites; another code can be typed. Terminal only."""
+    if not sys.stdin.isatty():
+        raise ConfigError(t("error.ccr.site_required"))
+    sites = sorted(catalog)
+    _emit(t("msg.ccr.menu"))
+    for number, site in enumerate(sites, 1):
+        entry = catalog[site]
+        _emit(f"  {number:2d}. {site:<6} {entry['name']}  ({', '.join(entry['systems'])})")
+    answer = input(t("msg.ccr.prompt")).strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(sites):
+        return sites[int(answer) - 1]
+    return answer
+
+
+def _portal_login(client):
+    _warn(t("msg.ccr.login"))
+    client.tool("ccr_login", {})
+    for _ in range(12):
+        status = client.tool("ccr_portal_status", {"connect": True})
+        if status.get("authenticated"):
+            return
+        input(t("msg.ccr.login_wait"))
+    raise ConfigError(t("error.ccr.login"))
+
+
+def _run_config_from_ccr(args, project_dir):
+    from isc_ai import ccr_topology
+
+    try:
+        catalog = ccr_topology.load_catalog()
+        site = ccr_topology.validate_site(args.site or _choose_site(catalog))
+        if args.from_json:
+            systems = json.loads(Path(args.from_json).read_text(encoding="utf-8"))
+            systems = systems if isinstance(systems, list) else [systems]
+            missing = []
+        else:
+            codes = [ccr_topology.validate_system(c) for c in args.system] or catalog.get(site, {}).get("systems")
+            if not codes:
+                raise ConfigError(t("error.ccr.no_systems", name=site))
+            argv, extra = ccr_topology.portal_command()
+            client = ccr_topology.PortalClient(argv, extra)
+            try:
+                systems, missing = ccr_topology.fetch_systems(
+                    client, site, codes, login=_portal_login if sys.stdin.isatty() else None)
+            finally:
+                client.close()
+        if args.save_json:
+            isc_config.write_json(Path(args.save_json), systems)
+        result = ccr_topology.plan(site, systems, args.credential_prefix, ccr_topology.parse_aliases(args.host_alias),
+                                    ccr_topology.parse_endpoints(args.endpoint))
+    except ccr_topology.PortalAuthRequired:
+        raise ConfigError(t("error.ccr.login")) from None
+    except ccr_topology.TopologyError as exc:
+        raise ConfigError(str(exc)) from None
+    result["not_in_portal"] = missing
+    result["mode"] = "apply" if args.apply else "plan"
+    if args.apply:
+        if not (Path(project_dir) / isc_config.PROJECT_CONFIG_RELATIVE).is_file():
+            raise ConfigError(t("error.ccr.no_project", path=Path(project_dir) / isc_config.PROJECT_CONFIG_RELATIVE))
+        config_path, data = ccr_topology.project_policy(project_dir)
+        ccr_topology.apply(data, result)
+        isc_config.parse_policy(data, project_dir)
+        _reject_literal_project_secrets(data)
+        isc_config.write_json(config_path, data)
+        result["written"] = str(config_path)
+    _emit(json.dumps(result, indent=2, ensure_ascii=False))
+    if args.apply:
+        _note(t("msg.ccr.applied", count=len(result["servers"]), path=result["written"]))
+        _note(t("msg.ccr.next", command="; ".join(f"isc-ai secrets set {v}" for v in result["credentials"])))
+    else:
+        _note(t("msg.ccr.plan"))
+    return 0
 
 
 def _exception_to_dict(exc):

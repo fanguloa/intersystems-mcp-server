@@ -135,6 +135,27 @@ MESSAGES = {
     ),
     "flag.remove.user": "elimina de ~/.isc-ai/servers.json en lugar del archivo del proyecto",
     "cmd.config.validate.help": "carga y valida la configuración efectiva",
+    "cmd.config.from_ccr.help": "obtiene las conexiones IRIS de un sitio desde sus Systems del portal CCR",
+    "cmd.config.from_ccr.examples": (
+        "isc-ai config from-ccr                 pregunta el sitio (muestra los conocidos)\n"
+        "isc-ai config from-ccr SITE            solo el plan: qué se escribiría\n"
+        "isc-ai config from-ccr SITE --apply    escribe los servidores y canonical_base\n"
+        "isc-ai config from-ccr SITE --system T2026 --save-json site-ccr.json\n"
+        "isc-ai config from-ccr SITE --from-json site-ccr.json --apply   sin conexión\n"
+        "\n"
+        "  El portal CCR ya tiene cada ambiente del sitio: namespace y el enlace al\n"
+        "  Management Portal, del que salen host, puerto y prefijo web. Los datos se leen con\n"
+        "  el servidor MCP ccr-portal, que reutiliza su sesión SSO. Las credenciales quedan\n"
+        "  como referencias {{env:SITE_ENV_USER}} / {{env:SITE_ENV_PASSWORD}}."
+    ),
+    "flag.ccr.site": "código del sitio, por ejemplo el prefijo de CCR; si falta, se pregunta",
+    "flag.ccr.system": "código de System CCR del sitio (repetible); por defecto, los conocidos",
+    "flag.ccr.credential_prefix": "prefijo de las variables de credenciales (por defecto, el sitio)",
+    "flag.ccr.host_alias": "reemplaza un host del portal (a menudo una IP) por el nombre DNS que cubre su certificado (repetible)",
+    "flag.ccr.endpoint": "usa esta dirección para un servidor del plan, por ejemplo siteuat=http://10.0.0.5/uat02 cuando el enlace del portal es un balanceador sin la API REST de IRIS (repetible)",
+    "flag.ccr.from_json": "usa los registros de System guardados con --save-json en vez del portal",
+    "flag.ccr.save_json": "además guarda los registros de System leídos del portal",
+    "flag.ccr.apply": "escribe el plan en la configuración del proyecto",
     "cmd.config.validate.examples": (
         "isc-ai config validate\n"
         "isc-ai config validate --project-dir C:\\work\\deployments\\site\n"
@@ -490,6 +511,17 @@ MESSAGES = {
     "msg.config.unset": "se eliminó {path}",
     "msg.server.written": "servidor '{server_id}' escrito en {path}",
     "msg.server.removed": "servidor '{server_id}' eliminado de {path}",
+    "error.ccr.site_required": "indica el sitio: isc-ai config from-ccr <SITE> (la lista solo se ofrece en una terminal).",
+    "error.ccr.no_systems": "no se conoce ningún System CCR para {name}: usa --system <CODE>.",
+    "error.ccr.no_project": "no hay configuración de proyecto en {path}: ejecuta primero 'isc-ai init'.",
+    "error.ccr.login": "el portal CCR pide el login SSO corporativo: termínalo en la ventana del navegador y vuelve a ejecutar.",
+    "msg.ccr.menu": "Sitios conocidos (Systems CCR):",
+    "msg.ccr.prompt": "Número o código de sitio: ",
+    "msg.ccr.login": "El portal CCR pide el login SSO: se abre una ventana del navegador.",
+    "msg.ccr.login_wait": "Presiona Enter cuando termines el login... ",
+    "msg.ccr.applied": "{count} servidores y canonical_base escritos en {path}",
+    "msg.ccr.next": "ahora guarda las credenciales: {command}",
+    "msg.ccr.plan": "solo es el plan: vuelve a ejecutar con --apply para escribirlo",
 
     # -- servers migrate -------------------------------------------------
     "error.legacy.missing": "No hay archivo heredado en {legacy}.",

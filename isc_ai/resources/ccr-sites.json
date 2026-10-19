@@ -1,0 +1,23 @@
+{
+  "$comment": [
+    "Sites whose CCR System codes isc-ai offers in 'isc-ai config from-ccr'. Only codes:",
+    "hosts, namespaces and links are read from the CCR portal every time, never stored here.",
+    "Verified against the portal on 2026-10-19. Add your own in ~/.isc-ai/ccr-sites.json",
+    "with the same shape; a site there replaces the one here."
+  ],
+  "version": 1,
+  "sites": {
+    "ACHS": {"name": "Asociacion Chilena de Seguridad", "systems": ["T2026"]},
+    "CLCA": {"name": "Clinica Anglo Americana - British American Hospital", "systems": ["T2024"]},
+    "CLCB": {"name": "Clinica Biblica Costa Rica", "systems": ["T2025"]},
+    "CLRS": {"name": "TI Red SpA - Red Salud", "systems": ["T2025", "INT2024"]},
+    "CLUA": {"name": "Universidad de los Andes", "systems": ["T2025"]},
+    "CLUC": {"name": "UC Christus Servicios Clinicos", "systems": ["T2026", "T2023", "INT"]},
+    "SDCQ": {"name": "Servicio de Salud de Coquimbo", "systems": ["T2024", "T2011"]},
+    "SDOR": {"name": "Servicio de Salud Metropolitano Oriente", "systems": ["T2023"]},
+    "SDSR": {"name": "Servicio de Salud Metropolitano Sur", "systems": ["T2024"]},
+    "SDTL": {"name": "Servicio de Salud Talcahuano", "systems": ["T2026", "INT"]},
+    "SDVN": {"name": "Servicio de Salud Vina del Mar y Quillota", "systems": ["T2025", "I2024"]},
+    "SMOC": {"name": "Servicio de Salud Metropolitano Occidente", "systems": ["T2024", "T2019", "INT"]}
+  }
+}
