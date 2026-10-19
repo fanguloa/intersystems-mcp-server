@@ -1,13 +1,17 @@
 {
   "$comment": [
-    "Sites whose CCR System codes isc-ai offers in 'isc-ai config from-ccr'. Only codes:",
-    "hosts, namespaces and links are read from the CCR portal every time, never stored here.",
-    "Verified against the portal on 2026-10-19. Add your own in ~/.isc-ai/ccr-sites.json",
-    "with the same shape; a site there replaces the one here."
+    "Sites isc-ai offers in 'isc-ai config from-ccr'. Namespaces, roles and links are read from",
+    "the CCR portal every time; only what the portal gets wrong for the IRIS REST API lives here:",
+    "host_aliases (portal IP -> DNS name its certificate covers) and endpoints (planned server id",
+    "-> URL, for a load-balancer link without /api/atelier). System codes verified against the",
+    "portal on 2026-10-19; ACHS fixes verified with a read-only connection the same day.",
+    "Add your own in ~/.isc-ai/ccr-sites.json with the same shape; a site there replaces the one here."
   ],
   "version": 1,
   "sites": {
-    "ACHS": {"name": "Asociacion Chilena de Seguridad", "systems": ["T2026"]},
+    "ACHS": {"name": "Asociacion Chilena de Seguridad", "systems": ["T2026"],
+             "host_aliases": {"10.244.10.4": "desa-trakcare.achs.cl"},
+             "endpoints": {"achsuat": "http://10.244.20.5/trakuat02"}},
     "CLCA": {"name": "Clinica Anglo Americana - British American Hospital", "systems": ["T2024"]},
     "CLCB": {"name": "Clinica Biblica Costa Rica", "systems": ["T2025"]},
     "CLRS": {"name": "TI Red SpA - Red Salud", "systems": ["T2025", "INT2024"]},

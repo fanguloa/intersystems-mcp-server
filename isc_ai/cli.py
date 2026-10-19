@@ -777,8 +777,12 @@ def _run_config_from_ccr(args, project_dir):
                 client.close()
         if args.save_json:
             isc_config.write_json(Path(args.save_json), systems)
-        result = ccr_topology.plan(site, systems, args.credential_prefix, ccr_topology.parse_aliases(args.host_alias),
-                                    ccr_topology.parse_endpoints(args.endpoint))
+        known = catalog.get(site, {})
+        aliases = ccr_topology.parse_aliases([f"{k}={v}" for k, v in known.get("host_aliases", {}).items()]
+                                             + args.host_alias)
+        endpoints = ccr_topology.parse_endpoints([f"{k}={v}" for k, v in known.get("endpoints", {}).items()]
+                                                 + args.endpoint)
+        result = ccr_topology.plan(site, systems, args.credential_prefix, aliases, endpoints)
     except ccr_topology.PortalAuthRequired:
         raise ConfigError(t("error.ccr.login")) from None
     except ccr_topology.TopologyError as exc:

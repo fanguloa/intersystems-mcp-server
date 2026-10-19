@@ -21,7 +21,6 @@ from urllib.parse import urlsplit
 from . import config as isc_config
 
 CATALOG_RESOURCE = Path(__file__).resolve().parent / "resources" / "ccr-sites.json"
-USER_CATALOG = Path.home() / ".isc-ai" / "ccr-sites.json"
 ENVIRONMENTS = ("BASE", "TEST", "UAT", "LIVE")
 PRODUCTION_ENVIRONMENTS = {"LIVE"}
 SITE_RE = re.compile(r"^[A-Za-z0-9_-]{2,20}$")
@@ -39,13 +38,22 @@ class PortalAuthRequired(TopologyError):
 
 # --------------------------------------------------------------------- catalog
 def load_catalog(user_catalog=None):
-    """Known sites and their CCR System codes: the packaged list, then the user's own file."""
+    """Known sites, their CCR System codes and address fixes: the packaged list, then the user's own file.
+
+    host_aliases and endpoints have the meaning of plan()'s arguments; endpoints are URLs
+    (scheme://host[:port][/prefix]) keyed by planned server id.
+    """
     catalog = {}
-    for path in (CATALOG_RESOURCE, Path(user_catalog) if user_catalog else USER_CATALOG):
+    user_catalog = Path(user_catalog) if user_catalog else Path.home() / ".isc-ai" / "ccr-sites.json"
+    for path in (CATALOG_RESOURCE, user_catalog):
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
             for site, entry in (data.get("sites") or {}).items():
-                catalog[site.upper()] = {"name": entry.get("name", ""), "systems": list(entry.get("systems", []))}
+                catalog[site.upper()] = {
+                    "name": entry.get("name", ""), "systems": list(entry.get("systems", [])),
+                    "host_aliases": dict(entry.get("host_aliases") or {}),
+                    "endpoints": dict(entry.get("endpoints") or {}),
+                }
     return catalog
 
 
@@ -117,14 +125,16 @@ def plan(site, systems, credential_prefix=None, host_aliases=None, endpoints=Non
             scheme, host, port, path_prefix = parse_link(link)
             host = host_aliases.get(host.lower(), host)
             server_id = f"{site}{env}{layer}".lower()
-            if server_id in endpoints:
+            override = server_id in endpoints
+            if override:
                 scheme, host, port, path_prefix = endpoints[server_id]
             user_var, password_var = f"{prefix}_{env}_USER", f"{prefix}_{env}_PASSWORD"
             servers[server_id] = {
                 "host": host, "port": port, "path_prefix": path_prefix, "scheme": scheme, "namespace": namespace,
                 "env_role": env, "is_production": env in PRODUCTION_ENVIRONMENTS,
                 "username": "{env:" + user_var + "}", "password": "{env:" + password_var + "}",
-                "description": f"CCR {site}/{code} {env}" + (f" ({info['instance']})" if info.get("instance") else ""),
+                "description": f"CCR {site}/{code} {env}" + (f" ({info['instance']})" if info.get("instance") else "")
+                               + (" via endpoint override" if override else ""),
             }
             for var in (user_var, password_var):
                 if var not in credentials:

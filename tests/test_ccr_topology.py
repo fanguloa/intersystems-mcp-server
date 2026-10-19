@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -222,12 +223,37 @@ class PortalTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
-    def test_packaged_catalog_only_holds_codes(self):
+    def test_packaged_catalog_holds_codes_and_valid_fixes(self):
         data = json.loads(ccr_topology.CATALOG_RESOURCE.read_text(encoding="utf-8"))
         for site, entry in data["sites"].items():
             with self.subTest(site=site):
-                self.assertEqual(set(entry), {"name", "systems"})
+                self.assertLessEqual(set(entry), {"name", "systems", "host_aliases", "endpoints"})
                 self.assertTrue(all(ccr_topology.SYSTEM_RE.match(code) for code in entry["systems"]))
+                ccr_topology.parse_aliases([f"{k}={v}" for k, v in entry.get("host_aliases", {}).items()])
+                for server_id in ccr_topology.parse_endpoints(
+                        [f"{k}={v}" for k, v in entry.get("endpoints", {}).items()]):
+                    self.assertTrue(server_id.startswith(site.lower()), server_id)
+
+    def test_catalog_fixes_apply_and_flags_win(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / ".isc-ai").mkdir()
+        (root / ".isc-ai" / "ccr-sites.json").write_text(json.dumps({"sites": {"SITE": {
+            "name": "Mine", "systems": ["T2026"], "host_aliases": {"10.0.0.4": "base.example.invalid"},
+            "endpoints": {"siteuat": "http://10.0.0.5/uat02"}}}}), encoding="utf-8")
+        saved = root / "systems.json"
+        saved.write_text(json.dumps([TRAK]), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": str(root), "USERPROFILE": str(root)}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["config", "--project-dir", str(root), "from-ccr", "SITE", "--from-json", str(saved),
+                             "--endpoint", "sitelive=https://live2.example.invalid"])
+        self.assertEqual(code, 0)
+        servers = json.loads(out.getvalue())["servers"]
+        self.assertEqual(servers["sitebase"]["host"], "base.example.invalid")
+        self.assertEqual((servers["siteuat"]["host"], servers["siteuat"]["path_prefix"]), ("10.0.0.5", "/uat02"))
+        self.assertIn("via endpoint override", servers["siteuat"]["description"])
+        self.assertEqual(servers["sitelive"]["host"], "live2.example.invalid")
 
     def test_a_user_catalog_replaces_a_packaged_site(self):
         with tempfile.TemporaryDirectory() as tmp:
