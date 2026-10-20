@@ -56,6 +56,8 @@ Connect the InterSystems VPN first: the installer downloads isc-ai from the inte
 <h2>SHA-256</h2>
 <pre>{digests['install.ps1']}  install.ps1
 {digests['install.sh']}  install.sh</pre>
+<p>Maintainer: Felipe Angulo &lt;<a href="mailto:felipe.angulo@intersystems.com">felipe.angulo@intersystems.com</a>&gt; &middot;
+<a href="https://gitlab.iscinternal.com/isc-ai-squad/isc-ai/-/issues">issues</a></p>
 </body></html>
 """, encoding="utf-8")
     return digests

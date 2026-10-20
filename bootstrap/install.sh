@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # isc-ai workstation bootstrap for macOS and Linux.
+# Maintainer: Felipe Angulo <felipe.angulo@intersystems.com> - https://gitlab.iscinternal.com/isc-ai-squad/isc-ai
+#
 #
 #   curl -fsSL <pages-url>/install.sh | bash
 #   curl -fsSL <pages-url>/install.sh | bash -s -- --yes --skip-wizard
@@ -16,7 +18,7 @@
 set -u
 
 # Kept equal to isc_ai.__version__ by tests/test_distribution.py.
-ISC_AI_REF="v0.4.2"
+ISC_AI_REF="v0.5.0"
 GITLAB_HOST="gitlab.iscinternal.com"
 CORE_SSH="git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"
 CORE_HTTPS="https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"

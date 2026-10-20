@@ -28,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-from isc_ai import __version__
+from isc_ai import __author__, __email__, __version__
 from isc_ai import config as isc_config
 from isc_ai import i18n
 from isc_ai import agents as isc_agents
@@ -222,7 +222,7 @@ def _parse_cli_args(argv):
     )
     _localize_groups(parser)
     parser.add_argument("-h", "--help", action="help", help=t("chrome.help"))
-    parser.add_argument("--version", action="version", version=f"{PROG} {__version__}", help=t("chrome.version"))
+    parser.add_argument("--version", action="version", version=f"{PROG} {__version__} - {__author__} <{__email__}>", help=t("chrome.version"))
     _add_language_option(parser)
     sub = parser.add_subparsers(dest="command", title=t("chrome.group.commands"), metavar="<command>")
 

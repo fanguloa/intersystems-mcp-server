@@ -1,4 +1,6 @@
 # isc-ai workstation bootstrap for Windows.
+# Maintainer: Felipe Angulo <felipe.angulo@intersystems.com> - https://gitlab.iscinternal.com/isc-ai-squad/isc-ai
+#
 #
 #   irm <pages-url>/install.ps1 | iex
 #   & ([scriptblock]::Create((irm <pages-url>/install.ps1))) -Yes -SkipWizard
@@ -38,7 +40,7 @@ function Install-IscAi {
 
     $ErrorActionPreference = "Stop"
     # Kept equal to isc_ai.__version__ by tests/test_distribution.py.
-    $ISC_AI_REF = "v0.4.2"
+    $ISC_AI_REF = "v0.5.0"
     $GitLabHost = "gitlab.iscinternal.com"
     $CoreRepo = @{
         ssh   = "git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"

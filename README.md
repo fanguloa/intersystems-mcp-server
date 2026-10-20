@@ -78,10 +78,10 @@ Una sola línea, con la versión publicada (tag):
 
 ```powershell
 # SSH (recomendado si ya usas llave SSH con GitLab)
-uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.2"
+uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.0"
 
 # HTTPS (usa tu login de GitLab)
-uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.4.2"
+uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.0"
 ```
 
 El ejecutable queda en el directorio de herramientas de `uv` (`~/.local/bin`). Si la
@@ -97,19 +97,19 @@ y solo con `-Apply` / `--apply` los ejecuta.
 .\install.ps1 -Apply     # instala y configura
 
 # Desde un clon, pero instalando la versión publicada en GitLab
-.\install.ps1 -Apply -Remote -Ref v0.4.2 -Transport https
+.\install.ps1 -Apply -Remote -Ref v0.5.0 -Transport https
 ```
 
 ```sh
 ./install.sh             # plan
 ./install.sh --apply     # instala y configura
-./install.sh --apply --remote --ref v0.4.2 --https
+./install.sh --apply --remote --ref v0.5.0 --https
 ```
 
 ### 3. Verificar
 
 ```powershell
-isc-ai --version         # isc-ai 0.4.2
+isc-ai --version         # isc-ai 0.5.0 - Felipe Angulo <felipe.angulo@intersystems.com>
 isc-ai doctor            # qué proyecto, archivos y servidores ve este directorio
 isc-ai audit             # estado de clientes, suite MCP, harness y modelos (solo lectura)
 ```
@@ -147,6 +147,18 @@ isc-ai secrets set IRIS_PASSWORD
 isc-ai config validate
 isc-ai doctor
 ```
+
+Si el sitio tiene System en el portal CCR, las conexiones IRIS salen de ahí (namespace,
+rol, host, puerto y prefijo de cada ambiente) a través del servidor MCP `ccr-portal`:
+
+```powershell
+isc-ai config from-ccr                 # muestra los sitios conocidos y pregunta el código
+isc-ai config from-ccr SITE            # solo el plan
+isc-ai config from-ccr SITE --apply    # escribe servers y canonical_base
+```
+
+Los sitios conocidos y las correcciones de dirección (`host_aliases`, `endpoints`) están en
+`isc_ai/resources/ccr-sites.json`; los tuyos van en `~/.isc-ai/ccr-sites.json`.
 
 La política del proyecto (`.isc-ai/config.json`) se puede commitear; las credenciales
 nunca: viven en `~/.isc-ai/servers.json`, en el store de `isc-ai secrets` o en variables

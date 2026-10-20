@@ -13,7 +13,7 @@ from pathlib import Path
 from isc_ai.ccr_discovery import (
     LocalPolicyError, active_node, discover_namespace, validate_namespace,
 )
-from isc_ai import __version__
+from isc_ai import __author__, __email__, __url__, __version__
 from isc_ai import config as iris_mcp_config
 from isc_ai.config import ConfigError, SitePolicy, STATE_DIR, LEGACY_STATE_DIR
 
@@ -26,6 +26,9 @@ except ImportError:
 
 # Protocol Configuration
 PROTOCOL_VERSION = "2024-11-05"
+PROJECT_URL = __url__
+MAINTAINER_NOTE = (f"isc-ai {__version__}, maintained by {__author__} <{__email__}>. "
+                   f"Report problems at {__url__}/-/issues or to that address.")
 
 # Default HTTP read timeout (seconds) for fast operations (reads, metadata).
 DEFAULT_HTTP_TIMEOUT = 15
@@ -7952,8 +7955,12 @@ class IRISMCPServer:
                             },
                             "serverInfo": {
                                 "name": "intersystems-iris-mcp",
-                                "version": __version__
-                            }
+                                "title": "isc-ai (InterSystems IRIS)",
+                                "version": __version__,
+                                "description": MAINTAINER_NOTE,
+                                "websiteUrl": PROJECT_URL,
+                            },
+                            "instructions": MAINTAINER_NOTE,
                         }
                     }
                     sys.stdout.write(json.dumps(response) + "\n")
