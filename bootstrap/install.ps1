@@ -2,8 +2,8 @@
 # Maintainer: Felipe Angulo <felipe.angulo@intersystems.com> - https://gitlab.iscinternal.com/isc-ai-squad/isc-ai
 #
 #
-#   irm <pages-url>/install.ps1 | iex
-#   & ([scriptblock]::Create((irm <pages-url>/install.ps1))) -Yes -SkipWizard
+#   git clone --depth 1 --branch <tag> git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git <dir>
+#   & ([scriptblock]::Create((Get-Content -Raw <dir>\bootstrap\install.ps1))) -Yes -SkipWizard
 #   .\bootstrap\install.ps1 -DryRun
 #
 # Installs everything an isc-ai workstation needs, skipping whatever is already there:

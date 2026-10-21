@@ -39,22 +39,24 @@ de la suite en cada cliente. Al final abre `isc-ai wizard` para los ambientes IR
 credenciales. Lo que ya está instalado no se toca, así que se puede repetir sin riesgo.
 
 ```powershell
-# Windows (PowerShell)
-irm <pages-url>/install.ps1 | iex
+# Windows (PowerShell): una sola línea
+Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1")))
 
-# Con opciones: solo ver el plan, sin preguntas, sin el asistente...
-& ([scriptblock]::Create((irm <pages-url>/install.ps1))) -DryRun
+# Con opciones, al final: -DryRun (solo el plan), -Yes, -SkipWizard, -Transport https...
+Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1"))) -DryRun
 ```
 
 ```sh
 # macOS / Linux
-curl -fsSL <pages-url>/install.sh | bash
-curl -fsSL <pages-url>/install.sh | bash -s -- --dry-run
+rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh
+rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh --dry-run
 ```
 
-`<pages-url>` es la URL de GitLab Pages del proyecto (Deploy → Pages); el job `pages` la
-publica en cada tag `vX.Y.Z` con el SHA-256 de cada script. Si no tienes llave SSH, el
-instalador la crea, la copia al portapapeles y abre la página de GitLab para agregarla.
+La línea clona el tag publicado y ejecuta su `bootstrap/install.ps1`; el bloque de script
+evita la política de ejecución de PowerShell. Necesita git y tu llave SSH en GitLab; sin
+llave, clona por HTTPS (`https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git`) y agrega
+`-Transport https`. `irm | iex` desde GitLab Pages no está disponible: Pages está
+desactivado en esta instancia de GitLab (el job `pages` sigue generando el sitio por si se activa).
 Opciones: `-Ref`, `-Transport https`, `-DryRun`, `-Yes`, `-SkipPerforce`, `-SkipEngram`,
 `-SkipClients`, `-SkipSuite`, `-SkipWizard` (en `install.sh`: `--ref`, `--https`, `--dry-run`,
 `--yes`, `--skip-*`). La fuente está en `bootstrap/`; `tools/smoke_bootstrap.py` la prueba en

@@ -3,8 +3,8 @@
 # Maintainer: Felipe Angulo <felipe.angulo@intersystems.com> - https://gitlab.iscinternal.com/isc-ai-squad/isc-ai
 #
 #
-#   curl -fsSL <pages-url>/install.sh | bash
-#   curl -fsSL <pages-url>/install.sh | bash -s -- --yes --skip-wizard
+#   git clone --depth 1 --branch <tag> git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git <dir>
+#   bash <dir>/bootstrap/install.sh --yes --skip-wizard
 #   ./bootstrap/install.sh --dry-run
 #
 # Installs everything an isc-ai workstation needs, skipping whatever is already there:
