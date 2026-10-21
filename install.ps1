@@ -92,7 +92,11 @@ function Probe-Extension {
     $env:GIT_TERMINAL_PROMPT = "0"
     $env:GCM_INTERACTIVE = "never"
     $setSsh = -not $env:GIT_SSH_COMMAND -and -not $env:GIT_SSH
-    if ($setSsh) { $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes" }
+    if ($setSsh) {
+        $sshExe = (Get-Command ssh -ErrorAction SilentlyContinue).Source
+        $sshCmd = if ($sshExe) { "'$($sshExe.Replace('\', '/'))'" } else { "ssh" }
+        $env:GIT_SSH_COMMAND = "$sshCmd -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    }
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"

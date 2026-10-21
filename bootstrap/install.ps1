@@ -375,11 +375,16 @@ function Test-GitAccess([string]$Url, [string]$Ref) {
     $sshDir = Join-Path $env:USERPROFILE ".ssh"
     $hasKey = [bool]$env:GIT_SSH_COMMAND -or (@(Find-SshPublicKeys $sshDir).Count -gt 0)
     $nonInteractive = (-not $Interactive) -or $DryRun -or (-not $hasKey)
-    $setSsh = $nonInteractive -and (-not $env:GIT_SSH_COMMAND)
+    $setSsh = -not $env:GIT_SSH_COMMAND
     if ($nonInteractive) {
         $env:GIT_TERMINAL_PROMPT = "0"
         $env:GCM_INTERACTIVE = "never"
-        if ($setSsh) { $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20" }
+    }
+    if ($setSsh) {
+        $sshExe = (Get-Command ssh -ErrorAction SilentlyContinue).Source
+        $sshCmd = if ($sshExe) { "'$($sshExe.Replace('\', '/'))'" } else { "ssh" }
+        $batch = if ($nonInteractive) { " -o BatchMode=yes" } else { "" }
+        $env:GIT_SSH_COMMAND = "$sshCmd$batch -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
     }
     try {
         $out = Invoke-Native git @("ls-remote", $Url, $Ref) -AllowFailure
@@ -387,8 +392,8 @@ function Test-GitAccess([string]$Url, [string]$Ref) {
     } finally {
         if ($nonInteractive) {
             Remove-Item Env:\GIT_TERMINAL_PROMPT, Env:\GCM_INTERACTIVE -ErrorAction SilentlyContinue
-            if ($setSsh) { Remove-Item Env:\GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
         }
+        if ($setSsh) { Remove-Item Env:\GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
     }
 }
 

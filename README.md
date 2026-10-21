@@ -39,17 +39,17 @@ de la suite en cada cliente. Al final abre `isc-ai wizard` para los ambientes IR
 credenciales. Lo que ya está instalado no se toca, así que se puede repetir sin riesgo.
 
 ```powershell
-# Windows (PowerShell): una sola línea
-Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1")))
+# Windows (PowerShell): una sola línea (intenta SSH y si aún no tienes llave baja el bootstrap por HTTPS)
+Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install" 2>$null; if (-not $?) { git clone -q --depth 1 --branch v0.5.1 https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install" }; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1")))
 
 # Con opciones, al final: -DryRun (solo el plan), -Yes, -SkipWizard, -Transport https...
-Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1"))) -DryRun
+Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install" 2>$null; if (-not $?) { git clone -q --depth 1 --branch v0.5.1 https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install" }; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1"))) -DryRun
 ```
 
 ```sh
 # macOS / Linux
-rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh
-rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh --dry-run
+rm -rf /tmp/isc-ai-install && { git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install 2>/dev/null || git clone -q --depth 1 --branch v0.5.1 https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git /tmp/isc-ai-install; } && bash /tmp/isc-ai-install/bootstrap/install.sh
+rm -rf /tmp/isc-ai-install && { git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install 2>/dev/null || git clone -q --depth 1 --branch v0.5.1 https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git /tmp/isc-ai-install; } && bash /tmp/isc-ai-install/bootstrap/install.sh --dry-run
 ```
 
 La línea clona el tag publicado y ejecuta su `bootstrap/install.ps1`; el bloque de script
