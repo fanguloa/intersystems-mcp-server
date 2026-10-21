@@ -18,7 +18,7 @@
 set -u
 
 # Kept equal to isc_ai.__version__ by tests/test_distribution.py.
-ISC_AI_REF="v0.5.0"
+ISC_AI_REF="v0.5.1"
 GITLAB_HOST="gitlab.iscinternal.com"
 CORE_SSH="git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"
 CORE_HTTPS="https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git"
@@ -183,6 +183,33 @@ git_access() {
     git ls-remote "$1" "$2" 2>/dev/null | grep -Eq '^[0-9a-f]{40}[[:space:]]'
 }
 
+find_ssh_pub_key() {
+  for k in id_ed25519.pub id_ecdsa.pub id_rsa.pub; do
+    if [ -f "$HOME/.ssh/$k" ] && [ -f "$HOME/.ssh/${k%.pub}" ]; then printf '%s\n' "$HOME/.ssh/$k"; return 0; fi
+  done
+  for p in "$HOME/.ssh/"*.pub; do
+    if [ -f "$p" ] && [ -f "${p%.pub}" ]; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+ensure_ssh_agent_key() {
+  pub="$1"; priv="${pub%.pub}"
+  [ -f "$priv" ] || return 1
+  base="$(basename "$pub")"
+  is_default=""
+  case "$base" in id_ed25519.pub|id_ecdsa.pub|id_rsa.pub) is_default="1" ;; esac
+  has_passphrase=""
+  if ! ssh-keygen -y -P "" -f "$priv" >/dev/null 2>&1; then has_passphrase="1"; fi
+  if [ -z "$has_passphrase" ] && [ -n "$is_default" ]; then return 1; fi
+  fp="$(ssh-keygen -lf "$pub" 2>/dev/null | awk '{print $2}')"
+  ssh-add -l >/dev/null 2>&1; agent_code=$?
+  if [ "$agent_code" -eq 0 ] && [ -n "$fp" ] && ssh-add -l 2>/dev/null | grep -Fq "$fp"; then return 1; fi
+  if [ "$agent_code" -eq 2 ]; then eval "$(ssh-agent -s)" >/dev/null 2>&1 || true; fi
+  echo "  Unlocking $priv in ssh-agent (enter its passphrase if prompted)..."
+  ssh-add "$priv" </dev/tty
+}
+
 # ------------------------------------------------------------------ GitLab access
 if [ -z "$from" ]; then
   step "Network access to $GITLAB_HOST"
@@ -194,16 +221,29 @@ if [ -z "$from" ]; then
   ok network "$GITLAB_HOST reachable"
   if [ "$transport" = "ssh" ]; then
     step "SSH access to GitLab"
-    attempt=1; access=""
+    attempt=1; access=""; selected_key=""
     while [ $attempt -le 3 ]; do
       if git_access "$CORE_SSH" "refs/tags/$ref"; then access="1"; break; fi
-      key=""; for k in id_ed25519.pub id_ecdsa.pub id_rsa.pub; do [ -f "$HOME/.ssh/$k" ] && key="$HOME/.ssh/$k" && break; done
+      if [ -n "$selected_key" ] && [ -f "$selected_key" ]; then key="$selected_key"
+      else key="$(find_ssh_pub_key || true)"; fi
       if [ -n "$dry_run" ]; then plan ssh "GitLab rejects SSH: a key would be created or shown so you can add it"; access="dry"; break; fi
       if [ -z "$interactive" ]; then break; fi
       if [ -z "$key" ]; then
-        echo "  No SSH key found. Creating one (choose a passphrase you will remember)."
+        printf '  No SSH key found in %s/.ssh. Enter path to an existing .pub key, or press Enter to create a new one: ' "$HOME"
+        read -r custom </dev/tty
+        if [ -n "$custom" ]; then
+          case "$custom" in *.pub) candidate="$custom" ;; *) candidate="${custom}.pub" ;; esac
+          [ -f "$candidate" ] && key="$candidate"
+        fi
+      fi
+      if [ -z "$key" ]; then
+        echo "  Creating SSH key $HOME/.ssh/id_ed25519 (passphrase is optional: press Enter for no passphrase)."
         mkdir -p "$HOME/.ssh" && ssh-keygen -t ed25519 -C "$(whoami)@intersystems" -f "$HOME/.ssh/id_ed25519" </dev/tty
         key="$HOME/.ssh/id_ed25519.pub"
+      fi
+      selected_key="$key"
+      if ensure_ssh_agent_key "$key"; then
+        if git_access "$CORE_SSH" "refs/tags/$ref"; then access="1"; break; fi
       fi
       echo "  Add this public key in GitLab ('Add new key'):"; echo; cat "$key"; echo
       if have open; then open "$SSH_KEYS_PAGE"; elif have xdg-open; then xdg-open "$SSH_KEYS_PAGE" >/dev/null 2>&1; else echo "  $SSH_KEYS_PAGE"; fi

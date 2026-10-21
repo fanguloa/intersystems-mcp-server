@@ -40,16 +40,16 @@ credenciales. Lo que ya está instalado no se toca, así que se puede repetir si
 
 ```powershell
 # Windows (PowerShell): una sola línea
-Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1")))
+Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1")))
 
 # Con opciones, al final: -DryRun (solo el plan), -Yes, -SkipWizard, -Transport https...
-Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1"))) -DryRun
+Remove-Item -Recurse -Force "$env:TEMP\isc-ai-install" -ErrorAction SilentlyContinue; git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git "$env:TEMP\isc-ai-install"; & ([scriptblock]::Create((Get-Content -Raw "$env:TEMP\isc-ai-install\bootstrap\install.ps1"))) -DryRun
 ```
 
 ```sh
 # macOS / Linux
-rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh
-rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.0 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh --dry-run
+rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh
+rm -rf /tmp/isc-ai-install && git clone -q --depth 1 --branch v0.5.1 git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git /tmp/isc-ai-install && bash /tmp/isc-ai-install/bootstrap/install.sh --dry-run
 ```
 
 La línea clona el tag publicado y ejecuta su `bootstrap/install.ps1`; el bloque de script
@@ -80,10 +80,10 @@ Una sola línea, con la versión publicada (tag):
 
 ```powershell
 # SSH (recomendado si ya usas llave SSH con GitLab)
-uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.0"
+uv tool install "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.1"
 
 # HTTPS (usa tu login de GitLab)
-uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.0"
+uv tool install "git+https://gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.1"
 ```
 
 El ejecutable queda en el directorio de herramientas de `uv` (`~/.local/bin`). Si la
@@ -99,19 +99,19 @@ y solo con `-Apply` / `--apply` los ejecuta.
 .\install.ps1 -Apply     # instala y configura
 
 # Desde un clon, pero instalando la versión publicada en GitLab
-.\install.ps1 -Apply -Remote -Ref v0.5.0 -Transport https
+.\install.ps1 -Apply -Remote -Ref v0.5.1 -Transport https
 ```
 
 ```sh
 ./install.sh             # plan
 ./install.sh --apply     # instala y configura
-./install.sh --apply --remote --ref v0.5.0 --https
+./install.sh --apply --remote --ref v0.5.1 --https
 ```
 
 ### 3. Verificar
 
 ```powershell
-isc-ai --version         # isc-ai 0.5.0 - Felipe Angulo <felipe.angulo@intersystems.com>
+isc-ai --version         # isc-ai 0.5.1 - Felipe Angulo <felipe.angulo@intersystems.com>
 isc-ai doctor            # qué proyecto, archivos y servidores ve este directorio
 isc-ai audit             # estado de clientes, suite MCP, harness y modelos (solo lectura)
 ```
@@ -170,7 +170,7 @@ de entorno. Detalle completo en la sección **Configuración** más abajo.
 
 ```powershell
 # Cambiar a otra versión publicada (el tag fija la versión)
-uv tool install --reinstall "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.0"
+uv tool install --reinstall "git+ssh://git@gitlab.iscinternal.com/isc-ai-squad/isc-ai.git@v0.5.1"
 
 # Instalación desde un clon editable
 git pull

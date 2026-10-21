@@ -47,6 +47,15 @@ class BootstrapTextTests(unittest.TestCase):
         sh = re.search(r'ENGRAM_VERSION="([^"]+)"', SH.read_text(encoding="ascii")).group(1)
         self.assertEqual(ps1, sh)
 
+    def test_both_scripts_unlock_passphrase_keys_in_ssh_agent_and_keep_passphrase_optional(self):
+        for path in (PS1, SH):
+            text = path.read_text(encoding="ascii")
+            with self.subTest(script=path.name):
+                self.assertIn("ssh-agent", text)
+                self.assertIn("ssh-add", text)
+                self.assertIn("passphrase is optional", text)
+                self.assertNotIn("choose a passphrase you will remember", text)
+
 
 class BootstrapSyntaxTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("powershell") or shutil.which("pwsh"), "PowerShell not available")

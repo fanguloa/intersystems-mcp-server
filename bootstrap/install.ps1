@@ -40,7 +40,7 @@ function Install-IscAi {
 
     $ErrorActionPreference = "Stop"
     # Kept equal to isc_ai.__version__ by tests/test_distribution.py.
-    $ISC_AI_REF = "v0.5.0"
+    $ISC_AI_REF = "v0.5.1"
     $GitLabHost = "gitlab.iscinternal.com"
     $CoreRepo = @{
         ssh   = "git@gitlab.iscinternal.com:isc-ai-squad/isc-ai.git"
@@ -385,30 +385,130 @@ function Test-GitAccess([string]$Url, [string]$Ref) {
     }
 }
 
+function Find-SshPublicKeys([string]$SshDir) {
+    if (-not (Test-Path $SshDir)) { return @() }
+    $preferred = @("id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub") |
+        ForEach-Object { Join-Path $SshDir $_ } |
+        Where-Object { (Test-Path $_) -and (Test-Path ($_ -replace "\.pub$", "")) }
+    $others = Get-ChildItem -Path $SshDir -Filter "*.pub" -File -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName } |
+        Where-Object { ($preferred -notcontains $_) -and (Test-Path ($_ -replace "\.pub$", "")) }
+    return @($preferred) + @($others)
+}
+
+function Test-KeyHasPassphrase([string]$PrivateKey) {
+    if (-not (Test-Path $PrivateKey)) { return $false }
+    $raw = Get-Content $PrivateKey -Raw -ErrorAction SilentlyContinue
+    if (-not $raw) { return $false }
+    if ($raw -match "ENCRYPTED") { return $true }
+    $b64 = ($raw -split "`r?`n" | Where-Object { $_ -and $_ -notmatch "^-----" }) -join ""
+    try {
+        $bytes = [Convert]::FromBase64String($b64)
+        $header = [Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min(48, $bytes.Length))
+        return $header -notmatch "^openssh-key-v1[\x00-\x08]+none[\x00-\x08]+none"
+    } catch { return $false }
+}
+
+function Ensure-SshAgentKey([string]$PublicKey) {
+    $priv = $PublicKey -replace "\.pub$", ""
+    if (-not (Test-Path $priv)) { return $false }
+    $isDefaultName = @("id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub") -contains [IO.Path]::GetFileName($PublicKey)
+    $hasPassphrase = Test-KeyHasPassphrase $priv
+    if (-not $hasPassphrase -and $isDefaultName) { return $false }
+
+    $fpLine = Invoke-Native ssh-keygen @("-lf", $PublicKey) -AllowFailure | Select-Object -First 1
+    $fp = if ($fpLine) { ($fpLine -split "\s+")[1] } else { $null }
+    $loaded = Invoke-Native ssh-add @("-l") -AllowFailure
+    $agentCode = $LASTEXITCODE
+    if ($agentCode -eq 0 -and $fp -and (($loaded -join "`n") -match [regex]::Escape($fp))) {
+        return $false
+    }
+    if ($agentCode -eq 2) {
+        Start-Service ssh-agent -ErrorAction SilentlyContinue
+        [void](Invoke-Native ssh-add @("-l") -AllowFailure)
+        $agentCode = $LASTEXITCODE
+    }
+    if ($agentCode -eq 2) {
+        Write-Host "  Starting Windows ssh-agent service (Windows may ask for administrator approval)..." -ForegroundColor DarkGray
+        try {
+            Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @(
+                "-NoProfile", "-Command", "Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent"
+            ) -ErrorAction Stop | Out-Null
+        } catch { }
+        [void](Invoke-Native ssh-add @("-l") -AllowFailure)
+        $agentCode = $LASTEXITCODE
+    }
+    if ($agentCode -eq 2) {
+        $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+        $gitRoot = if ($gitCmd) { Split-Path (Split-Path $gitCmd.Source -Parent) -Parent } else { $null }
+        $gitUsrBin = if ($gitRoot) { Join-Path $gitRoot "usr\bin" } else { $null }
+        if ($gitUsrBin -and (Test-Path (Join-Path $gitUsrBin "ssh-agent.exe"))) {
+            Add-SessionPath $gitUsrBin
+            $agentOut = (& (Join-Path $gitUsrBin "ssh-agent.exe") -s) -join "`n"
+            if ($agentOut -match "SSH_AUTH_SOCK=([^;]+)") { $env:SSH_AUTH_SOCK = $Matches[1] }
+            if ($agentOut -match "SSH_AGENT_PID=(\d+)") { $env:SSH_AGENT_PID = $Matches[1] }
+        }
+    }
+    Write-Host "  Unlocking $priv in ssh-agent (enter its passphrase if prompted)..." -ForegroundColor Yellow
+    $addCode = Invoke-Native ssh-add @("`"$priv`"") -Tty
+    return ($addCode -eq 0)
+}
+
 function Ensure-SshAccess {
     Step "SSH access to GitLab"
     $sshDir = Join-Path $env:USERPROFILE ".ssh"
+    $selectedKey = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         if (Test-GitAccess $CoreRepo.ssh "refs/tags/$Ref") {
             Done "ssh" "your SSH key reaches isc-ai-squad/isc-ai and tag $Ref exists"
             return $true
         }
-        $key = @("id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub") | ForEach-Object { Join-Path $sshDir $_ } |
-            Where-Object { Test-Path $_ } | Select-Object -First 1
+        $keys = @(Find-SshPublicKeys $sshDir)
+        $key = if ($selectedKey -and (Test-Path $selectedKey)) { $selectedKey } else { $keys | Select-Object -First 1 }
         if ($DryRun) {
-            if ($key) { Plan "ssh" "key $key exists but GitLab rejects it: it would be copied and the SSH keys page opened" }
+            if ($key) { Plan "ssh" "key $key exists but GitLab rejects it: it would be unlocked/copied and the SSH keys page opened" }
             else { Plan "ssh" "no SSH key: one would be generated with ssh-keygen -t ed25519" }
             return $true
         }
         if (-not $Interactive) {
-            Fail "ssh" "GitLab rejects SSH (no key, key not added, or tag $Ref missing). Add your public key at $SshKeysPage"
+            Fail "ssh" "GitLab rejects SSH (no key, key locked with passphrase, key not added, or tag $Ref missing). Add your public key at $SshKeysPage"
             return $false
         }
+        if (-not $selectedKey -and $keys.Count -gt 1) {
+            Write-Host "  Multiple SSH keys found in ${sshDir}:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $keys.Count; $i++) {
+                Write-Host "    [$($i + 1)] $($keys[$i])" -ForegroundColor Gray
+            }
+            $choice = (Read-Host "  Select key [1-$($keys.Count)], enter a .pub path, or type 'new' to create one (default: 1)").Trim()
+            if ($choice -eq "new") {
+                $key = $null
+            } elseif ($choice -match "^\d+$" -and [int]$choice -ge 1 -and [int]$choice -le $keys.Count) {
+                $key = $keys[[int]$choice - 1]
+            } elseif ($choice) {
+                $candidate = if ($choice.EndsWith(".pub")) { $choice } else { "$choice.pub" }
+                if (Test-Path $candidate) { $key = (Resolve-Path $candidate).Path }
+            }
+        }
         if (-not $key) {
-            Write-Host "  No SSH key found. Creating one (choose a passphrase you will remember)." -ForegroundColor Yellow
+            $custom = (Read-Host "  No SSH key found in $sshDir. Enter path to an existing .pub key, or press Enter to create a new one").Trim()
+            if ($custom) {
+                $candidate = if ($custom.EndsWith(".pub")) { $custom } else { "$custom.pub" }
+                if (Test-Path $candidate) { $key = (Resolve-Path $candidate).Path }
+            }
+        }
+        if (-not $key) {
+            $targetPriv = Join-Path $sshDir "id_ed25519"
+            Write-Host "  Creating SSH key $targetPriv (passphrase is optional: press Enter for no passphrase)." -ForegroundColor Yellow
             New-Item -ItemType Directory -Force $sshDir | Out-Null
-            & ssh-keygen -t ed25519 -C "$env:USERNAME@intersystems" -f (Join-Path $sshDir "id_ed25519") | Out-Host
-            $key = Join-Path $sshDir "id_ed25519.pub"
+            & ssh-keygen -t ed25519 -C "$env:USERNAME@intersystems" -f $targetPriv | Out-Host
+            $key = "$targetPriv.pub"
+        }
+        $selectedKey = $key
+        if (Ensure-SshAgentKey $key) {
+            if (Test-GitAccess $CoreRepo.ssh "refs/tags/$Ref") {
+                Done "ssh" "your SSH key reaches isc-ai-squad/isc-ai and tag $Ref exists"
+                return $true
+            }
         }
         Get-Content $key -Raw | Set-Clipboard
         Write-Host "  Your public key ($key) is in the clipboard." -ForegroundColor Yellow
