@@ -372,16 +372,23 @@ function Ensure-Engram([string]$Version) {
 }
 
 function Test-GitAccess([string]$Url, [string]$Ref) {
-    $env:GIT_TERMINAL_PROMPT = "0"
-    $env:GCM_INTERACTIVE = "never"
-    $setSsh = -not $env:GIT_SSH_COMMAND
-    if ($setSsh) { $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20" }
+    $sshDir = Join-Path $env:USERPROFILE ".ssh"
+    $hasKey = [bool]$env:GIT_SSH_COMMAND -or (@(Find-SshPublicKeys $sshDir).Count -gt 0)
+    $nonInteractive = (-not $Interactive) -or $DryRun -or (-not $hasKey)
+    $setSsh = $nonInteractive -and (-not $env:GIT_SSH_COMMAND)
+    if ($nonInteractive) {
+        $env:GIT_TERMINAL_PROMPT = "0"
+        $env:GCM_INTERACTIVE = "never"
+        if ($setSsh) { $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20" }
+    }
     try {
         $out = Invoke-Native git @("ls-remote", $Url, $Ref) -AllowFailure
         return ($LASTEXITCODE -eq 0) -and (@($out | Where-Object { $_ -match "^[0-9a-f]{40}\s" }).Count -gt 0)
     } finally {
-        Remove-Item Env:\GIT_TERMINAL_PROMPT, Env:\GCM_INTERACTIVE -ErrorAction SilentlyContinue
-        if ($setSsh) { Remove-Item Env:\GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
+        if ($nonInteractive) {
+            Remove-Item Env:\GIT_TERMINAL_PROMPT, Env:\GCM_INTERACTIVE -ErrorAction SilentlyContinue
+            if ($setSsh) { Remove-Item Env:\GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
+        }
     }
 }
 
@@ -459,12 +466,15 @@ function Ensure-SshAccess {
     $sshDir = Join-Path $env:USERPROFILE ".ssh"
     $selectedKey = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $keys = @(Find-SshPublicKeys $sshDir)
+        $key = if ($selectedKey -and (Test-Path $selectedKey)) { $selectedKey } else { $keys | Select-Object -First 1 }
+        if ($Interactive -and -not $DryRun -and $key) {
+            [void](Ensure-SshAgentKey $key)
+        }
         if (Test-GitAccess $CoreRepo.ssh "refs/tags/$Ref") {
             Done "ssh" "your SSH key reaches isc-ai-squad/isc-ai and tag $Ref exists"
             return $true
         }
-        $keys = @(Find-SshPublicKeys $sshDir)
-        $key = if ($selectedKey -and (Test-Path $selectedKey)) { $selectedKey } else { $keys | Select-Object -First 1 }
         if ($DryRun) {
             if ($key) { Plan "ssh" "key $key exists but GitLab rejects it: it would be unlocked/copied and the SSH keys page opened" }
             else { Plan "ssh" "no SSH key: one would be generated with ssh-keygen -t ed25519" }

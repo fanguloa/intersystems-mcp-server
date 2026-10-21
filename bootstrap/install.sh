@@ -179,6 +179,10 @@ finish() {
 if [ -z "$dry_run" ] && { ! have git || ! have uv; }; then finish "git and uv are required to continue."; fi
 
 git_access() {
+  if [ -n "$interactive" ] && [ -z "$dry_run" ] && { [ -n "${GIT_SSH_COMMAND:-}" ] || find_ssh_pub_key >/dev/null 2>&1; }; then
+    git ls-remote "$1" "$2" 2>/dev/null | grep -Eq '^[0-9a-f]{40}[[:space:]]'
+    return $?
+  fi
   GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20}" \
     git ls-remote "$1" "$2" 2>/dev/null | grep -Eq '^[0-9a-f]{40}[[:space:]]'
 }
@@ -223,9 +227,12 @@ if [ -z "$from" ]; then
     step "SSH access to GitLab"
     attempt=1; access=""; selected_key=""
     while [ $attempt -le 3 ]; do
-      if git_access "$CORE_SSH" "refs/tags/$ref"; then access="1"; break; fi
       if [ -n "$selected_key" ] && [ -f "$selected_key" ]; then key="$selected_key"
       else key="$(find_ssh_pub_key || true)"; fi
+      if [ -n "$interactive" ] && [ -z "$dry_run" ] && [ -n "$key" ]; then
+        ensure_ssh_agent_key "$key" || true
+      fi
+      if git_access "$CORE_SSH" "refs/tags/$ref"; then access="1"; break; fi
       if [ -n "$dry_run" ]; then plan ssh "GitLab rejects SSH: a key would be created or shown so you can add it"; access="dry"; break; fi
       if [ -z "$interactive" ]; then break; fi
       if [ -z "$key" ]; then
