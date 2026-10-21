@@ -109,11 +109,13 @@ def _procedure(database: ET.Element, model: CatalogModel, proc: StoredProcedure,
     })
     for index, param in enumerate(proc.params, start=1):
         p = sub(element, "ProcdureParameter")  # sic: Logi spelling
+        # A string parameter linked from a main dataset column (e.g. a list of row ids) is cut to
+        # its Precision when Logi binds the subreport: keep it as wide as a string column.
         props(p, {
-            "Precision": 50 if param.sql_type == 12 else 10,
+            "Precision": 32000 if param.sql_type == 12 else 10,
             "ParameterName": param.name,
             "Nullable": 2,
-            "Length": 50 if param.sql_type == 12 else 4,
+            "Length": 32000 if param.sql_type == 12 else 4,
             "Type": "IN",
             "Name": param.name,
             "SQLTypeName": param.type_name,

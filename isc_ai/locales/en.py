@@ -218,7 +218,7 @@ MESSAGES = {
     "flag.rules.label": "human-readable label",
     "flag.rules.ticket": "ticket reference",
     "flag.rules.expires": "expiry date, YYYY-MM-DD",
-    "flag.rules.capability": "code_write, ensemble_control, runner or read",
+    "flag.rules.capability": "code_write, ensemble_control, runner, read or pre_go_live",
     "flag.rules.roles": "comma-separated roles",
     "flag.rules.hosts": "comma-separated hosts",
     "flag.rules.namespaces": "comma-separated namespaces",

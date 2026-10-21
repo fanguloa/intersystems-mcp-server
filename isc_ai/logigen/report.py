@@ -464,8 +464,8 @@ def _table_row(detail, names, w, field, columns):
 
 
 def _table_note(detail, names, w, field, note, y):
-    """Optional second line of a table row: "label: value" from column "indent" (fraction of the
-    width) to the right edge, in the same panel so it grows and breaks with its row."""
+    """Optional note of a table row: "label: value" from column "indent" (fraction of the width)
+    to the right edge, drawn in its own detail panel below the row panel (see _table_detail)."""
     x = note.get("indent", 0.0) * w
     label_w = note.get("labelWidth", 0.9)
     k.label(detail, names, note.get("label", ""), x, y, label_w, ROW,
@@ -476,12 +476,19 @@ def _table_note(detail, names, w, field, note, y):
 
 
 def _table_detail(page_panel, names, w, field, layout, parent=None):
-    detail = k.panel(parent if parent is not None else page_panel, "DetailPanel", names.next("DetailPanel"), w, ROW,
-                     label_text="DetailPanel", bottom_rule=THEME["rule"])
+    """One detail panel per row. A note goes in a second detail panel of the same record, so it
+    starts below the row once the row has grown with wrapped values (objects of one panel keep
+    their Y)."""
+    container = parent if parent is not None else page_panel
+    note = layout.get("note")
+    detail = k.panel(container, "DetailPanel", names.next("DetailPanel"), w, ROW,
+                     label_text="DetailPanel", bottom_rule=None if note else THEME["rule"])
     used = _table_row(detail, names, w, field, layout["columns"])
-    if layout.get("note"):
-        used = _table_note(detail, names, w, field, layout["note"], used)
     detail.find("Height").text = k.num(used)
+    if note:
+        note_panel = k.panel(container, "DetailPanel", names.next("DetailPanel"), w, ROW,
+                             label_text="DetailPanel", bottom_rule=THEME["rule"])
+        note_panel.find("Height").text = k.num(_table_note(note_panel, names, w, field, note, 0.0))
     return detail
 
 

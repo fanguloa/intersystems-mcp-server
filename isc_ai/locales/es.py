@@ -219,7 +219,7 @@ MESSAGES = {
     "flag.rules.label": "etiqueta legible",
     "flag.rules.ticket": "referencia del ticket",
     "flag.rules.expires": "fecha de vencimiento, YYYY-MM-DD",
-    "flag.rules.capability": "code_write, ensemble_control, runner o read",
+    "flag.rules.capability": "code_write, ensemble_control, runner, read o pre_go_live",
     "flag.rules.roles": "roles separados por coma",
     "flag.rules.hosts": "hosts separados por coma",
     "flag.rules.namespaces": "namespaces separados por coma",

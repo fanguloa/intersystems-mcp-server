@@ -183,6 +183,14 @@ class LogiGeneratorTests(unittest.TestCase):
         from isc_ai.logigen.catalog import TEMPLATE
         self.assertTrue(TEMPLATE.is_file())
 
+    def test_string_procedure_parameters_are_as_wide_as_string_columns(self):
+        # A subreport link binds a main column (e.g. a list of row ids) to the parameter: a narrow
+        # Precision would cut the value
+        generate(self.manifest)
+        root = ET.parse(self.output("Demo.cat.xml")).getroot()
+        widths = {p.findtext("Precision") for p in root.iter("ProcdureParameter") if p.findtext("SQLType") == "12"}
+        self.assertEqual(widths, {"32000"})
+
     def test_a_grouped_table_has_column_titles_once_and_a_heading_row_per_group(self):
         grouped = dict(COMPONENT, layouts=[{"type": "groupedTable", "groupBy": "SectionOrder", "groupTitle": "Section",
                                             "columns": [["Check", "Item", 0.5], ["Answer", "Detail", 0.5]]}])
@@ -269,18 +277,20 @@ class LogiGeneratorTests(unittest.TestCase):
         (self.root / "jreports" / "specs" / "Demo.json").write_text(json.dumps(signed), encoding="utf-8")
         self.assertFalse(generate(self.manifest).ok)
 
-    def test_a_table_note_is_a_second_line_inside_the_same_row_panel(self):
+    def test_a_table_note_is_a_second_detail_panel_below_the_row(self):
         noted = dict(COMPONENT, layouts=[{"type": "table", "columns": [["Item", "Item", 1.0]],
                                           "note": {"label": "Notes:", "column": "Detail", "indent": 0.2}}])
         (self.root / "jreports" / "specs" / "Items.json").write_text(json.dumps(noted), encoding="utf-8")
         self.assertTrue(generate(self.manifest).ok)
         root = ET.parse(self.output("Items.cls.xml")).getroot()
-        detail = root.find(".//BandedPagePanel/DetailPanel")
-        self.assertEqual([f.findtext("ColumnName") for f in detail.iter("DBField")], ["ITEM", "DETAIL"])
-        note = next(f for f in detail.iter("DBField") if f.findtext("ColumnName") == "DETAIL")
-        self.assertGreater(float(note.findtext("Y")), 0.0)
-        self.assertEqual(float(detail.findtext("Height")), 0.48)
-        self.assertIn("Notes:", [f.findtext("Text") for f in detail.iter("TextField")])
+        row, note_panel = root.findall(".//BandedPagePanel/DetailPanel")[:2]
+        self.assertEqual([f.findtext("ColumnName") for f in row.iter("DBField")], ["ITEM"])
+        self.assertEqual([f.findtext("ColumnName") for f in note_panel.iter("DBField")], ["DETAIL"])
+        note = next(note_panel.iter("DBField"))
+        self.assertEqual(float(note.findtext("Y")), 0.0)
+        self.assertEqual(float(row.findtext("Height")), 0.24)
+        self.assertEqual(float(note_panel.findtext("Height")), 0.24)
+        self.assertIn("Notes:", [f.findtext("Text") for f in note_panel.iter("TextField")])
 
     def test_a_section_compresses_without_records_and_carries_its_band_in_the_header(self):
         section = dict(COMPONENT, layouts=[{"type": "section", "title": "HOSPITAL STAY", "columns": 2,

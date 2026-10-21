@@ -22,7 +22,16 @@ from isc_ai.config import ConfigError
 RULES_FILENAME = "isc-ai.rules.json"
 RULES_VERSION = 1
 
-EXCEPTION_CAPABILITIES = frozenset({"code_write", "ensemble_control", "runner", "read"})
+EXCEPTION_CAPABILITIES = frozenset({"code_write", "ensemble_control", "runner", "read", "pre_go_live"})
+
+# "pre_go_live" lifts the production gate (READ, RUNTIME, runners and CODE WRITE)
+# on a production-flagged environment that is not yet in clinical use. Its scope
+# can never be implicit: hosts, namespaces and roles are mandatory. By default it
+# requires fresh evidence that the node is active; "requires_active_node": false
+# scopes it to a mirror backup node (RUNTIME/READ only, never CODE WRITE) and must
+# expire within _PRE_GO_LIVE_BACKUP_MAX_DAYS.
+_PRE_GO_LIVE_REQUIRED_KEYS = frozenset({"hosts", "namespaces", "roles", "active_node_evidence_namespace"})
+_PRE_GO_LIVE_BACKUP_MAX_DAYS = 7
 
 _RULES_TOP_LEVEL_KEYS = frozenset({"version", "packages", "exceptions", "$schema", "_comment"})
 _PACKAGE_GRANT_KEYS = frozenset({"prefix", "class", "document", "roles", "servers", "expires"})
@@ -239,6 +248,24 @@ def _parse_exception(item, index):
             f"{path}.runner_namespace",
         )
         _expect(capability == "runner", f"{path}.runner_namespace only applies to the 'runner' capability.")
+    if capability == "pre_go_live":
+        required_scope = _PRE_GO_LIVE_REQUIRED_KEYS
+        if requires_active_node is False:
+            required_scope = required_scope - {"active_node_evidence_namespace"}
+        missing_scope = required_scope - set(item)
+        _expect(not missing_scope, f"{path}: the 'pre_go_live' capability requires {sorted(missing_scope)}.")
+        unsupported = {"servers", "path_prefixes"} & set(item)
+        _expect(not unsupported,
+                f"{path}: the 'pre_go_live' capability does not support {sorted(unsupported)}; scope it with hosts.")
+        expiry_date = _parse_expiry_date(expires)
+        _expect(expiry_date is not None,
+                f"{path}.expires must be a valid YYYY-MM-DD date for the 'pre_go_live' capability.")
+        if requires_active_node is False:
+            # Backup-node configuration (RUNTIME/READ only; code writes keep requiring
+            # active-node evidence in the server). Always short-lived.
+            _expect(expiry_date <= datetime.date.today() + datetime.timedelta(days=_PRE_GO_LIVE_BACKUP_MAX_DAYS),
+                    f"{path}: a 'pre_go_live' exception without active-node evidence must expire within "
+                    f"{_PRE_GO_LIVE_BACKUP_MAX_DAYS} days.")
     return ExceptionRule(id=id_, label=label, ticket=ticket, expires=expires, capability=capability,
                          roles=roles, servers=servers, hosts=hosts, namespaces=namespaces,
                          path_prefixes=path_prefixes, requires_active_node=requires_active_node,

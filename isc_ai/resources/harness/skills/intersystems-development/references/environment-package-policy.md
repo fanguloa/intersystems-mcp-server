@@ -30,6 +30,8 @@ Read-only diagnosis still requires permitted tools/network/data scope. Arbitrary
 
 Every relaxation of these gates (direct HA-node writes, UAT write exceptions, LIVE operations, runner hosts, production reads) lives only in `<deployment>/isc-ai.rules.json` as an exception with a mandatory `expires` and `ticket`; an expired exception is inert. Inspect with `isc-ai rules list|check`. An agent may apply only narrowing edits (remove, shorten expiry); widening edits are plans a human applies with `isc-ai rules apply <fingerprint>`.
 
+The `pre_go_live` capability is the only one that lifts the production block itself (READ, RUNTIME, runners and CODE WRITE, untracked writes under CONTROLLED_ACTIVE included). It is reserved for a production-flagged environment that is not yet in clinical use, while it is being configured, and it requires explicit `roles`, `hosts` (configured direct HA nodes), `namespaces`, `production_read` on the server entry and fresh active-node evidence (reused for at most 30 s). Core/`Region` stay read-only (the package catalog still applies, so the deployment needs expiring LIVE-role grants), SUSPENDED CCR, CCR-tracked operations (checkout, undo, tracked save, CT GUID registration) and the canonical BASE CCR mutation stay blocked, data-mutating SQL is admitted, and every code write and runtime operation is audited. An untracked LIVE write never reaches Perforce: reconcile it with BASE/CCR before go-live, and remove the exception at go-live.
+
 ## Allowed-package catalog
 
 No wildcard is implicitly granted by examples, by the existence of source files, or by a

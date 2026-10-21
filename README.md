@@ -747,8 +747,16 @@ cerrado.
   `roles`/`servers` opcionales). `Custom.{SITE}` es la regla base (`{SITE}` = prefijo CCR
   del sitio). Sin vencimiento salvo que se indique `expires`.
 - `exceptions[]`: `id`, `label`, `ticket`, `expires` (**obligatorio**) y `capability`
-  (`code_write`, `ensemble_control`, `runner`, `read`) más su alcance (`roles`, `servers`,
+  (`code_write`, `ensemble_control`, `runner`, `read`, `pre_go_live`) más su alcance (`roles`, `servers`,
   `hosts`, `namespaces`, `path_prefixes`, `requires_active_node`). Vencida = inerte.
+- `pre_go_live`: levanta el bloqueo de producción (lectura, runtime, runners y escritura de
+  código) en un ambiente productivo que **aún no tiene uso clínico**. Exige `hosts`,
+  `namespaces`, `roles` y `active_node_evidence_namespace`; el host debe ser un nodo HA
+  directo con `production_read`, y cada operación pide evidencia fresca de nodo activo
+  (reutilizada 30 s). Siguen bloqueados el core/`Region` (catálogo), CCR `SUSPENDED`, las
+  operaciones trackeadas por CCR (checkout, undo, save con `ccr_id`, GUIDs de CT) y la
+  mutación CCR canónica de BASE. El SQL de datos queda admitido. Toda escritura y todo
+  runtime quedan en el audit de runtime.
 
 ```text
 isc-ai rules migrate [--apply]          mueve las claves legacy de config.json (con backup)

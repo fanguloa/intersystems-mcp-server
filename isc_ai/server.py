@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import base64
 import hashlib
+import time
 from pathlib import Path
 from isc_ai.ccr_discovery import (
     LocalPolicyError, active_node, discover_namespace, validate_namespace,
@@ -233,6 +234,16 @@ LIVE_WINDOW_AUDIT_FILE = "audit.jsonl"
 # A grant is issued per tool call after the gate passed; it only needs to cover
 # the runners of that single call.
 _LIVE_WINDOW_GRANT_TTL_S = 600
+# PRE-GO-LIVE: positive active-node evidence is reused only this long, so one tool
+# call does not query the mirror once per gate evaluation.
+_PRE_GO_LIVE_EVIDENCE_TTL_S = 30
+_PRE_GO_LIVE_NEGATIVE_TTL_S = 10
+_PRE_GO_LIVE_TRACKED_BLOCK = (
+    "PRE-GO-LIVE admits only untracked direct writes: CCR-tracked operations (checkout, undo, "
+    "tracked save, CT GUID registration) stay blocked on production targets, because LIVE "
+    "cannot commit them and they would create GUIDs and change rows there. Omit ccr_id; CCR "
+    "changes reach LIVE only by ItemSet promotion."
+)
 _LIVE_WINDOW_VALUE_MAX = 8192
 _LIVE_WINDOW_SENSITIVE_SETTING_RE = re.compile(r"pass|secret|token|credential|key", re.IGNORECASE)
 _LIVE_WINDOW_SETTING_NAME_RE = re.compile(r"%?[A-Za-z][A-Za-z0-9_]{0,127}")
@@ -1189,8 +1200,9 @@ class AtelierClient:
     # (ccr_discovery.discover_namespace) is informational only.
     # ------------------------------------------------------------------
 
-    def _production_gate_reason(self):
-        """Shared production block. Returns None when the target is non-production."""
+    def _static_production_gate_reason(self):
+        """Production block from configuration alone (flag, namespace marker, role).
+        Returns None when the target is non-production. Never consults exceptions."""
         self._validate_target()
         if getattr(self, "is_production", False):
             return "Blocked: the server is marked as production (is_production=true) in the configuration"
@@ -1201,6 +1213,117 @@ class AtelierClient:
         if role in self.policy.production_roles:
             return f"Blocked: environment '{role}' is production"
         return None
+
+    def _production_gate_reason(self):
+        """Shared production block. Returns None when the target is non-production, or
+        when an open PRE-GO-LIVE exception covers this production target right now."""
+        reason = self._static_production_gate_reason()
+        if reason is None:
+            return None
+        exception, _ = self._resolve_pre_go_live()
+        if exception is not None:
+            return None
+        return reason
+
+    # ------------------------------------------------------------------
+    # PRE-GO-LIVE gate (isc-ai.rules.json capability "pre_go_live"). Lifts the
+    # production block for a production-flagged environment that is not yet in
+    # clinical use: explicit ticket, expiry, hosts, namespaces and roles, a
+    # configured direct HA node, production_read and fresh active-node evidence.
+    # Core packages, the canonical BASE CCR mutation and SUSPENDED CCR stay blocked.
+    # ------------------------------------------------------------------
+
+    def _resolve_pre_go_live(self, for_code_write=False):
+        """(exception, reason) for the first open pre_go_live exception, or (None, reason).
+
+        An exception with requires_active_node=false (mirror backup configuration)
+        opens READ/RUNTIME without active-node evidence but never CODE WRITE."""
+        if not self.policy.configured:
+            return None, "PRE-GO-LIVE blocked: no project configuration loaded."
+        if self._static_production_gate_reason() is None:
+            return None, "PRE-GO-LIVE applies to production targets only."
+        if getattr(self, "production_read", False) is not True:
+            return None, "PRE-GO-LIVE blocked: the server entry needs production_read=true."
+        host = (self.host or "").lower()
+        if host not in {item.lower() for item in self.policy.direct_ha_nodes}:
+            return None, f"PRE-GO-LIVE blocked: host '{self.host}' is not a configured direct HA node."
+        candidates = self.policy.effective_capability_exceptions(
+            "pre_go_live", namespace=self.namespace, host=self.host, role=self._configured_role(),
+            today=_live_window_today())
+        if not candidates:
+            return None, "PRE-GO-LIVE blocked: no open pre_go_live exception for this host, namespace and role."
+        reason = None
+        for exception in candidates:
+            if exception.hosts is None or exception.namespaces is None or exception.roles is None:
+                reason = f"PRE-GO-LIVE '{exception.label}' blocked: incomplete scope."
+                continue
+            if not exception.requires_active_node:
+                if for_code_write:
+                    reason = (f"PRE-GO-LIVE '{exception.label}' is a backup-node exception: it admits "
+                              "READ and RUNTIME only, never CODE WRITE.")
+                    continue
+                return exception, (f"PRE-GO-LIVE '{exception.label}' (ticket {exception.ticket}, expires "
+                                   f"{exception.expires}) backup-node RUNTIME on '{self.host}'.")
+            if not exception.active_node_evidence_namespace:
+                reason = f"PRE-GO-LIVE '{exception.label}' blocked: incomplete scope."
+                continue
+            if self._pre_go_live_node_is_active(exception):
+                return exception, (f"PRE-GO-LIVE '{exception.label}' (ticket {exception.ticket}, expires "
+                                   f"{exception.expires}) on the ACTIVE node '{self.host}'.")
+            reason = (f"PRE-GO-LIVE '{exception.label}' blocked: no Interoperability jobs observed in "
+                      f"'{exception.active_node_evidence_namespace}' on '{self.host}' (mirror backup, stopped "
+                      "or evidence unavailable); use the active node.")
+        return None, reason
+
+    def _pre_go_live_node_is_active(self, exception):
+        """Fresh active-node evidence, reused for a few seconds within one tool call
+        (a single operation evaluates the gate several times). A negative result is
+        also kept briefly so an unreachable node does not stack query timeouts."""
+        key = (exception.id, exception.active_node_evidence_namespace, self.base_url)
+        cache = self.__dict__.setdefault("_pre_go_live_evidence", {})
+        observed = cache.get(key)
+        if observed is not None:
+            active, at = observed
+            ttl = _PRE_GO_LIVE_EVIDENCE_TTL_S if active else _PRE_GO_LIVE_NEGATIVE_TTL_S
+            if time.monotonic() - at <= ttl:
+                return active
+        evidence = exception.active_node_evidence_namespace
+        active = bool(active_node(evidence, lambda sql: self._read_metadata_query(sql, namespace=evidence)))
+        cache[key] = (active, time.monotonic())
+        return active
+
+    def _pre_go_live_open(self):
+        exception, _ = self._resolve_pre_go_live()
+        return exception is not None
+
+    def _role_admits_writes(self):
+        """Configured non-production role, or a production role under an open PRE-GO-LIVE."""
+        if self._configured_role() in self.policy.non_production_roles:
+            return True
+        return self._pre_go_live_open()
+
+    def _audit_pre_go_live_write(self, document_name, state, ccr_tracking):
+        """Fail-closed audit line for every code write admitted by PRE-GO-LIVE."""
+        exception, reason = self._resolve_pre_go_live(for_code_write=True)
+        if exception is None:
+            raise LocalPolicyError(reason)
+        try:
+            _append_runtime_audit({
+                "event": "pre_go_live_code_write",
+                "ts": _audit_timestamp(),
+                "exception_id": exception.id,
+                "ticket": exception.ticket,
+                "expires": exception.expires,
+                "host": self.host,
+                "path_prefix": self.path_prefix,
+                "namespace": self.namespace,
+                "role": self._configured_role(),
+                "document": document_name,
+                "ccr_state": state,
+                "ccr_tracking": ccr_tracking.strip() if isinstance(ccr_tracking, str) else None,
+            })
+        except Exception:
+            raise LocalPolicyError("PRE-GO-LIVE audit could not be written; code write blocked.") from None
 
     def _configured_role(self):
         return (getattr(self, "env_role", "") or "").strip().upper()
@@ -1225,7 +1348,7 @@ class AtelierClient:
         the READ gate only: every runner, RUNTIME, CCR and CODE WRITE gate evaluates
         _production_gate_reason independently and keeps blocking production.
         """
-        reason = self._production_gate_reason()
+        reason = self._static_production_gate_reason()
         if reason and getattr(self, "production_read", False) is True:
             return True, "Read allowed on production target by explicit production_read opt-in."
         if reason:
@@ -1257,7 +1380,8 @@ class AtelierClient:
         """Static environment route for code writes; None blocks before any runner.
 
         Returns "BASE" (origin of changes), "UAT_EXCEPTION" (a configured UAT write
-        exception: VIP or demonstrably active mirror node) or "UAT_PROMOTION"
+        exception: VIP or demonstrably active mirror node), "PRE_GO_LIVE" (an open
+        pre_go_live exception on a production role) or "UAT_PROMOTION"
         (sanctioned ItemSet promotion into the configured UAT VIP).
 
         Fail-closed: without a loaded project configuration the HA-node list and
@@ -1304,6 +1428,11 @@ class AtelierClient:
                                              "ACTIVE mirror node (production jobs observed).")
                 return None, (f"Direct HA node mutation blocked: node is not executing the production "
                               f"for '{exception.label}' (backup or stopped); use the active node or the configured VIP.")
+        if role in self.policy.production_roles:
+            exception, reason = self._resolve_pre_go_live(for_code_write=True)
+            if exception is not None:
+                return "PRE_GO_LIVE", reason
+            return None, reason
         if self._is_direct_ha_node():
             return None, "Direct HA node mutation blocked; use the configured canonical VIP."
         return None, "Environment has no verified direct-write route."
@@ -1316,7 +1445,7 @@ class AtelierClient:
             reason = self._production_gate_reason()
             if reason:
                 return False, reason
-            if self._configured_role() not in self.policy.non_production_roles:
+            if not self._role_admits_writes():
                 return False, "Code write requires an explicit configured non-production role."
         route, detail = self._code_write_route(promotion=promotion)
         if route is None:
@@ -1388,7 +1517,7 @@ class AtelierClient:
         reason = None if promotion else self._production_gate_reason()
         if reason:
             return False, reason
-        if not promotion and self._configured_role() not in self.policy.non_production_roles:
+        if not promotion and not self._role_admits_writes():
             return False, "Code write requires an explicit configured non-production role."
         if document_name is not None:
             self._validate_document_name(document_name)
@@ -1405,6 +1534,14 @@ class AtelierClient:
         state = guard.get("state") if isinstance(guard, dict) else None
         if state == "SUSPENDED":
             return False, "CCR SUSPENDED in the guard process; code write blocked."
+        if route == "PRE_GO_LIVE" and state in ("CONTROLLED_ACTIVE", "ABSENT"):
+            if require_controlled and state != "CONTROLLED_ACTIVE":
+                return False, "Operation requires CCR CONTROLLED_ACTIVE; ABSENT namespace blocked."
+            if isinstance(ccr_tracking, str) and ccr_tracking.strip():
+                return False, _PRE_GO_LIVE_TRACKED_BLOCK
+            self._audit_pre_go_live_write(document_name, state, ccr_tracking)
+            return True, (f"CCR {state}; PRE-GO-LIVE route, CCR tracking not required "
+                          f"(an untracked write does not reach Perforce). {detail}")
         if state == "CONTROLLED_ACTIVE":
             if route not in ("BASE", "PROMOTION"):
                 return False, "CCR CONTROLLED_ACTIVE: only BASE tracked changes or CCR promotion are admitted."
@@ -1441,6 +1578,8 @@ class AtelierClient:
         if not (isinstance(ccr_tracking, str) and ccr_tracking.strip()):
             raise LocalPolicyError("CCR-tracked operations require an explicit CCR reference.")
         self._require_code_write_route(promotion=promotion)
+        if not promotion and self._static_production_gate_reason() is not None:
+            raise LocalPolicyError(_PRE_GO_LIVE_TRACKED_BLOCK)
         code = "\n".join(self._GUARD_STATE_LINES + self._GUARD_REQUIRE_CONTROLLED_LINES) + "\n" + code_str
         if promotion:
             return self.execute_runtime_code(code, promotion=True)
@@ -1460,7 +1599,7 @@ class AtelierClient:
         reason = self._production_gate_reason()
         if reason:
             return False, reason
-        if self._configured_role() not in self.policy.non_production_roles:
+        if not self._role_admits_writes():
             return False, "Runtime operation requires an explicit configured non-production role."
         node_ok, node_reason = self._runtime_node_route_allowed()
         if not node_ok:
@@ -1488,7 +1627,7 @@ class AtelierClient:
             return False, f"{prefix} blocked: expires '{window.expires}' is not a valid YYYY-MM-DD date; window closed."
         if _live_window_today() > expiry_date:
             return False, f"{prefix} blocked: window expired on {window.expires} (local MCP host date)."
-        if self._production_gate_reason() is None:
+        if self._static_production_gate_reason() is None:
             return False, f"{prefix} blocked: the window applies to production targets only; it grants nothing here."
         if self.namespace.upper() not in (window.namespaces or frozenset()):
             return False, f"{prefix} blocked: namespace '{self.namespace}' is not listed in the window."
@@ -1616,6 +1755,18 @@ class AtelierClient:
             self._require_runtime_operation()
         runner_class = f"User.McpTmpRun{uuid.uuid4().hex[:12]}"
         self._require_ephemeral_runner(runner_class, promotion=promotion)
+        if not promotion and self._static_production_gate_reason() is not None:
+            # Only an open PRE-GO-LIVE gets here on a production target: record it first.
+            try:
+                _append_runtime_audit({
+                    "event": "pre_go_live_runtime", "ts": _audit_timestamp(), "run_id": runner_class,
+                    "host": self.host, "path_prefix": self.path_prefix, "namespace": self.namespace,
+                    "role": self._configured_role(),
+                    "code_sha256": hashlib.sha256(code_str.encode("utf-8")).hexdigest(),
+                    "code_length": len(code_str),
+                })
+            except Exception:
+                raise LocalPolicyError("PRE-GO-LIVE audit could not be written; runtime operation blocked.") from None
         if promotion:
             # Only this exact runner, for this call, passes the promotion runner check.
             self.__dict__["_promotion_runner"] = runner_class
@@ -1672,6 +1823,8 @@ class AtelierClient:
             if (class_name == runner_class and isinstance(grant, _LiveWindowGrant)
                     and grant.base_url == self.base_url):
                 return
+        if self._static_production_gate_reason() is not None and self._pre_go_live_open():
+            return
         if getattr(self, "is_production", False):
             raise LocalPolicyError("Ephemeral runner blocked on production targets.")
         namespace = self.namespace.upper()
@@ -1798,7 +1951,8 @@ class AtelierClient:
     def run_write_sql(self, sql_query, params=None, timeout=None):
         """Data-mutating SQL (CT tables). CODE WRITE gate without a cataloged
         document: blocked under CONTROLLED_ACTIVE (untracked) and under ABSENT
-        (no cataloged document), so it only succeeds if the catalog grows."""
+        (no cataloged document), so it only succeeds if the catalog grows. Under an
+        open PRE-GO-LIVE exception it is admitted (and audited) in both states."""
         self._require_code_write_same_process(document_name=None, ccr_tracking=None)
         return self._send_sql(sql_query, params, timeout)
 
