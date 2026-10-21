@@ -15,6 +15,7 @@ from isc_ai.ccr_discovery import (
 )
 from isc_ai import __version__
 from isc_ai import config as iris_mcp_config
+from isc_ai import feature_check
 from isc_ai.config import ConfigError, SitePolicy, STATE_DIR, LEGACY_STATE_DIR
 
 try:
@@ -4372,7 +4373,7 @@ class IRISMCPServer:
     # belong to exactly one category; the hermetic suite asserts the partition.
     READ_TOOLS = frozenset({
         "iris_query_sql", "iris_get_class", "iris_get_document", "iris_list_classes", "iris_get_event_logs",
-        "iris_describe_class", "iris_scan_namespace",
+        "iris_describe_class", "iris_scan_namespace", "iris_trakcare_feature_check",
         "iris_get_recent_messages", "iris_get_ensemble_trace", "iris_dump_global",
         "iris_ccr_status", "iris_ccr_namespace_status", "iris_list_namespaces",
         "iris_ccr_list_uncommitted", "iris_ccr_list_itemsets", "iris_ccr_can_upload",
@@ -5770,7 +5771,7 @@ class IRISMCPServer:
             },
             {
                 "name": "iris_ccr_download_load",
-                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Admitted in every configured environment (BASE, UAT, TEST, LIVE), on the VIP or a direct HA node (a mirror backup fails at its read-only database), always with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, an unconfigured role or any error block, even with load=false. It never loads arbitrary local files.",
+                "description": "CCR PROMOTION (its own gate): downloads an approved ItemSet from the central server by ServerItemSetID and, if load=true, loads it (LoadToOS + LoadToNS). verify_documents requires documents that already exist in UAT and makes it possible to observe that they changed relative to a previous snapshot, without proving equality against BASE or against the payload. Without verify_documents, success is explicitly unverified at the document level. Admitted in every configured environment (BASE, UAT, TEST, LIVE), on the VIP or a direct HA node (a mirror backup fails at its read-only database), always with the same-process CONTROLLED_ACTIVE guard embedded in the same runner that loads; SUSPENDED, ABSENT, an unconfigured role or any error block, even with load=false. It never loads arbitrary local files. After a successful load it reports, under feature_check, websys.Feature codes referenced by the loaded classes that are missing in the target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -5796,6 +5797,10 @@ class IRISMCPServer:
                             "description": "Non-empty list, without case-insensitive duplicates, of exact documents with a valid extension that must already exist in UAT. It takes snapshots before loading and checks afterwards that each document changed; it is accepted only with load=true."
                         },
                         "ccr_id": {"type": "string", "description": "CCR / Perforce job the ItemSet belongs to (e.g. 'ACHS1046'). WSDownload requires it together with a CCR access token (ccr-portal ccr_upload_token)."},
+                        "feature_check": {
+                            "type": "boolean",
+                            "description": "If true (the default) and the load succeeded, runs a fail-soft READ check: the classes of the loaded ItemSet are scanned for websys.Feature codes and any code missing in the target is reported as FEATURE_MISSING (websys.Feature does not travel in ItemSets). It never changes the load outcome and never registers anything."
+                        },
                         "token": {
                             "type": "string",
                             "description": "Optional session token for the download. Empty by default (download scoped to the environment)."
@@ -6034,7 +6039,107 @@ class IRISMCPServer:
         ]
         tools.extend(self._document_tools())
         tools.extend(self._dictionary_tools())
+        tools.extend(self._feature_tools())
         return {"tools": tools}
+
+    @staticmethod
+    def _feature_tools():
+        """READ-only TrakCare websys.Feature presence checks. No runner, no writes."""
+        server = {"type": "string", "description": "Server ID."}
+        namespace = {"type": "string", "description": "Optional namespace. If not specified, uses the one configured for the server, or 'USER' by default."}
+        return [
+            {
+                "name": "iris_trakcare_feature_check",
+                "description": (
+                    "READ check of TrakCare websys.Feature records. websys.Feature does not travel in CCR "
+                    "ItemSets, so code that checks a Feature can load and stay silently off. Scans the source "
+                    "of the given classes for Feature codes (IsFeatureEnabled, GetFeatureParam*, RegisterFeature "
+                    "and *FEATURE* class parameters), adds any explicit codes, and reports per code PRESENT or "
+                    "MISSING in the namespace plus whether DateFrom/DateTo cover today (a date hint, not "
+                    "IsFeatureEnabled). With reference_server_id it also reports presence in the reference and "
+                    "per parameter MATCH, DIFFERENT, MISSING_IN_TARGET or EXTRA_IN_TARGET. Parameter values are "
+                    f"never returned. Bounded to {feature_check.MAX_CLASSES} classes and "
+                    f"{feature_check.MAX_CODES} codes."),
+                "inputSchema": {"type": "object", "properties": {
+                    "server_id": server, "namespace": namespace,
+                    "classes": {"type": "array", "items": {"type": "string"},
+                                "description": "Class names without .cls (e.g. 'Custom.Site.Viewer.Lab') whose source is scanned."},
+                    "codes": {"type": "array", "items": {"type": "string"},
+                              "description": "Feature codes to check explicitly (e.g. 'SiteResultPdfLink')."},
+                    "reference_server_id": {"type": "string",
+                                            "description": "Optional configured server to compare against (typically BASE)."},
+                    "reference_namespace": {"type": "string",
+                                            "description": "Optional namespace of the reference server."},
+                }, "required": ["server_id"]},
+            },
+        ]
+
+    @staticmethod
+    def _validate_feature_check_arguments(arguments):
+        classes = arguments.get("classes", [])
+        codes = arguments.get("codes", [])
+        if not isinstance(classes, list) or not isinstance(codes, list):
+            raise LocalPolicyError("classes and codes must be arrays.")
+        if not classes and not codes:
+            raise LocalPolicyError("Provide at least one class or one Feature code.")
+        if len(classes) > feature_check.MAX_CLASSES or len(codes) > feature_check.MAX_CODES:
+            raise LocalPolicyError(
+                f"At most {feature_check.MAX_CLASSES} classes and {feature_check.MAX_CODES} codes per call.")
+        for name in classes:
+            if not feature_check.valid_class_name(name):
+                raise LocalPolicyError("classes must be plain non-core class names without .cls.")
+        for code in codes:
+            if not feature_check.valid_feature_code(code):
+                raise LocalPolicyError("codes must be plain Feature codes (letters, digits, '_' or '.').")
+        reference = arguments.get("reference_server_id")
+        if reference is not None and (not isinstance(reference, str) or not reference.strip()):
+            raise LocalPolicyError("reference_server_id must be a non-empty string when provided.")
+
+    def _feature_check_tool(self, client, server_id, arguments):
+        classes = list(dict.fromkeys(arguments.get("classes", [])))
+        references, unreadable, truncated = feature_check.scan_classes(client, classes)
+        for code in arguments.get("codes", []):
+            references.setdefault(code, [])
+        reference_client = None
+        reference_id = arguments.get("reference_server_id")
+        if reference_id:
+            _, reference_config = self._resolve_server_config(reference_id)
+            reference_ns = arguments.get("reference_namespace") or reference_config.get("namespace")
+            reference_client = self.get_client(reference_id, namespace_override=reference_ns)
+        record = feature_check.check_features(client, references, reference_client=reference_client)
+        record.update({"classes_scanned": classes[:feature_check.MAX_CLASSES],
+                       "classes_truncated": truncated, "unreadable": unreadable})
+        if reference_client is not None:
+            record["reference"] = {"server_id": reference_id, "namespace": reference_client.namespace}
+        output = (f"### websys.Feature check on {server_id} ({client.namespace})\n\n"
+                  + feature_check.render_markdown(record))
+        return {"structuredContent": record, "content": [{"type": "text", "text": output}]}
+
+    @staticmethod
+    def _post_load_feature_check(client, lines):
+        """Fail-soft READ check after a successful ItemSet load: which loaded classes
+        reference websys.Feature codes absent from the target. Never raises; never
+        changes the load outcome."""
+        try:
+            imported = next((line for line in lines if line.startswith("IMPORTED|")), None)
+            if imported is None:
+                raise ValueError("no IMPORTED record")
+            local_id = _parse_pipe_record(imported, "IMPORTED").get("local_id", "")
+            if not local_id.isdigit():
+                raise ValueError("malformed local ItemSet id")
+            rows = client.run_query(feature_check.ITEMSET_ITEMS_SQL, [int(local_id)])
+            paths = [next((v for k, v in row.items() if str(k).lower() == "itempath"), "") for row in rows or []]
+            classes = feature_check.itemset_paths_to_classes(paths)
+            references, unreadable, truncated = feature_check.scan_classes(client, classes)
+            record = feature_check.check_features(client, references)
+            record.update({"classes_scanned": classes[:feature_check.MAX_CLASSES],
+                           "classes_truncated": truncated, "unreadable": unreadable})
+            return record
+        except LocalPolicyError as exc:
+            return {"status": "FEATURE_CHECK_UNAVAILABLE", "reason": str(exc)}
+        except Exception:
+            return {"status": "FEATURE_CHECK_UNAVAILABLE",
+                    "reason": "the read-only check failed; details withheld"}
 
     @staticmethod
     def _dictionary_tools():
@@ -6546,6 +6651,11 @@ class IRISMCPServer:
                 limit = arguments.get("limit", 200)
                 if type(limit) is not int or not 1 <= limit <= 1000:
                     raise LocalPolicyError("limit must be an integer between 1 and 1000.")
+            if name == "iris_trakcare_feature_check":
+                self._validate_feature_check_arguments(arguments)
+            if name == "iris_ccr_download_load" and "feature_check" in arguments \
+                    and not isinstance(arguments.get("feature_check"), bool):
+                raise LocalPolicyError("feature_check must be a boolean.")
             if name == "iris_ccr_download_load" and "verify_documents" in arguments:
                 verify_documents = arguments.get("verify_documents")
                 if not verify_documents:
@@ -6885,6 +6995,9 @@ class IRISMCPServer:
                         output += f"\n_Result truncated at {limit}; ajusta `package_prefix` o `limit`._"
                 return {"structuredContent": {"package_prefix": package_prefix, "classes": rows},
                         "content": [{"type": "text", "text": output}]}
+
+            elif name == "iris_trakcare_feature_check":
+                return self._feature_check_tool(client, server_id, arguments)
                 
             elif name == "iris_get_event_logs":
                 limit = min(int(arguments.get("limit", 20)), 100)
@@ -7849,6 +7962,17 @@ class IRISMCPServer:
                         response["structuredContent"] = failure_state
                     return response
 
+                feature_record = None
+                if load and arguments.get("feature_check", True):
+                    feature_record = self._post_load_feature_check(client, lines)
+
+                def attach_feature_check(response):
+                    if feature_record is None:
+                        return response
+                    response["structuredContent"]["feature_check"] = feature_record
+                    response["content"][0]["text"] += "\n\n" + feature_check.render_markdown(feature_record)
+                    return response
+
                 if not verify_documents:
                     verification = {
                         "status": "LOAD_REPORTED_SUCCESS_UNVERIFIED",
@@ -7865,8 +7989,8 @@ class IRISMCPServer:
                         "✅ **LOAD_REPORTED_SUCCESS_UNVERIFIED**\n\n"
                         f"{explanation}\n\n{detail}"
                     )
-                    return {"structuredContent": verification,
-                            "content": [{"type": "text", "text": output}]}
+                    return attach_feature_check({"structuredContent": verification,
+                                                 "content": [{"type": "text", "text": output}]})
 
                 changed, unchanged, unreadable = [], [], []
                 for document in verify_documents:
@@ -7897,8 +8021,8 @@ class IRISMCPServer:
                         f"- **Unreadable**: {', '.join(f'`{name}`' for name in unreadable) or 'ninguno'}\n"
                         "- **NO automatic RETRY**."
                     )
-                    return {"isError": True, "structuredContent": verification,
-                            "content": [{"type": "text", "text": output}]}
+                    return attach_feature_check({"isError": True, "structuredContent": verification,
+                                                 "content": [{"type": "text", "text": output}]})
 
                 verification = {
                     "status": "POST_LOAD_CHANGE_OBSERVED",
@@ -7915,8 +8039,8 @@ class IRISMCPServer:
                     "BASE or against the ItemSet payload.\n\n"
                     f"- **Changed**: {', '.join(f'`{name}`' for name in changed)}"
                 )
-                return {"structuredContent": verification,
-                        "content": [{"type": "text", "text": output}]}
+                return attach_feature_check({"structuredContent": verification,
+                                             "content": [{"type": "text", "text": output}]})
 
             else:
                 raise ValueError(f"Unknown tool: {name}")
